@@ -37,7 +37,8 @@ export interface SpencerConfig {
   relay: string;
   http: { host: "127.0.0.1"; port: number };
   model: ModelConfig;
-  croc: { path: string; relay: string | null; pass: string | null; allowLocal: boolean };
+  /** `throttleUpload`: croc's --throttleUpload for sends (e.g. "500k"), null = unlimited. */
+  croc: { path: string; relay: string | null; pass: string | null; allowLocal: boolean; throttleUpload: string | null };
   mcpServers: Record<string, McpServerConfig>;
   policy: Policy;
 }
@@ -60,7 +61,7 @@ export function defaultConfig(): SpencerConfig {
     relay: "wss://spencer.pjalv.com/ws",
     http: { host: "127.0.0.1", port: 7420 },
     model: { provider: "anthropic", modelId: "claude-sonnet-5-5", apiKeyEnv: "ANTHROPIC_API_KEY" },
-    croc: { path: "croc", relay: null, pass: null, allowLocal: false },
+    croc: { path: "croc", relay: null, pass: null, allowLocal: false, throttleUpload: null },
     mcpServers: {},
     policy: { ...DEFAULT_POLICY },
   };
@@ -85,6 +86,9 @@ export function resolveConfig(raw: Partial<SpencerConfig> & Record<string, unkno
   if (process.env.SPENCER_PORT) cfg.http.port = Number(process.env.SPENCER_PORT);
   if (!Number.isInteger(cfg.http.port) || cfg.http.port < 0 || cfg.http.port > 65535) throw new Error("invalid http.port");
   if (!/^wss?:\/\//.test(cfg.relay)) throw new Error("relay must be a ws:// or wss:// URL");
+  if (cfg.croc.throttleUpload !== null && !/^\d+[kKmMgG]?$/.test(String(cfg.croc.throttleUpload))) {
+    throw new Error('croc.throttleUpload must look like "500k" (or null)');
+  }
   for (const [name, s] of Object.entries(cfg.mcpServers)) {
     if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) throw new Error(`invalid MCP server name: ${name}`);
     if (!("command" in s) && !("url" in s)) throw new Error(`MCP server ${name} needs command or url`);

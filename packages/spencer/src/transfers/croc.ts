@@ -9,8 +9,20 @@
  */
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { closeSync, copyFileSync, mkdirSync, openSync, readSync, writeSync } from "node:fs";
-import { basename, join } from "node:path";
+import {
+  closeSync,
+  copyFileSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readlinkSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
+import { basename, join, resolve, sep } from "node:path";
 
 export interface CrocExit {
   /** Process exit code (null when killed or failed to spawn). */
@@ -47,6 +59,11 @@ export interface CrocReceiveOptions extends CrocCommon {
 export interface CrocRunner {
   send(opts: CrocSendOptions): CrocJob;
   receive(opts: CrocReceiveOptions): CrocJob;
+  /**
+   * Kill croc processes a previous run of this daemon left behind (it was SIGKILLed or crashed, so its children
+   * were orphaned). Called once on start, before any transfer resumes. Returns the pids it killed.
+   */
+  reapOrphans?(): number[];
 }
 
 export const CROC_CODE_RE = /^\d{4}-[0-9a-f]{32}$/;
@@ -58,6 +75,13 @@ export interface RealCrocOptions {
   readyFallbackMs?: number;
   /** SIGKILL this long after SIGTERM. */
   killGraceMs?: number;
+  /** croc's `--throttleUpload` for senders (e.g. "500k"). */
+  throttleUpload?: string;
+  /**
+   * Record the pids of running croc processes in this file, so the next start can reap orphans (`reapOrphans`).
+   * `ownedDir`: only processes whose cwd or arguments are inside this directory (the data dir) are ever killed.
+   */
+  pidFile?: { path: string; ownedDir: string };
 }
 
 const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]/g;
@@ -80,11 +104,81 @@ function lastErrorLine(tail: string, secrets: string[]): string | undefined {
   return last ? redact(last, secrets).slice(0, 200) : undefined;
 }
 
+/**
+ * Whether `pid` is a live croc process that belongs to `ownedDir`, checked via /proc (Linux): argv[0] is a `croc`
+ * binary and its cwd or one of its arguments is inside `ownedDir`. A recycled pid fails the check. Without /proc
+ * nothing can be verified, so the answer is false.
+ */
+export function isOwnedCroc(pid: number, ownedDir: string): boolean {
+  if (!Number.isInteger(pid) || pid <= 1) return false;
+  const base = resolve(ownedDir);
+  const inside = (p: string) => p === base || p.startsWith(base + sep);
+  try {
+    const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+    if (!argv[0] || basename(argv[0]) !== "croc") return false;
+    let cwd = "";
+    try {
+      cwd = readlinkSync(`/proc/${pid}/cwd`);
+    } catch {
+      /* not ours to inspect */
+    }
+    return inside(cwd) || argv.some((a) => inside(a));
+  } catch {
+    return false;
+  }
+}
+
+/** Kills the croc orphans recorded in `pidFile` (see `RealCrocOptions.pidFile`) and removes the file. */
+export function reapCrocOrphans(pidFile: { path: string; ownedDir: string }): number[] {
+  let pids: number[];
+  try {
+    pids = readFileSync(pidFile.path, "utf8")
+      .split(/\s+/)
+      .filter(Boolean)
+      .map(Number);
+  } catch {
+    return [];
+  }
+  const killed: number[] = [];
+  for (const pid of pids) {
+    if (pid === process.pid || !isOwnedCroc(pid, pidFile.ownedDir)) continue;
+    try {
+      process.kill(pid, "SIGKILL");
+      killed.push(pid);
+    } catch {
+      /* already gone */
+    }
+  }
+  try {
+    unlinkSync(pidFile.path);
+  } catch {
+    /* gone */
+  }
+  return killed;
+}
+
 /** Spawns the croc binary at `path`. */
 export function realCrocRunner(path: string, options: RealCrocOptions = {}): CrocRunner {
   const readyGraceMs = options.readyGraceMs ?? 500;
   const readyFallbackMs = options.readyFallbackMs ?? 10_000;
   const killGraceMs = options.killGraceMs ?? 2000;
+  const pidFile = options.pidFile;
+  const live = new Set<number>();
+  /** Rewrites the pid file (atomically) with the croc processes running now. Best effort. */
+  const savePids = () => {
+    if (!pidFile) return;
+    try {
+      if (live.size === 0) {
+        unlinkSync(pidFile.path);
+        return;
+      }
+      const tmp = `${pidFile.path}.${process.pid}.tmp`;
+      writeFileSync(tmp, [...live].join("\n") + "\n", { mode: 0o600 });
+      renameSync(tmp, pidFile.path);
+    } catch {
+      /* the data dir is gone, or the file already was */
+    }
+  };
   const globalArgs = (o: CrocCommon): string[] => [
     "--yes",
     "--overwrite",
@@ -111,11 +205,17 @@ export function realCrocRunner(path: string, options: RealCrocOptions = {}): Cro
         resolve({ code: null, killed: false, error: `cannot start croc: ${(e as Error).message}` });
         return;
       }
+      const pid = child.pid;
+      if (pid !== undefined) {
+        live.add(pid);
+        savePids();
+      }
       let settled = false;
       const finish = (r: CrocExit) => {
         if (settled) return;
         settled = true;
         if (killTimer) clearTimeout(killTimer);
+        if (pid !== undefined && live.delete(pid)) savePids();
         resolve(r);
       };
       const onData = (d: Buffer) => {
@@ -166,7 +266,8 @@ export function realCrocRunner(path: string, options: RealCrocOptions = {}): Cro
         o.onReady();
       };
       const fallback = setTimeout(fire, readyFallbackMs);
-      const job = run([...globalArgs(o), "send", "--no-local", basename(o.file)], o, join(o.file, ".."), (all) => {
+      const throttle = options.throttleUpload ? ["--throttleUpload", options.throttleUpload] : [];
+      const job = run([...globalArgs(o), ...throttle, "send", "--no-local", basename(o.file)], o, join(o.file, ".."), (all) => {
         if (!ready && !graceTimer && all.includes("CROC_SECRET=")) graceTimer = setTimeout(fire, readyGraceMs);
       });
       void job.done.then(() => {
@@ -178,6 +279,9 @@ export function realCrocRunner(path: string, options: RealCrocOptions = {}): Cro
     },
     receive(o) {
       return run([...globalArgs(o), "--out", o.outDir], o, o.outDir);
+    },
+    reapOrphans() {
+      return pidFile ? reapCrocOrphans(pidFile) : [];
     },
   };
 }

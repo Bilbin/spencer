@@ -499,7 +499,9 @@ export class Daemon {
       peers: (ch) => channels.peers(ch),
       peerName: (ch, peerId) => channels.peerName(ch, peerId),
       crocPath: this.need("cfg").croc.path,
+      ...(this.need("cfg").croc.throttleUpload ? { crocThrottleUpload: this.need("cfg").croc.throttleUpload! } : {}),
       events: this.events,
+      log: this.log,
       ownerNote: (text) => {
         const a = this.s.agent;
         if (!a) {

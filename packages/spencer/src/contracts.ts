@@ -161,9 +161,13 @@ export interface TransferDeps {
   peers(ch: string): string[];
   peerName(ch: string, peerId: string): string | undefined;
   crocPath: string;
+  /** croc `--throttleUpload` for sends (config `croc.throttleUpload`), e.g. "500k". */
+  crocThrottleUpload?: string;
   events: EventSink;
   /** Short informational note for the owner conversation (never starts a model run). */
   ownerNote(text: string): void;
+  /** Diagnostic log line (not shown to the owner). */
+  log?: (msg: string) => void;
   now?: () => number;
 }
 

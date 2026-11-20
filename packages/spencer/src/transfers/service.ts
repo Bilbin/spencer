@@ -16,7 +16,7 @@ import { TransferStore } from "./store.ts";
 import type { TransferRow } from "./store.ts";
 
 export interface TransferServiceOptions {
-  /** croc implementation; defaults to realCrocRunner(deps.crocPath). */
+  /** croc implementation; defaults to realCrocRunner(deps.crocPath) with a pid file in the data dir. */
   runner?: CrocRunner;
   /** Delay before re-spawning after attempt `failedAttempt` failed. Default 1 s, 2 s, 4 s … capped at 30 s. */
   backoffMs?: (failedAttempt: number) => number;
@@ -80,7 +80,12 @@ function fmtBytes(n: number): string {
 
 export function createTransferService(deps: TransferDeps, options: TransferServiceOptions = {}): TransferService {
   const now = deps.now ?? Date.now;
-  const runner = options.runner ?? realCrocRunner(deps.crocPath);
+  const runner =
+    options.runner ??
+    realCrocRunner(deps.crocPath, {
+      pidFile: { path: join(deps.dataDir, "croc.pids"), ownedDir: deps.dataDir },
+      ...(deps.crocThrottleUpload ? { throttleUpload: deps.crocThrottleUpload } : {}),
+    });
   const backoff = options.backoffMs ?? defaultBackoff;
   const sweepIntervalMs = options.sweepIntervalMs ?? 30_000;
   const noRelayRetryMs = options.noRelayRetryMs ?? 5000;
@@ -605,6 +610,14 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
   return {
     async start() {
       stopped = false;
+      // croc children of a previous run that died without stopping them (SIGKILL, crash) would keep sending or
+      // writing into incoming/; kill them before anything resumes.
+      try {
+        const reaped = runner.reapOrphans?.() ?? [];
+        if (reaped.length) deps.log?.(`killed ${reaped.length} orphaned croc process(es) from a previous run: ${reaped.join(", ")}`);
+      } catch {
+        /* best effort */
+      }
       for (const d of [dirs.outgoing, dirs.incoming, dirs.quarantine]) ensureDir(d);
       sweep();
       removeOrphanDirs();

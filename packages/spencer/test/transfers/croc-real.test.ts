@@ -4,11 +4,12 @@ import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createServer, connect } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { realCrocRunner } from "../../src/transfers/index.ts";
+import { isOwnedCroc, reapCrocOrphans, realCrocRunner } from "../../src/transfers/index.ts";
 import { pair, waitFor } from "./harness.ts";
 import type { TNode } from "./harness.ts";
 
@@ -170,5 +171,61 @@ describe("transfers (real croc)", { skip: haveCroc ? false : "croc binary missin
       await p.close();
     }
     assert.deepEqual(crocChildren(relay?.pid), [], "no croc processes left");
+  });
+
+  it("reapCrocOrphans kills only croc processes recorded in the pid file that belong to the data dir", { skip: existsSync("/proc/self/cmdline") ? false : "needs /proc" }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "spencer-reap-"));
+    const procs: ChildProcess[] = [];
+    const exited = (p: ChildProcess) => new Promise((r) => (p.exitCode !== null || p.signalCode !== null ? r(null) : p.once("exit", r)));
+    try {
+      const owned = join(dir, "data");
+      mkdirSync(join(owned, "outgoing"), { recursive: true });
+      const ports = await freePorts(2);
+      // An orphan stand-in: a croc that runs until killed, with its cwd in the data dir (like `croc send`).
+      const mine = spawn(CROC, ["--pass", "x", "relay", "--ports", ports.join(",")], { cwd: join(owned, "outgoing"), stdio: "ignore" });
+      // Not croc, but inside the data dir.
+      const notCroc = spawn("sleep", ["30"], { cwd: owned, stdio: "ignore" });
+      procs.push(mine, notCroc);
+      await waitFor(() => mine.pid !== undefined && notCroc.pid !== undefined, "spawned");
+      await waitFor(() => isOwnedCroc(mine.pid!, owned), "croc visible in /proc");
+      assert.equal(isOwnedCroc(notCroc.pid!, owned), false, "not croc");
+      assert.equal(isOwnedCroc(relay!.pid!, owned), false, "croc outside the data dir");
+      assert.equal(isOwnedCroc(process.pid, owned), false);
+      const pidFile = join(owned, "croc.pids");
+      writeFileSync(pidFile, [mine.pid, notCroc.pid, relay!.pid, process.pid, 999_999_999, "junk"].join("\n"));
+      assert.deepEqual(reapCrocOrphans({ path: pidFile, ownedDir: owned }), [mine.pid]);
+      await exited(mine);
+      assert.equal(mine.signalCode, "SIGKILL");
+      assert.equal(notCroc.exitCode === null && notCroc.signalCode === null, true, "sleep untouched");
+      assert.equal(relay!.exitCode, null, "the test's croc relay untouched");
+      assert.equal(existsSync(pidFile), false, "pid file removed");
+      assert.deepEqual(reapCrocOrphans({ path: pidFile, ownedDir: owned }), [], "no file: nothing to do");
+    } finally {
+      for (const p of procs) {
+        p.kill("SIGKILL");
+        await exited(p);
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the runner records live croc pids in the pid file and removes them on exit", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "spencer-pids-"));
+    try {
+      const pidFile = join(dir, "croc.pids");
+      const runner = realCrocRunner(CROC, { pidFile: { path: pidFile, ownedDir: dir } });
+      const out = join(dir, "incoming");
+      mkdirSync(out);
+      // Nobody sends: the receiver keeps retrying the room until killed.
+      const job = runner.receive({ outDir: out, code: "1234-" + "ab".repeat(16), relay: relayAddr, pass });
+      await waitFor(() => existsSync(pidFile), "pid file written");
+      const pid = Number(readFileSync(pidFile, "utf8").trim());
+      assert.ok(Number.isInteger(pid) && pid > 1);
+      job.kill();
+      await job.done;
+      assert.equal(existsSync(pidFile), false, "pid file removed when nothing runs");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
