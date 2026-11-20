@@ -1,0 +1,66 @@
+# Spencer message relay (PROTOCOL §4).
+# Install:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin spencer-relay
+#   sudo install -D -m 0644 dist/relay/relay.mjs /opt/spencer-relay/relay.mjs
+#   sudo install -D -m 0640 -o root -g spencer-relay deploy/relay.env.example /etc/spencer-relay/relay.env  # then edit
+#   sudo install -m 0644 deploy/spencer-relay.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now spencer-relay
+[Unit]
+Description=Spencer message relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=spencer-relay
+Group=spencer-relay
+EnvironmentFile=/etc/spencer-relay/relay.env
+# DB lives at /var/lib/spencer-relay/relay.sqlite (SPENCER_RELAY_DB, or $STATE_DIRECTORY/relay.sqlite if unset)
+StateDirectory=spencer-relay
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/spencer-relay
+ExecStart=/usr/bin/node /opt/spencer-relay/relay.mjs
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+KillSignal=SIGTERM
+# Keep V8's heap well under the cgroup limit so GC kicks in before the OOM killer.
+Environment=NODE_OPTIONS=--max-old-space-size=128
+Environment=NODE_ENV=production
+MemoryMax=192M
+MemoryHigh=160M
+TasksMax=64
+LimitNOFILE=16384
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateUsers=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# V8 needs W+X memory for its JIT, so MemoryDenyWriteExecute stays off.
+MemoryDenyWriteExecute=no
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

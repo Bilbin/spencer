@@ -1,0 +1,60 @@
+# Self-hosted croc relay for Spencer file transfers (PROTOCOL §6), pinned croc v10.3.1.
+# Note: `croc relay` binds 0.0.0.0 on all listed ports regardless of --host.
+# Install:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin croc-relay
+#   sudo install -D -m 0755 .bin/croc /opt/croc/croc     # scripts/fetch-croc.sh verifies the sha256
+#   sudo install -D -m 0640 -o root -g croc-relay deploy/croc-relay.env.example /etc/croc-relay/croc-relay.env  # set CROC_PASS
+#   sudo install -m 0644 deploy/croc-relay.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now croc-relay
+# CROC_PASS must equal SPENCER_CROC_PASS in /etc/spencer-relay/relay.env.
+[Unit]
+Description=croc relay for Spencer file transfers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=croc-relay
+Group=croc-relay
+# Provides CROC_PASS, which croc reads for its global --pass flag (keeps it out of argv / ps).
+EnvironmentFile=/etc/croc-relay/croc-relay.env
+ExecStart=/opt/croc/croc relay --ports 9009,9010,9011,9012,9013
+Restart=on-failure
+RestartSec=2s
+WorkingDirectory=/
+MemoryMax=128M
+MemoryHigh=112M
+TasksMax=128
+LimitNOFILE=16384
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateUsers=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
