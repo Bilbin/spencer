@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PiRuntime, OWNER_KEY, type ToolSpec } from "../../src/agent/runtime.ts";
@@ -113,6 +113,26 @@ test("runtime: a tool runs with its conversation key and is refused elsewhere", 
     assert.deepEqual(calls, [OWNER_KEY]);
   } finally {
     await rt.close();
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runtime: pi.sqlite and its -wal/-shm are owner-only (0600), even under a permissive umask", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spencer-rt-perm-"));
+  const db = new DatabaseSync(join(dir, "core.db"));
+  const old = process.umask(0o022);
+  let rt: PiRuntime | undefined;
+  try {
+    rt = await openRuntime(dir, db, []);
+    await rt.configure(OWNER_KEY, { tools: [], instructions: "You are a test." });
+    await rt.appendNote(OWNER_KEY, { kind: "spencer.note", data: { text: "x", ts: 1 } });
+    const files = readdirSync(dir).filter((f) => f.startsWith("pi.sqlite"));
+    assert.ok(files.includes("pi.sqlite"));
+    for (const f of files) assert.equal(statSync(join(dir, f)).mode & 0o777, 0o600, f);
+  } finally {
+    process.umask(old);
+    await rt?.close();
     db.close();
     rmSync(dir, { recursive: true, force: true });
   }

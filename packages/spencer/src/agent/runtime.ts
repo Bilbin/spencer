@@ -13,6 +13,7 @@
  *    configured for (defense in depth on top of pi-durable's own filtering).
  */
 import type { DatabaseSync } from "node:sqlite";
+import { chmodSync, closeSync, existsSync, openSync } from "node:fs";
 import { homedir } from "node:os";
 import { BACKGROUND_CONTEXT, withCancel } from "@earendil-works/chord/context";
 import type { Models, Message, AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
@@ -162,7 +163,10 @@ export class PiRuntime implements AgentRuntime {
     this.remember(OWNER_KEY, ROOT_CONVERSATION_ID);
     this.registry.install(this.extension);
     this.registry.install(CodingTools);
+    // The transcript holds private conversations: owner-only. SQLite creates -wal/-shm with the main file's mode.
+    restrictFile(this.opts.file);
     const storage = await openNodeSqliteStorage(this.opts.file);
+    restrictFile(this.opts.file);
     this.harness = await Harness.open(
       storage,
       {
@@ -429,6 +433,18 @@ export class PiRuntime implements AgentRuntime {
 }
 
 // ------------------------------------------------------------------ helpers
+
+/** Creates `file` (empty) with mode 0600 if missing, and chmods it and its -wal/-shm/-journal files to 0600. */
+export function restrictFile(file: string): void {
+  if (!existsSync(file)) closeSync(openSync(file, "a", 0o600));
+  for (const f of [file, `${file}-wal`, `${file}-shm`, `${file}-journal`]) {
+    try {
+      if (existsSync(f)) chmodSync(f, 0o600);
+    } catch {
+      /* best effort */
+    }
+  }
+}
 
 function sameList(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i]);
