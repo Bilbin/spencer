@@ -30,7 +30,8 @@ interface CrocCommon {
   code: string;
   relay: string;
   pass: string;
-  onProgress?(percent: number): void;
+  /** Progress as a fraction 0–1 (parsed from croc's percentage bar). */
+  onProgress?(fraction: number): void;
 }
 
 export interface CrocSendOptions extends CrocCommon {
@@ -127,7 +128,7 @@ export function realCrocRunner(path: string, options: RealCrocOptions = {}): Cro
           while ((m = PROGRESS_RE.exec(s))) pct = Number(m[1]);
           if (pct >= 0 && pct <= 100 && pct !== lastPct) {
             lastPct = pct;
-            o.onProgress(pct);
+            o.onProgress(pct / 100);
           }
         }
         onOutput?.(tail);
@@ -319,7 +320,7 @@ export function fakeCrocRunner(): FakeCrocRunner {
             fake.corruptNext--;
             corruptFirstByte(dest);
           }
-          o.onProgress?.(100);
+          o.onProgress?.(1);
           fake.transfers++;
           s.finish({ code: 0, killed: false });
           if (fake.hangAfterWrite) return; // stays alive until killed

@@ -132,6 +132,9 @@ describe("transfers (real croc)", { skip: haveCroc ? false : "croc binary missin
       assert.equal(sha(readFileSync(atB.path!)), sha(fa.data));
       assert.equal(sha(readFileSync(atA.path!)), sha(fb.data));
       assert.equal(statSync(atB.path!).mode & 0o777, 0o600);
+      // progress is a fraction 0–1 everywhere (PROTOCOL §8)
+      const ps = [...p.A.events, ...p.B.events].map((e) => e.progress).filter((x) => x !== undefined);
+      assert.ok(ps.length > 0 && ps.every((x) => x >= 0 && x <= 1), `progress values: ${ps.join(",")}`);
       t.diagnostic(`attempts used: A→B ${p.A.s.get(ta.tid)!.attempt}, B→A ${p.B.s.get(tb.tid)!.attempt}`);
       // the croc code / relay password never show up in what the daemon exposes
       const dump = JSON.stringify([p.A.events, p.B.events, p.A.notes, p.B.notes]);

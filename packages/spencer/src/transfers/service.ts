@@ -129,7 +129,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
     if (r.reason) t.reason = r.reason;
     if (r.error) t.error = r.error;
     if (r.path) t.path = r.path;
-    const p = r.state === "completed" ? 100 : progress.get(r.tid);
+    const p = r.state === "completed" ? 1 : progress.get(r.tid);
     if (p !== undefined) t.progress = p;
     return t;
   }
@@ -236,10 +236,11 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
     return next;
   }
 
-  function setProgress(tid: string, pct: number): void {
-    progress.set(tid, pct);
+  /** `fraction`: 0–1 (the API's `Transfer.progress` unit). */
+  function setProgress(tid: string, fraction: number): void {
+    progress.set(tid, fraction);
     const t = now();
-    if (pct < 100 && t - (lastProgressEmit.get(tid) ?? 0) < 500) return;
+    if (fraction < 1 && t - (lastProgressEmit.get(tid) ?? 0) < 500) return;
     lastProgressEmit.set(tid, t);
     const r = store.get(tid);
     if (r && NON_TERMINAL.has(r.state)) emitRow(r);
@@ -317,7 +318,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
     const r = store.get(tid);
     if (!r || r.state !== "sending" || r.attempt !== attempt) return;
     if (exit.code === 0) {
-      setProgress(tid, 100); // bytes handed over; completion waits for file_ack
+      setProgress(tid, 1); // bytes handed over; completion waits for file_ack
       return;
     }
     retrySend(tid, attempt, exit.error ?? `croc exited with code ${exit.code}`);

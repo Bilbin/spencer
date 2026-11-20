@@ -95,6 +95,7 @@ export interface Transfer {
   initiatedBy: TransferInitiator;
   /** Free-text reason given by whoever initiated it (e.g. the peer agent's justification). */
   reason?: string;
+  /** Fraction 0–1 while sending/receiving (1 once completed); absent before croc reports anything. */
   progress?: number;
   error?: string;
   /** Local path: staged copy (out) or quarantined file (in, once completed). */

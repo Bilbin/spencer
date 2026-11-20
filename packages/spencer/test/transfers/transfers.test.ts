@@ -62,7 +62,7 @@ describe("transfers (fake croc)", () => {
     assert.equal(got.path, join(B.dataDir, "quarantine", t.tid, "report final.pdf"));
     assert.equal(sha(readFileSync(got.path!)), t.sha256);
     assert.equal(statSync(got.path!).mode & 0o777, 0o600);
-    assert.equal(got.progress, 100);
+    assert.equal(got.progress, 1);
     // sender cleaned its staged copy, recipient its incoming dir
     assert.equal(existsSync(join(A.dataDir, "outgoing", t.tid)), false);
     assert.equal(existsSync(join(B.dataDir, "incoming", t.tid)), false);

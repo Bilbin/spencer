@@ -44,9 +44,10 @@ function initiatorLine(t) {
   }
 }
 
+/** `Transfer.progress` is a fraction 0–1 (PROTOCOL §8). */
 function progressFraction(p) {
   if (typeof p !== "number" || !Number.isFinite(p)) return undefined;
-  return p > 1 ? Math.min(p / 100, 1) : Math.max(p, 0);
+  return Math.min(Math.max(p, 0), 1);
 }
 
 async function act(t, action) {
