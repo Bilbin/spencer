@@ -5,3 +5,5 @@ dist/
 *.sqlite
 *.sqlite-*
 .env
+result
+result-*
