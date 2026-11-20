@@ -180,8 +180,11 @@ Terminal: `completed | denied | declined | failed | expired | cancelled`
    sends skip straight to `offered`. Peer-initiated sends **always** need approval.
 2. **Approve**: enqueue `file_offer` (expires in 24 h by default) → `offered`. **Deny** → `denied` and delete the staged copy.
 3. On `file_accept`: unseal the code → `sending`, with `attempt = 1`. Spawn
-   `croc --yes --overwrite --disable-clipboard --relay R --pass P send --no-local --code CODE <staged file>`.
-   When croc reports it is waiting (prints the code, or about 1 s after spawn), enqueue `file_ready {attempt}`.
+   `croc --yes --overwrite --disable-clipboard --relay R --pass P send --no-local <staged file>` with env
+   `CROC_SECRET=CODE`. croc v10 refuses `--code` on Linux, so **both sides pass the code only through
+   `CROC_SECRET`**, and it never appears in argv or `ps`. When croc prints the receive instructions (its
+   stdout/stderr contains `CROC_SECRET=`), or about 1.5 s after spawn, enqueue `file_ready {attempt}`.
+   The sender's croc exits 0 after a successful transfer.
 4. On `file_retry {attempt}` matching the current attempt, or croc exiting with an error before the ack:
    kill croc, `attempt++`, back off, and spawn again with `file_ready {attempt}`. At most 5 attempts → `failed` (+ `file_cancel`).
 5. On `file_ack ok:true` → `completed`, delete the staged copy. On `ok:false` → `failed`.
