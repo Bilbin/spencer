@@ -81,7 +81,8 @@ The body schema is validated after decryption (`parseBody`). Unknown `type`s are
 type Body =
   | { type: "hello"; name: string; about?: string; agent: string }       // e.g. agent "spencer/0.1"
   | { type: "chat"; text: string; hop: number; by: "human" | "agent";
-      replyTo?: string; mentions?: string[] }                           // mentions = identity ids
+      replyTo?: string; mentions?: string[];                            // mentions = identity ids
+      final?: true }                                                    // end of the exchange, see below
   | { type: "file_offer";  tid: string; to: string; name: string; size: number; sha256: string; expiresAt: number }
   | { type: "file_accept"; tid: string; to: string; sealed: string }    // sealed croc code, see §6
   | { type: "file_decline"; tid: string; to: string; reason?: string }
@@ -99,6 +100,11 @@ type Body =
 
 - `hop`: 0 for a message the owner (human) typed or told their Spencer to send. An automatic
   reply carries `incoming.hop + 1`.
+- `final`: the sender closes the exchange and expects no answer (the channel model ended its answer with `[END]`,
+  or the owner declined a request). A receiver never auto-replies to an *agent* message marked final (§7.2); on a
+  `by: "human"` message it is ignored. Only `true` is meaningful; `false` is dropped, any other value makes the body
+  invalid. Spencers that predate the field drop it while parsing (`parseBody` keeps only known fields), so they treat
+  the message as an ordinary chat; it stays backward compatible.
 - `by`: `"human"` means the owner typed it in the UI. `"agent"` means Spencer's model wrote it.
 - `to` on `file_*`: the single recipient identity. Other members ignore the message.
 - `tid`: transfer id, 16 random bytes b64u, chosen by the sender.
@@ -242,23 +248,43 @@ Terminal: `completed | declined | failed | expired | cancelled`
   - `standard` (default): peer messages are *untrusted data* (`<peer_message untrusted="true">`). Only the MCP tools
     in `allowedMcpTools`. Anything else goes through `ask_owner`: a request card in the owner chat with
     Approve / Deny. Approve submits an owner message ("I approve this request …") to the owner conversation, which does
-    the task with its full tools and reports back with `send_message`. Deny sends "My owner declined …" at
-    `hop = maxHops`, so the peer's agent doesn't answer it.
+    the task with its full tools and reports back with `send_message`. Deny sends "My owner declined …" with
+    `final: true` and `hop = 4` (the cap of Spencers that predate `final`), so the peer's agent doesn't answer it.
   - `full`: every MCP tool; peer messages are wrapped as `<peer_message trust="full">`; outgoing files in the
     channel need no approval (whoever asked).
   - Each MCP call made from a channel conversation leaves an audit note in the owner chat.
 
-### 7.2 Routing an incoming chat (`decideReply`)
+### 7.2 Routing an incoming chat (`decideReply`) and the loop guard
 The message is always written to the channel conversation as context (a `write` entry with model text).
-It triggers a model run (`submit input`, `requestId = msg.id`) only if **all** of these hold:
-1. `channel.autoReply` is on (default on).
-2. `hop < policy.maxHops` (default 4).
-3. Direct channel, **or** a group where `mentions` contains my id or the text contains `@<my name>` (case-insensitive).
-4. The per-channel rate limit allows it: `policy.repliesPerMinute` (6) and `policy.repliesPerHour` (60).
+It triggers a model run (`submit input`, `requestId = msg.id`) only if **all** of these hold, checked in this order
+(the first that fails becomes the message's `note`):
+1. `channel.autoReply` is on (default on). Else `"auto-reply off"`.
+2. Not an agent message marked `final`. Else `"conversation ended"`.
+3. The hop cap for the channel's trust level allows it: `hop < cap`, where the cap is `policy.maxHops` (default 8) in
+   standard trust and `policy.maxHopsFullTrust` (default 0) in full trust. A cap of 0 means no cap. Else `"hop cap"`.
+4. Direct channel, **or** a group where `mentions` contains my id or the text contains `@<my name>` (case-insensitive).
+   Else `"not addressed"`.
+5. The channel's turn budget allows it. Standard trust: `policy.repliesPerMinute` (6) and `policy.repliesPerHour` (60);
+   full trust: `policy.repliesPerMinuteFullTrust` (20) and `policy.repliesPerHourFullTrust` (200). Else `"rate limited"`.
 
 The answer becomes `chat {hop: in.hop+1, by:"agent", replyTo: in.id, mentions:[in.from]}`, unless the
-trimmed answer is `NO_REPLY`. A crash between the answer and the enqueue is covered by the
-`pending_replies` table plus a deterministic reply key, so the reply is enqueued exactly once.
+trimmed answer is `NO_REPLY` (nothing is sent). If the answer ends with the marker `[END]` (on its own line or at the
+end of the last line), the marker is removed and the chat carries `final: true`; an answer that is only `[END]` sends
+nothing. A crash between the answer and the enqueue is covered by the `pending_replies` table plus a deterministic
+reply key, so the reply is enqueued exactly once.
+
+**Why three layers.** Two agents working on a task should be able to go back and forth for as long as the work takes,
+without trading acknowledgements forever and without a peer being able to run up your model bill.
+- *End signal* (cooperative): NO_REPLY and `[END]`/`final` let well-behaved agents stop politely. The channel
+  instructions tell the model when to use them.
+- *Hop cap* (cooperative): `hop` counts the agent-only messages since a human last spoke, because every human message
+  (and every message the owner's Spencer sends on its owner's behalf) starts again at 0. So the cap resets whenever a
+  person on either side speaks. Peers report their own hop, so this only bounds honest Spencers (including old ones,
+  whose cap is 4). Full-trust channels have no hop cap by default.
+- *Turn budget* (local): a sliding per-channel window of automatic replies, counted by this Spencer and not by peers.
+  This is the protection that holds against a misbehaving or malicious peer. It refills when *my* side speaks in the
+  channel (my owner types there, or my owner's Spencer sends there with `send_message`); a peer cannot refill it, even
+  by claiming `by: "human"`. The window lives in memory, so a restart starts with a full budget.
 
 ### 7.3 Owner notification
 When a peer message replies to a message the owner conversation sent, it is appended to the owner
@@ -306,7 +332,9 @@ interface ChannelMessage { id: string; ch: string; from: string; fromName?: stri
   ts: number; seq?: number; type: string; text?: string; hop?: number; by?: "human"|"agent";
   replyTo?: string; mentions?: string[];   // mentions: identity ids
   status: "pending"|"sent"|"received"|"failed";   // failed: the relay permanently rejected our message (see note); not retried
-  note?: string;   // why an incoming chat got no reply: "not addressed", "hop cap", "rate limited", "auto-reply off"
+  final?: boolean; // the sender closed the exchange (§3.1)
+  note?: string;   // why an incoming chat got no reply: "not addressed", "hop cap", "rate limited", "auto-reply off",
+                   // "conversation ended"
   origin?: "human"|"owner-agent"|"agent-reply"|"peer" }
 interface Transfer { tid: string; ch: string; direction: "out"|"in"; peer: string; peerName?: string;
   name: string; size: number; sha256: string; state: string; attempt: number; initiatedBy: "owner"|"peer-agent"|"owner-agent"|"peer";
@@ -336,7 +364,8 @@ interface McpServer { name: string; transport: "stdio"|"http"; status: "connecti
     "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] },
     "remote": { "url": "https://example.com/mcp", "headers": {} }
   },
-  "policy": { "maxHops": 4, "repliesPerMinute": 6, "repliesPerHour": 60,
+  "policy": { "maxHops": 8, "maxHopsFullTrust": 0, "repliesPerMinute": 6, "repliesPerHour": 60,
+    "repliesPerMinuteFullTrust": 20, "repliesPerHourFullTrust": 200,
     "autoAcceptIncomingFiles": true, "maxIncomingFileBytes": 536870912,
     "requireApprovalForOutgoingFiles": true, "ownerCodingTools": true, "transferTtlHours": 24,
     "maxTransferAttempts": 5 }

@@ -11,6 +11,11 @@ export type ChatBody = {
   by: "human" | "agent";
   replyTo?: string;
   mentions?: string[];
+  /**
+   * The sender ends the exchange: no answer expected. Receivers do not auto-reply to an agent message marked final.
+   * Older Spencers ignore the field (parseBody keeps only known fields), so it is backward compatible.
+   */
+  final?: boolean;
 };
 export type FileOfferBody = {
   type: "file_offer";
@@ -78,9 +83,11 @@ export function parseBody(raw: unknown): Body | null {
       if (b.replyTo !== undefined && !isB64uId(b.replyTo)) return null;
       if (b.mentions !== undefined && (!Array.isArray(b.mentions) || b.mentions.length > 64 || !b.mentions.every(isId32)))
         return null;
+      if (b.final !== undefined && typeof b.final !== "boolean") return null;
       const out: ChatBody = { type: "chat", text: b.text, hop: b.hop, by: b.by };
       if (b.replyTo !== undefined) out.replyTo = b.replyTo as string;
       if (b.mentions !== undefined) out.mentions = b.mentions as string[];
+      if (b.final === true) out.final = true;
       return out;
     }
     case "status": {

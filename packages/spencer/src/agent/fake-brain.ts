@@ -5,6 +5,7 @@
  * Channel conversations (recognized by the `notify_owner` tool being offered):
  *   - `Echo from <myName>: <last peer message text>`
  *   - text containing `NO_REPLY_TEST` → `NO_REPLY`
+ *   - text containing `FINAL_TEST` → `Bye from <myName>` plus the `[END]` marker (a closing message)
  *   - text containing `SLOW_REPLY_TEST` → the answer comes after `SLOW_REPLY_MS` (for crash tests that run the
  *     daemon as a child process, where `hooks.gate` is out of reach)
  *   - `please send file <path>` → tool call `propose_file_send`, then `Asked my owner to approve sending <path>`
@@ -136,6 +137,7 @@ export function peerText(s: string): string {
 function channelAnswer(raw: string, myName: string): AssistantMessage {
   const t = peerText(raw);
   if (t.includes("NO_REPLY_TEST")) return text("NO_REPLY");
+  if (t.includes("FINAL_TEST")) return text(`Bye from ${myName}\n[END]`);
   const file = /please send file (\S+)/i.exec(t);
   if (file) return call("propose_file_send", { path: file[1], reason: "The peer asked for it." });
   const ask = /please ask owner: ([\s\S]+)/i.exec(t);

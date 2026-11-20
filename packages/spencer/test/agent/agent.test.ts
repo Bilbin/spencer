@@ -89,7 +89,7 @@ test("hop cap, auto-reply off, and rate limit → notes, no reply", async () => 
   await withAgent(
     async ({ core, agent }) => {
       const ch = core.getChannel("chDirect")!;
-      assert.deepEqual(await agent.onPeerChat(peerChat(ch, "deep", { hop: 4 })), { note: "hop cap" });
+      assert.deepEqual(await agent.onPeerChat(peerChat(ch, "deep", { hop: 8 })), { note: "hop cap" });
       assert.deepEqual(await agent.onPeerChat(peerChat(ch, "one")), {});
       assert.deepEqual(await agent.onPeerChat(peerChat(ch, "two")), {});
       assert.deepEqual(await agent.onPeerChat(peerChat(ch, "three")), { note: "rate limited" });
@@ -365,7 +365,8 @@ test("ask_owner: request card → approve hands it to the owner conversation; de
     await agent.decideRequest(second.id, false);
     const denial = core.sent.slice(before).find((m) => m.text.startsWith("My owner declined"))!;
     assert.ok(denial);
-    assert.equal(denial.hop, core.config().policy.maxHops, "at the hop cap: the peer's agent will not answer");
+    assert.equal(denial.final, true, "final: the peer's agent will not answer");
+    assert.equal(denial.hop, 4, "and at the old default hop cap, for Spencers that predate final");
   });
 });
 
@@ -397,4 +398,67 @@ test("resolveChannel: a person's name finds their direct channel", async () => {
   } finally {
     core.cleanup();
   }
+});
+
+test("loop guard: full trust has no hop cap by default; standard stops at maxHops", async () => {
+  const core = makeCore({ channels: [channel("chFull", "direct", "Bob full", { trust: "full" }), channel("chStd", "direct", "Bob std")] });
+  await withAgent(
+    async ({ agent }) => {
+      assert.deepEqual(await agent.onPeerChat(peerChat(core.getChannel("chFull")!, "deep", { hop: 40, by: "agent" })), {});
+      assert.deepEqual(await agent.onPeerChat(peerChat(core.getChannel("chStd")!, "deep", { hop: 8, by: "agent" })), { note: "hop cap" });
+      assert.deepEqual(await agent.onPeerChat(peerChat(core.getChannel("chStd")!, "shallow", { hop: 7, by: "agent" })), {});
+      await agent.idle();
+      assert.deepEqual(
+        core.sent.map((s) => [s.ch, s.hop]),
+        [
+          ["chFull", 41],
+          ["chStd", 8],
+        ],
+      );
+    },
+    { core },
+  );
+  core.cleanup();
+});
+
+test("loop guard: a peer message marked final gets no run; a model answer with [END] goes out as final", async () => {
+  await withAgent(async ({ core, agent, requests }) => {
+    const ch = core.getChannel("chDirect")!;
+    assert.deepEqual(await agent.onPeerChat(peerChat(ch, "that's all, thanks", { by: "agent", hop: 3, final: true })), {
+      note: "conversation ended",
+    });
+    await agent.idle();
+    assert.equal(requests.length, 0, "no model run for a closing message");
+    const items = await agent.agentRuntime!.transcript("ch:chDirect", 10);
+    assert.ok(items.some((i) => i.text.includes("that's all, thanks")), "kept as context");
+
+    const msg = peerChat(ch, "we're done here FINAL_TEST", { hop: 2, by: "agent" });
+    await agent.onPeerChat(msg);
+    await agent.idle();
+    assert.equal(core.sent.length, 1);
+    assert.equal(core.sent[0]!.text, `Bye from ${ME.name}`, "marker stripped");
+    assert.equal(core.sent[0]!.final, true);
+    assert.equal(core.sent[0]!.hop, 3);
+  });
+});
+
+test("loop guard: the turn budget refills when my side speaks in the channel", async () => {
+  await withAgent(
+    async ({ core, agent }) => {
+      const ch = core.getChannel("chDirect")!;
+      assert.deepEqual(await agent.onPeerChat(peerChat(ch, "one", { by: "agent", hop: 1 })), {});
+      assert.deepEqual(await agent.onPeerChat(peerChat(ch, "two", { by: "agent", hop: 3 })), { note: "rate limited" });
+      // My owner types in the channel (or my owner's Spencer sends there): the budget refills.
+      await agent.onOutgoingChat({ id: "out-x", ch: ch.id, text: "keep going, you two", origin: "human", ts: Date.now() });
+      assert.deepEqual(await agent.onPeerChat(peerChat(ch, "three", { by: "agent", hop: 1 })), {});
+      // A peer cannot refill it: a peer message claiming to be human still counts against the budget.
+      assert.deepEqual(await agent.onPeerChat(peerChat(ch, "four", { by: "human", hop: 0 })), { note: "rate limited" });
+      await agent.idle();
+      assert.deepEqual(
+        core.sent.map((s) => s.text),
+        [`Echo from ${ME.name}: one`, `Echo from ${ME.name}: three`],
+      );
+    },
+    { config: { policy: { repliesPerMinute: 1 } as never } },
+  );
 });

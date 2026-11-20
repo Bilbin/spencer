@@ -471,6 +471,7 @@ export class Daemon {
         const body: ChatBody = { type: "chat", text: msg.text, hop: msg.hop, by: msg.by };
         if (msg.replyTo !== undefined) body.replyTo = msg.replyTo;
         if (msg.mentions !== undefined && msg.mentions.length > 0) body.mentions = [...new Set(msg.mentions)];
+        if (msg.final === true) body.final = true;
         const res = outbox.enqueue(ch, body, {
           origin: msg.origin,
           ...(msg.idempotencyKey !== undefined ? { idempotencyKey: msg.idempotencyKey } : {}),

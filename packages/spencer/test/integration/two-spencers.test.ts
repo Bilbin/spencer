@@ -8,6 +8,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Daemon } from "../../src/daemon.ts";
+import { DEFAULT_POLICY } from "../../src/config.ts";
 import type { ChannelMessage, Transfer } from "../../src/contracts.ts";
 import {
   Api,
@@ -27,6 +28,7 @@ import {
 
 const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 const MAX_HOPS = 3;
+const MAX_HOPS_FULL = 5;
 
 interface Node {
   name: string;
@@ -56,7 +58,9 @@ describe("two Spencers (integration)", { skip: haveCroc ? false : `croc missing 
         model: { provider: "fake" },
         croc: { path: CROC, relay: null, pass: null, allowLocal: false, throttleUpload: null },
         policy: {
+          ...DEFAULT_POLICY,
           maxHops: MAX_HOPS,
+          maxHopsFullTrust: MAX_HOPS_FULL,
           repliesPerMinute: 100,
           repliesPerHour: 1000,
           autoAcceptIncomingFiles: true,
@@ -175,6 +179,40 @@ describe("two Spencers (integration)", { skip: haveCroc ? false : `croc missing 
       (await chat(A)).map((m) => m.id),
       all.map((m) => m.id),
     );
+  });
+
+  it("a closing message ([END]) reaches the peer marked final, and the peer does not answer it", async () => {
+    const { id } = await B.api.say(ch, "we are done, FINAL_TEST");
+    const bye = await waitFor(async () => (await chat(B)).find((m) => m.replyTo === id), "A's closing reply on B");
+    assert.equal(bye.text, "Bye from Alice");
+    assert.equal(bye.final, true);
+    assert.equal(bye.hop, 1);
+    await waitFor(async () => (await chat(B)).find((m) => m.id === bye.id)?.note === "conversation ended", "B notes the end");
+    await sleep(500);
+    assert.equal((await chat(A)).filter((m) => m.replyTo === bye.id).length, 0, "nobody answered the closing message");
+  });
+
+  it("full trust: the agents keep going past the standard hop cap, up to maxHopsFullTrust", async () => {
+    for (const n of [A, B]) await n.api.req("PATCH", `/api/channels/${ch}`, { trust: "full" });
+    try {
+      const { id } = await B.api.say(ch, "let's work through this together");
+      const chain = await waitFor(async () => {
+        const msgs = await chat(B);
+        const out: ChannelMessage[] = [];
+        for (let next = msgs.find((m) => m.replyTo === id); next; next = msgs.find((m) => m.replyTo === out[out.length - 1]!.id)) out.push(next);
+        const last = out[out.length - 1];
+        return last?.hop === MAX_HOPS_FULL ? out : undefined;
+      }, "full-trust chain to reach maxHopsFullTrust");
+      assert.deepEqual(
+        chain.map((m) => m.hop),
+        [1, 2, 3, 4, 5],
+      );
+      const last = chain[chain.length - 1]!;
+      const receiver = last.from === A.id ? B : A;
+      await waitFor(async () => (await chat(receiver)).find((m) => m.id === last.id)?.note === "hop cap", "hop cap at the full-trust limit");
+    } finally {
+      for (const n of [A, B]) await n.api.req("PATCH", `/api/channels/${ch}`, { trust: "standard" });
+    }
   });
 
   it("A's owner /send → B answers → answer shows in A's owner transcript as an untrusted note, no owner run", async () => {

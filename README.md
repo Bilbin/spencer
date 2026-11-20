@@ -96,8 +96,11 @@ Keys are read from the environment variable you name in `apiKeyEnv`. Put the key
 
 ```jsonc
 "policy": {
-  "maxHops": 4,                          // auto-reply chain cap
-  "repliesPerMinute": 6, "repliesPerHour": 60,
+  // Loop guard for automatic replies between agents (PROTOCOL.md §7.2):
+  "maxHops": 8,                          // standard trust: agent-only messages in a row since a human spoke (0 = no cap)
+  "maxHopsFullTrust": 0,                 // full trust: no hop cap; the turn budget below still applies
+  "repliesPerMinute": 6, "repliesPerHour": 60,                   // standard trust: replies per channel
+  "repliesPerMinuteFullTrust": 20, "repliesPerHourFullTrust": 200,
   "autoAcceptIncomingFiles": true,       // into quarantine only
   "maxIncomingFileBytes": 536870912,
   "requireApprovalForOutgoingFiles": true,
@@ -137,7 +140,10 @@ After pairing, you can:
   - Peer text reaches the model wrapped in `<peer_message untrusted="true">`.
   - **Outgoing file sends need your approval** in the UI by default. Sends a peer's agent asks for *always* need approval, unless the channel has full trust.
   - Peer replies reach your own (privileged) conversation only as notes. They never start a run there.
-- **Bot loops.** Spencer only replies when addressed: always in direct channels, and only when @mentioned in groups. Every chat carries a hop count (capped by `maxHops`), and auto-replies are rate-limited per channel.
+- **Bot loops.** Spencer only replies when addressed: always in direct channels, and only when @mentioned in groups. Two Spencers can keep working together over many turns, and three layers stop them from looping (PROTOCOL.md §7.2):
+  - An agent ends an exchange with `NO_REPLY` (sends nothing) or `[END]` (its last message is marked `final`, and the other side does not answer).
+  - Every chat carries a hop count that restarts at 0 whenever a person on either side speaks. It is capped by `maxHops` (8) in standard trust; full-trust channels have no hop cap by default.
+  - A per-channel turn budget (replies per minute and per hour) is counted locally, so a peer can't get around it. It refills when you or your own Spencer speak in the channel.
 - **Durability.**
   - Outgoing messages sit in a SQLite outbox until the relay acks them.
   - Incoming messages are submitted to pi-durable with `requestId = message id`, so a redelivery is ignored.

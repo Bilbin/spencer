@@ -29,6 +29,7 @@ export interface SentChat {
   origin: MessageOrigin;
   replyTo?: string;
   mentions?: string[];
+  final?: boolean;
   idempotencyKey?: string;
 }
 
@@ -142,10 +143,10 @@ let seq = 0;
 export function peerChat(
   ch: Channel,
   text: string,
-  extra: Omit<Partial<IncomingChat>, "from"> & { hop?: number; mentions?: string[]; by?: "human" | "agent"; from?: typeof BOB } = {},
+  extra: Omit<Partial<IncomingChat>, "from"> & { hop?: number; mentions?: string[]; by?: "human" | "agent"; final?: boolean; from?: typeof BOB } = {},
 ): IncomingChat {
   const from = extra.from ?? BOB;
-  const { hop = 0, mentions, by = "human", from: _from, ...rest } = extra;
+  const { hop = 0, mentions, by = "human", final, from: _from, ...rest } = extra;
   return {
     id: `msg-${++seq}-${randomUUID()}`,
     ch: ch.id,
@@ -153,7 +154,7 @@ export function peerChat(
     from: from.id,
     fromName: from.name,
     ts: Date.now(),
-    body: { type: "chat", text, hop, by, ...(mentions ? { mentions } : {}) },
+    body: { type: "chat", text, hop, by, ...(mentions ? { mentions } : {}), ...(final ? { final } : {}) },
     channelKind: ch.kind,
     channelName: ch.name,
     ...rest,

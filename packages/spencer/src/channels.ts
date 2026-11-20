@@ -230,6 +230,7 @@ export class ChannelManager {
     if (body.by === "human" || body.by === "agent") m.by = body.by;
     if (typeof body.replyTo === "string") m.replyTo = body.replyTo;
     if (Array.isArray(body.mentions)) m.mentions = body.mentions as string[];
+    if (body.final === true) m.final = true;
     if (r.note) m.note = r.note;
     if (r.origin) m.origin = r.origin as ChannelMessage["origin"];
     return m;

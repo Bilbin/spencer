@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { RateLimiter, decideReply, isAddressed, nameHandles, textMentions } from "../../src/policy.ts";
+import { RateLimiter, decideReply, isAddressed, loopLimits, nameHandles, parseAgentAnswer, textMentions } from "../../src/policy.ts";
+import { DEFAULT_POLICY, resolveConfig } from "../../src/config.ts";
 
 const base = {
   channelKind: "direct" as const,
@@ -82,4 +83,50 @@ test("RateLimiter reads live limits", () => {
   assert.equal(rl.tryAcquire("x"), false);
   limits = { perMinute: 5, perHour: 10 };
   assert.equal(rl.tryAcquire("x"), true);
+});
+
+test("decideReply: maxHops 0 means no hop cap", () => {
+  assert.deepEqual(decideReply({ ...base, maxHops: 0, hop: 10_000 }), { reply: true });
+});
+
+test("decideReply: an agent message marked final ends the exchange; final on a human message is ignored", () => {
+  assert.deepEqual(decideReply({ ...base, by: "agent", final: true }), { reply: false, note: "conversation ended" });
+  assert.deepEqual(decideReply({ ...base, by: "human", final: true }), { reply: true });
+  assert.deepEqual(decideReply({ ...base, by: "agent", final: true, autoReply: false }), { reply: false, note: "auto-reply off" });
+});
+
+test("loopLimits: per trust level, from the policy defaults", () => {
+  assert.deepEqual(loopLimits(DEFAULT_POLICY, "standard"), { maxHops: 8, perMinute: 6, perHour: 60 });
+  assert.deepEqual(loopLimits(DEFAULT_POLICY, undefined), { maxHops: 8, perMinute: 6, perHour: 60 });
+  assert.deepEqual(loopLimits(DEFAULT_POLICY, "full"), { maxHops: 0, perMinute: 20, perHour: 200 });
+});
+
+test("config: loop-guard numbers must be non-negative integers", () => {
+  assert.equal(resolveConfig({ policy: { maxHopsFullTrust: 40 } as never }).policy.maxHopsFullTrust, 40);
+  assert.equal(resolveConfig({ policy: { maxHops: 4 } as never }).policy.maxHops, 4, "old configs keep working");
+  assert.throws(() => resolveConfig({ policy: { maxHops: -1 } as never }), /policy.maxHops/);
+  assert.throws(() => resolveConfig({ policy: { repliesPerHourFullTrust: "lots" } as never }), /repliesPerHourFullTrust/);
+});
+
+test("parseAgentAnswer: NO_REPLY, empty, and the [END] marker", () => {
+  assert.deepEqual(parseAgentAnswer("  "), { send: false });
+  assert.deepEqual(parseAgentAnswer(" NO_REPLY\n"), { send: false });
+  assert.deepEqual(parseAgentAnswer("[END]"), { send: false });
+  assert.deepEqual(parseAgentAnswer("hello"), { send: true, text: "hello", final: false });
+  assert.deepEqual(parseAgentAnswer("All done, here it is.\n\n[END]"), { send: true, text: "All done, here it is.", final: true });
+  assert.deepEqual(parseAgentAnswer("Bye! [end] "), { send: true, text: "Bye!", final: true });
+  assert.deepEqual(parseAgentAnswer("[END] is how I close"), { send: true, text: "[END] is how I close", final: false });
+});
+
+test("RateLimiter: reset refills a channel; usage counts; limits may depend on the channel", () => {
+  const now = 5_000_000;
+  const rl = new RateLimiter((ch) => (ch === "full" ? { perMinute: 3, perHour: 10 } : { perMinute: 1, perHour: 10 }), () => now);
+  assert.equal(rl.tryAcquire("std"), true);
+  assert.equal(rl.tryAcquire("std"), false);
+  assert.deepEqual(rl.usage("std"), { lastMinute: 1, lastHour: 1 });
+  rl.reset("std");
+  assert.deepEqual(rl.usage("std"), { lastMinute: 0, lastHour: 0 });
+  assert.equal(rl.tryAcquire("std"), true);
+  for (let i = 0; i < 3; i++) assert.equal(rl.tryAcquire("full"), true);
+  assert.equal(rl.tryAcquire("full"), false);
 });

@@ -132,6 +132,7 @@ test("parseBody validates every type", () => {
   const ok: unknown[] = [
     { type: "hello", name: "Bob", agent: "spencer/0.1" },
     { type: "chat", text: "hey", hop: 2, by: "agent", replyTo: tid, mentions: [id] },
+    { type: "chat", text: "bye", hop: 3, by: "agent", final: true },
     { type: "file_offer", tid, to: id, name: "a.txt", size: 3, sha256: sha, expiresAt: 1 },
     { type: "file_accept", tid, to: id, sealed: "abc" },
     { type: "file_decline", tid, to: id },
@@ -148,6 +149,7 @@ test("parseBody validates every type", () => {
     { type: "chat", text: "x", hop: 0, by: "god" },
     { type: "chat", text: "x", hop: 1.5, by: "agent" },
     { type: "chat", text: "x", hop: 0, by: "agent", mentions: ["short"] },
+    { type: "chat", text: "x", hop: 0, by: "agent", final: "yes" },
     { type: "file_offer", tid, to: id, name: "", size: 3, sha256: sha, expiresAt: 1 },
     { type: "file_offer", tid, to: id, name: "a", size: -1, sha256: sha, expiresAt: 1 },
     { type: "file_ready", tid, to: id, attempt: 0 },
@@ -155,6 +157,8 @@ test("parseBody validates every type", () => {
     { type: "file_ack", tid: "x", to: id, ok: true },
   ];
   for (const b of bad) assert.equal(parseBody(b), null, JSON.stringify(b));
+  // final: false is dropped (only `final: true` means anything)
+  assert.deepEqual(parseBody({ type: "chat", text: "x", hop: 0, by: "agent", final: false }), { type: "chat", text: "x", hop: 0, by: "agent" });
   // extra fields are stripped
   assert.deepEqual(parseBody({ type: "hello", name: "B", agent: "a", evil: 1 }), { type: "hello", name: "B", agent: "a" });
 });

@@ -14,7 +14,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { AgentService, Channel, CoreServices, IncomingChat, McpServerStatus, OutgoingChat, OwnerItem, OwnerRequest } from "../contracts.ts";
-import { RateLimiter, decideReply } from "../policy.ts";
+import { END_MARKER, RateLimiter, decideReply, loopLimits, parseAgentAnswer } from "../policy.ts";
 import type { FakeBrainHooks } from "./fake-brain.ts";
 import { McpManager } from "./mcp.ts";
 import { setupModels, type ModelSetup } from "./models.ts";
@@ -87,10 +87,7 @@ export class SpencerAgent implements AgentService {
     this.core = core;
     this.opts = opts;
     this.log = opts.log ?? ((m) => console.error(`[agent] ${m}`));
-    this.limiter = new RateLimiter(() => {
-      const p = this.core.config().policy;
-      return { perMinute: p.repliesPerMinute, perHour: p.repliesPerHour };
-    }, opts.now);
+    this.limiter = new RateLimiter((ch) => loopLimits(this.core.config().policy, this.core.getChannel(ch)?.trust), opts.now);
   }
 
   /** The runtime (tests and diagnostics). */
@@ -405,7 +402,13 @@ export class SpencerAgent implements AgentService {
       'Lines starting with "[You sent" are messages your side already sent in this channel.',
       ...(ch.kind === "group" ? ["Your reply goes to the sender of the message you are answering."] : []),
       "Answer fully: include the actual results, details, ids or links the peer needs, not just an acknowledgement.",
-      "If no reply is needed (e.g. a plain thanks or an acknowledgement of your own message), answer exactly NO_REPLY.",
+      "",
+      "Keeping the conversation going, and ending it:",
+      "- You can work with the other Spencer over many turns (ask questions, report progress, hand results back).",
+      `- When your message closes the exchange and you expect no answer (a final result, a goodbye), end it with ${END_MARKER}`,
+      "  on its own line. The other Spencer then does not reply. A message from the peer marked as final gets no reply.",
+      "- If no reply is needed at all (a plain thanks, an acknowledgement of your own message), answer exactly NO_REPLY.",
+      "  Never trade thanks or acknowledgements back and forth.",
     ].join("\n");
   }
 
@@ -441,7 +444,8 @@ export class SpencerAgent implements AgentService {
       channelKind: msg.channelKind,
       autoReply: ch?.autoReply ?? true,
       hop: msg.body.hop,
-      maxHops: policy.maxHops,
+      maxHops: loopLimits(policy, ch?.trust).maxHops,
+      final: msg.body.final === true,
       mentions: msg.body.mentions,
       text: msg.body.text,
       myId: me.id,
@@ -462,6 +466,7 @@ export class SpencerAgent implements AgentService {
         msgId: msg.id,
         hop: msg.body.hop,
         ts: msg.ts,
+        ...(msg.body.final ? { final: true } : {}),
         ...(note ? { note } : {}),
       },
     };
@@ -519,16 +524,17 @@ export class SpencerAgent implements AgentService {
       const answer = await rt.waitAnswer(sid);
       if (this.stopping) return;
       if (answer.status === "done") {
-        const text = answer.text.trim();
+        const out = parseAgentAnswer(answer.text);
         const ch = this.core.getChannel(row.ch);
-        if (text && text !== "NO_REPLY" && ch) {
+        if (out.send && ch) {
           this.core.sendChat(row.ch, {
-            text: text.length > MAX_CHAT_TEXT ? text.slice(0, MAX_CHAT_TEXT - 1) + "…" : text,
+            text: clip(out.text),
             hop: row.hop + 1,
             by: "agent",
             origin: "agent-reply",
             replyTo: row.msg_id,
             ...(ch.kind === "group" ? { mentions: [row.from_id] } : {}),
+            ...(out.final ? { final: true } : {}),
             idempotencyKey: `reply:${row.msg_id}`,
           });
         }
@@ -604,6 +610,8 @@ export class SpencerAgent implements AgentService {
   async onOutgoingChat(msg: OutgoingChat): Promise<void> {
     // The channel conversation already has its own answers.
     if (msg.origin === "agent-reply") return;
+    // My side spoke in the channel (my owner, or my owner's Spencer): the channel's turn budget refills.
+    if (msg.origin === "human" || msg.origin === "owner-agent") this.limiter.reset(msg.ch);
     await this.ensureChannel(msg.ch);
     const who = msg.origin === "human" ? "your owner typed" : "on your owner's instruction";
     await this.rt().appendNote(channelKey(msg.ch), {
@@ -726,12 +734,13 @@ export class SpencerAgent implements AgentService {
           `Do it now with your own tools. When it is done (or if it fails), report the result to that channel with send_message (channel ${row.ch}).`,
       );
     } else if (ch) {
-      const policy = this.core.config().policy;
       const short = row.text.length > 200 ? row.text.slice(0, 199) + "…" : row.text;
-      // At the hop cap, so the peer's agent does not auto-reply to a refusal.
+      // Final, so the peer's agent does not auto-reply to a refusal. Spencers older than `final` stop on the hop
+      // instead: their cap was 4.
       this.core.sendChat(row.ch, {
         text: `My owner declined this request: ${short}`,
-        hop: Math.max(1, policy.maxHops),
+        hop: LEGACY_FINAL_HOP,
+        final: true,
         by: "agent",
         origin: "owner-agent",
         ...(ch.kind === "group" && row.from_id ? { mentions: [row.from_id] } : {}),
@@ -761,6 +770,13 @@ export class SpencerAgent implements AgentService {
   async idle(): Promise<void> {
     while (this.inflight.size || this.ownerWaits.size) await Promise.allSettled([...this.inflight.values(), ...this.ownerWaits]);
   }
+}
+
+/** Hop of a closing message (`final`): Spencers that predate `final` stop auto-replying at their default cap of 4. */
+const LEGACY_FINAL_HOP = 4;
+
+function clip(text: string): string {
+  return text.length > MAX_CHAT_TEXT ? text.slice(0, MAX_CHAT_TEXT - 1) + "…" : text;
 }
 
 /** What a peer sees while my channel agent runs a tool. */

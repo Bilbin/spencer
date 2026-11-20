@@ -65,7 +65,7 @@ test("http api: guards, state, owner + channel messages, invites, events ws", as
     assert.deepEqual(st.channels, []);
     assert.deepEqual(st.transfers, []);
     assert.deepEqual(st.mcp, []);
-    assert.equal(st.policy.maxHops, 4);
+    assert.equal(st.policy.maxHops, 8);
 
     // --- events ws: origin / token / host checks
     const base = `ws://127.0.0.1:${port}/api/events`;

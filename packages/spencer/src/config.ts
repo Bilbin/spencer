@@ -25,9 +25,16 @@ export type McpServerConfig =
   | { url: string; headers?: Record<string, string>; disabled?: boolean };
 
 export interface Policy {
+  /** Loop guard (PROTOCOL.md §7.2), standard trust: max hop of a message that still gets an automatic reply. 0 = no cap. */
   maxHops: number;
+  /** The same for channels with full trust. 0 = no cap (the turn budget below still applies). */
+  maxHopsFullTrust: number;
+  /** Automatic replies per channel per minute / per hour, standard trust. */
   repliesPerMinute: number;
   repliesPerHour: number;
+  /** The same for channels with full trust. */
+  repliesPerMinuteFullTrust: number;
+  repliesPerHourFullTrust: number;
   autoAcceptIncomingFiles: boolean;
   maxIncomingFileBytes: number;
   requireApprovalForOutgoingFiles: boolean;
@@ -48,9 +55,12 @@ export interface SpencerConfig {
 }
 
 export const DEFAULT_POLICY: Policy = {
-  maxHops: 4,
+  maxHops: 8,
+  maxHopsFullTrust: 0,
   repliesPerMinute: 6,
   repliesPerHour: 60,
+  repliesPerMinuteFullTrust: 20,
+  repliesPerHourFullTrust: 200,
   autoAcceptIncomingFiles: true,
   maxIncomingFileBytes: 512 * 1024 * 1024,
   requireApprovalForOutgoingFiles: true,
@@ -92,6 +102,16 @@ export function resolveConfig(raw: Partial<SpencerConfig> & Record<string, unkno
   if (!/^wss?:\/\//.test(cfg.relay)) throw new Error("relay must be a ws:// or wss:// URL");
   if (cfg.croc.throttleUpload !== null && !/^\d+[kKmMgG]?$/.test(String(cfg.croc.throttleUpload))) {
     throw new Error('croc.throttleUpload must look like "500k" (or null)');
+  }
+  for (const k of [
+    "maxHops",
+    "maxHopsFullTrust",
+    "repliesPerMinute",
+    "repliesPerHour",
+    "repliesPerMinuteFullTrust",
+    "repliesPerHourFullTrust",
+  ] as const) {
+    if (!Number.isSafeInteger(cfg.policy[k]) || cfg.policy[k] < 0) throw new Error(`policy.${k} must be a non-negative integer`);
   }
   for (const [name, s] of Object.entries(cfg.mcpServers)) {
     if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) throw new Error(`invalid MCP server name: ${name}`);

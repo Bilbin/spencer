@@ -59,9 +59,14 @@ export interface ChannelMessage {
   by?: "human" | "agent";
   replyTo?: string;
   mentions?: string[];
+  /** The sender marked the message as the end of the exchange (no answer expected). */
+  final?: boolean;
   /** "failed": the relay permanently rejected our message (see `note`); it will not be retried. */
   status: "pending" | "sent" | "received" | "failed";
-  /** Why an incoming chat did not trigger a reply ("not addressed", "hop cap", "rate limited", "auto-reply off"). */
+  /**
+   * Why an incoming chat did not trigger a reply ("not addressed", "hop cap", "rate limited", "auto-reply off",
+   * "conversation ended").
+   */
   note?: string;
   origin?: MessageOrigin;
 }
@@ -276,6 +281,8 @@ export interface CoreServices {
       origin: MessageOrigin;
       replyTo?: string;
       mentions?: string[];
+      /** End of the exchange: the peer's agent should not answer (`chat.final`). */
+      final?: boolean;
       idempotencyKey?: string;
     },
   ): { id: string };
