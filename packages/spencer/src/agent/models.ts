@@ -22,6 +22,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { ModelConfig } from "../config.ts";
 import { createFakeBrain, type FakeBrainHooks } from "./fake-brain.ts";
+import { BUILTIN_PROVIDERS } from "./providers.ts";
 
 export interface ModelSetup {
   models: Models;
@@ -138,9 +139,11 @@ async function openAICompatibleProvider(
 
 /** `amazon-bedrock` → `amazonBedrockProvider`, from `@earendil-works/pi-ai/providers/amazon-bedrock`. */
 async function loadBuiltinProvider(id: string): Promise<Provider | undefined> {
+  const load = Object.hasOwn(BUILTIN_PROVIDERS, id) ? BUILTIN_PROVIDERS[id] : undefined;
+  if (!load) return undefined;
   let mod: Record<string, unknown>;
   try {
-    mod = (await import(`@earendil-works/pi-ai/providers/${id}`)) as Record<string, unknown>;
+    mod = await load();
   } catch {
     return undefined;
   }
