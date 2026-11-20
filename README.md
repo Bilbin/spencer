@@ -21,6 +21,7 @@ Spencer is an agent that runs all the time on your machine. Its main job is talk
 | `packages/spencer` | The daemon: store, relay client, durable outbox and inbox, channels, croc transfers, agent and MCP, local HTTP/WS API |
 | `packages/web` | The web UI (vanilla JS, no build step), served by the daemon |
 | `docs/PROTOCOL.md` | The wire protocol and API contract |
+| `docs/ALWAYS-ON.md` | Design: running your Spencer on an always-on box (SSH tunnel to the UI, encrypted data dir, moving the identity, laptop MCP tools) |
 
 TypeScript runs directly on Node ≥ 22.18 through type stripping. There is no build step except bundling the relay.
 
