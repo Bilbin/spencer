@@ -2,7 +2,7 @@
 import { h, icon, humanSize, relTime, timeFull, copyText, iconButton } from "./dom.js";
 import { api, attempt, toast } from "./api.js";
 import { S, TERMINAL, on, needsAction, upsertTransfer, channelTitle, setTransfers } from "./state.js";
-import { viewHeader } from "./common.js";
+import { viewHeader, emptyState } from "./common.js";
 
 const STATE_LABEL = {
   awaiting_approval: "needs approval",
@@ -31,14 +31,14 @@ function peerLabel(t) {
 }
 
 function initiatorLine(t) {
-  const reason = t.reason ? ` — reason: ${t.reason}` : "";
+  const reason = t.reason ? `: “${t.reason}”` : "";
   switch (t.initiatedBy) {
     case "peer-agent":
-      return h("p.xfer-initiator.peer-agent", null, icon("warn", 14), h("span", null, `Requested by ${peerLabel(t)} (their agent)${reason}`));
+      return h("p.xfer-initiator.peer-agent", null, icon("warn", 14), h("span", null, `${peerLabel(t)} asked for this (their agent, not the person)${reason}`));
     case "owner-agent":
-      return h("p.xfer-initiator", null, `Requested by your Spencer${reason}`);
+      return h("p.xfer-initiator", null, `Your Spencer started this${reason}`);
     case "peer":
-      return t.direction === "in" ? null : h("p.xfer-initiator", null, `Requested by ${peerLabel(t)}${reason}`);
+      return t.direction === "in" ? null : h("p.xfer-initiator", null, `${peerLabel(t)} asked for this${reason}`);
     default:
       return reason ? h("p.xfer-initiator", null, `You started this${reason}`) : null;
   }
@@ -99,7 +99,7 @@ export function transferCard(t, opts = {}) {
       "div.quarantine",
       null,
       h("div.quarantine-row", null, h("code.path", { title: t.path }, t.path), iconButton("copy", "Copy path", async () => toast((await copyText(t.path)) ? "Path copied" : "Copy failed", "info"), "sm")),
-      h("p.quarantine-note", null, icon("warn", 14), " In quarantine — inspect before opening."),
+      h("p.quarantine-note", null, icon("warn", 14), " In quarantine. Inspect it before you open it."),
     );
   }
 
@@ -116,7 +116,7 @@ export function transferCard(t, opts = {}) {
         h("span.xfer-name", { title: `${t.name}\nsha256 ${t.sha256}\ncreated ${timeFull(t.createdAt)}` }, t.name),
         h(`span.pill.${stateTone(t)}`, null, STATE_LABEL[t.state] ?? t.state),
       ),
-      h("div.xfer-meta", null, meta.join(" · ")),
+      h("div.xfer-meta", null, meta.map((x) => h("span", null, x))),
       bar,
       initiatorLine(t),
       t.error ? h("p.xfer-error", null, t.error) : null,
@@ -133,7 +133,7 @@ export function transfersView(main) {
   const list = h("div.xfer-list");
   const tabs = h("div.tabs", { role: "tablist", "aria-label": "Filter transfers" });
   const body = h("div.page-body", null, tabs, list);
-  main.append(viewHeader([icon("transfer", 18), h("h1", null, "Transfers")]), h("div.page", null, body));
+  main.append(viewHeader([h("span.title-icon", { "aria-hidden": "true" }, icon("transfer", 18)), h("div.title-stack", null, h("h1", null, "Transfers"), h("span.subtitle", null, "Files sent and received over croc, end-to-end encrypted"))]), h("div.page", null, body));
 
   const render = () => {
     const all = [...S.transfers.values()].sort((a, b) => b.updatedAt - a.updatedAt);
@@ -162,7 +162,7 @@ export function transfersView(main) {
     list.replaceChildren(
       ...(items.length
         ? items.map((t) => transferCard(t, { showChannel: true }))
-        : [h("div.empty-state", null, h("p", null, filter === "all" ? "No transfers yet. Use “Send file” in a channel to send one." : "Nothing here."))]),
+        : [filter === "all" ? emptyState({ icon: "transfer", title: "No files yet", text: "Open a channel and use the paperclip to send one. Files you receive wait in quarantine until you look at them." }) : emptyState({ title: "Nothing here", text: "No transfers match this filter." })]),
     );
   };
   render();

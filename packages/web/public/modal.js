@@ -4,10 +4,10 @@ import { h, iconButton } from "./dom.js";
 let current = null;
 
 /**
- * openModal({title, body: Node|Node[], footer?: Node[], wide?}) → {close, el}
+ * openModal({title, body: Node|Node[], footer?: Node[], wide?, cls?}) → {close, el}
  * Escape or a backdrop click closes it. Focus returns to the previously focused element.
  */
-export function openModal({ title, body, footer, wide = false, onClose }) {
+export function openModal({ title, body, footer, wide = false, cls = "", onClose }) {
   current?.close();
   const root = document.getElementById("modal-root");
   const prevFocus = document.activeElement;
@@ -29,7 +29,7 @@ export function openModal({ title, body, footer, wide = false, onClose }) {
     }
   };
   const dialog = h(
-    `div.modal${wide ? ".wide" : ""}`,
+    `div.modal${wide ? ".wide" : ""}${cls ? "." + cls : ""}`,
     { role: "dialog", "aria-modal": "true", "aria-labelledby": titleId },
     h("div.modal-head", null, h("h2", { id: titleId }, title), iconButton("close", "Close", () => close())),
     h("div.modal-body", null, body),

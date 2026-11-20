@@ -75,6 +75,17 @@ const ICONS = {
   eye: ["M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"],
   image: ["M3 3h18v18H3z", "M8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z", "M21 15l-5-5L5 21"],
   warn: ["M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z", "M12 9v4", "M12 17h.01"],
+  inbox: ["M22 12h-6l-2 3h-4l-2-3H2", "M5.5 5.1 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.1z"],
+  search: ["M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z", "M21 21l-4.3-4.3"],
+  reply: ["M15 10l5 5-5 5", "M4 4v7a4 4 0 0 0 4 4h12"],
+  shield: ["M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"],
+  chevron: ["M9 18l6-6-6-6"],
+  spark: ["M12 3l2.2 6.8L21 12l-6.8 2.2L12 21l-2.2-6.8L3 12l6.8-2.2z"],
+  terminal: ["M4 17l6-6-6-6", "M12 19h8"],
+  keyboard: ["M2 6h20v12H2z", "M6 10h.01", "M10 10h.01", "M14 10h.01", "M18 10h.01", "M7 14h10"],
+  offline: ["M2 2l20 20", "M8.5 16.5a5 5 0 0 1 7 0", "M5 12.9a10 10 0 0 1 5.2-2.7", "M19 12.9a10 10 0 0 0-2-1.5", "M12 20h.01"],
+  panel: ["M3 4h18v16H3z", "M15 4v16"],
+  info: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "M12 16v-4", "M12 8h.01"],
 };
 
 export function icon(name, size = 18) {
@@ -146,10 +157,39 @@ export function relTime(ts) {
   return rtf.format(Math.round(diff / 1000), "second");
 }
 
+/**
+ * The person behind an identity name. Identities are usually called "<Person>'s Spencer"; the person and their
+ * agent share that one identity, so a human-typed message is shown under the person's own name.
+ * Returns {person, derived}: derived is false when the name does not follow the pattern.
+ */
+export function personOf(name) {
+  const s = String(name ?? "").trim();
+  const m = /^(.+?)[’']s\s+spencer$/i.exec(s);
+  return m ? { person: m[1].trim(), derived: true } : { person: s, derived: false };
+}
+
 export function initials(name) {
-  const words = String(name || "?").replace(/'s\b/gi, "").split(/\s+/).filter(Boolean);
+  const words = personOf(String(name || "?")).person.replace(/[’']s\b/gi, "").split(/\s+/).filter(Boolean);
   const letters = words.slice(0, 2).map((w) => [...w][0] ?? "");
   return (letters.join("") || "?").toUpperCase();
+}
+
+/** "now", "5m", "3h", "2d": compact age of a timestamp. */
+export function ago(ts) {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 45) return "now";
+  if (s < 3600) return `${Math.max(1, Math.round(s / 60))}m`;
+  if (s < 86400) return `${Math.round(s / 3600)}h`;
+  return `${Math.round(s / 86400)}d`;
+}
+
+/** "0:07", "12:40", "1:02:03": a running duration. */
+export function elapsed(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
 }
 
 /** Stable hue for a string, used for avatar colors. */
@@ -159,16 +199,25 @@ export function hue(str) {
   return x % 360;
 }
 
-export function avatar(name, seed, cls = "") {
-  const el = h(`span.avatar${cls ? "." + cls : ""}`, { "aria-hidden": "true" }, initials(name));
+/**
+ * An identity mark. Shape says who is typing: kind "agent" is a square tile, "human" a circle.
+ * The colour comes from the identity (seed), so a person and their agent share it.
+ */
+export function avatar(name, seed, cls = "", kind = "agent") {
+  const el = h(`span.avatar.${kind}${cls ? "." + cls : ""}`, { "aria-hidden": "true" }, initials(name));
   el.style.setProperty("--h", String(hue(seed ?? name)));
   return el;
 }
 
-/** Avatar for the owner's own Spencer (a bot glyph, so it doesn't depend on the loaded name). */
+/** The owner's own Spencer: an ink tile with a spark (no hue, so it doesn't depend on the loaded identity). */
 export function selfAvatar(cls = "") {
-  const size = cls.includes("big") ? 30 : cls.includes("sm") ? 16 : 19;
-  return h(`span.avatar.self${cls ? "." + cls : ""}`, { "aria-hidden": "true" }, icon("bot", size));
+  const size = cls.includes("big") ? 26 : cls.includes("sm") ? 13 : cls.includes("xs") ? 11 : 16;
+  return h(`span.avatar.agent.self${cls ? "." + cls : ""}`, { "aria-hidden": "true" }, icon("spark", size));
+}
+
+/** The owner typing as themselves: an ink circle. */
+export function youAvatar(name, cls = "") {
+  return h(`span.avatar.human.self${cls ? "." + cls : ""}`, { "aria-hidden": "true" }, initials(name || "You"));
 }
 
 // ---------------------------------------------------------------- rich-ish text

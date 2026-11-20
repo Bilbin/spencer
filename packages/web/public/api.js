@@ -1,5 +1,5 @@
 // Local daemon API client (docs/PROTOCOL.md §8) and the events WebSocket.
-import { h } from "./dom.js";
+import { h, icon, iconButton } from "./dom.js";
 
 const token = document.querySelector('meta[name="spencer-token"]')?.getAttribute("content") ?? "";
 
@@ -61,13 +61,36 @@ export const api = {
 
 // ---------------------------------------------------------------- toasts
 
-export function toast(message, kind = "error") {
+/**
+ * toast(message, kind = "error" | "info" | "attn", {action: {label, onClick}, timeout})
+ * Errors stay longer than confirmations; hovering or focusing a toast keeps it up; every toast can be dismissed.
+ */
+export function toast(message, kind = "error", opts = {}) {
   const root = document.getElementById("toasts");
   if (!root) return;
-  const el = h(`div.toast.${kind}`, { role: kind === "error" ? "alert" : "status" }, String(message));
+  const leave = () => {
+    clearTimeout(timer);
+    el.classList.add("leaving");
+    setTimeout(() => el.remove(), 180);
+  };
+  const el = h(
+    `div.toast.${kind}`,
+    { role: kind === "error" ? "alert" : "status" },
+    icon(kind === "error" ? "warn" : kind === "attn" ? "inbox" : "check", 16),
+    h("span.toast-text", null, String(message)),
+    opts.action ? h("button.toast-action", { type: "button", on: { click: () => (leave(), opts.action.onClick()) } }, opts.action.label) : null,
+    iconButton("close", "Dismiss", leave, "toast-close"),
+  );
+  const ms = opts.timeout ?? (kind === "error" ? 8000 : opts.action ? 9000 : 4200);
+  let timer = setTimeout(leave, ms);
+  const hold = () => clearTimeout(timer);
+  const resume = () => (timer = setTimeout(leave, 2500));
+  el.addEventListener("mouseenter", hold);
+  el.addEventListener("mouseleave", resume);
+  el.addEventListener("focusin", hold);
+  el.addEventListener("focusout", resume);
+  while (root.children.length >= 4) root.firstChild.remove();
   root.append(el);
-  setTimeout(() => el.classList.add("leaving"), 4200);
-  setTimeout(() => el.remove(), 4600);
 }
 
 /** Run an API call; on failure show a toast and return undefined. */

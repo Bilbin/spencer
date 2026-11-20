@@ -1,10 +1,9 @@
-// Spencer local UI: entry point. Sidebar, routing, and the events stream.
+// Spencer local UI: entry point. Sidebar, routing, keyboard shortcuts, and the events stream.
 import { h, icon, shortFp, avatar, selfAvatar, clear, append } from "./dom.js";
 import { api, attempt, toast, connectEvents } from "./api.js";
 import {
   S,
   on,
-  emit,
   setState,
   upsertChannel,
   removeChannel,
@@ -15,20 +14,28 @@ import {
   setWorking,
   clearWorkingFor,
   setOwner,
+  setOwnerBusy,
   setMessages,
   unreadCount,
   actionCount,
+  attentionCount,
   needsAction,
   peers,
   channelTitle,
+  applyPresence,
+  channelStatus,
+  relaysDown,
+  emit,
 } from "./state.js";
 import { parseHash, hashFor, navigate } from "./router.js";
-import { setSidebarOpen } from "./common.js";
+import { setSidebarOpen, syncAttention, presenceInfo, mark, activityLine, skeleton } from "./common.js";
 import { ownerView } from "./owner.js";
 import { channelView } from "./channel.js";
 import { transfersView } from "./transfers.js";
 import { mcpView } from "./mcp.js";
+import { inboxView } from "./inbox.js";
 import { inviteModal, joinModal } from "./invites.js";
+import { openSwitcher, shortcutsModal } from "./switcher.js";
 
 const sidebar = document.getElementById("sidebar");
 const main = document.getElementById("main");
@@ -44,100 +51,142 @@ function navItem(view, content, opts = {}) {
   );
 }
 
-function badge(n, label) {
-  return n > 0 ? h("span.badge-count", { "aria-label": `${n} ${label}` }, n > 99 ? "99+" : String(n)) : null;
+function badge(n, label, cls = "") {
+  return n > 0 ? h(`span.badge-count${cls ? "." + cls : ""}`, { "aria-label": `${n} ${label}` }, n > 99 ? "99+" : String(n)) : null;
+}
+
+/** What the daemon connection looks like, in words. */
+function linkStatus() {
+  if (!S.wsUp) return { state: "down", text: "Reconnecting", title: "Not connected to the Spencer daemon on this computer" };
+  const down = relaysDown();
+  if (S.relay?.connected && !down.length) return { state: "up", text: "Connected", title: `Relay connected: ${S.relay.url}` };
+  const urls = down.length ? down.map((r) => r.url).join(", ") : (S.relay?.url ?? "");
+  return { state: "down", text: "Relay offline", title: `Relay disconnected: ${urls}. Messages are queued until it is back.` };
 }
 
 function renderSidebar() {
   const me = S.me;
-  const relayUp = S.relay?.connected && S.wsUp;
-  const relayTitle = !S.wsUp ? "Not connected to the Spencer daemon" : S.relay?.connected ? `Relay connected — ${S.relay.url}` : `Relay disconnected — ${S.relay?.url ?? ""}`;
+  const link = linkStatus();
   const channels = [...S.channels.values()].sort((a, b) => a.createdAt - b.createdAt);
   const direct = channels.filter((c) => c.kind === "direct");
   const groups = channels.filter((c) => c.kind === "group");
+  const nameOf = (c, id) => (id === S.me?.id ? "Yours" : (c.members.find((m) => m.id === id)?.name ?? "A Spencer"));
 
+  // One roster row: the avatar carries the state, and one line says what is going on and what you owe.
   const channelItem = (c) => {
     const title = channelTitle(c);
     const n = unreadCount(c.id);
-    let sub;
-    if (c.kind === "group") sub = `${c.members.length} member${c.members.length === 1 ? "" : "s"}`;
-    else {
-      const p = peers(c)[0];
-      sub = p ? shortFp(p.fingerprint) : "invite pending";
+    const p = peers(c)[0];
+    const status = channelStatus(c);
+    const active = status.state === "working" || status.state === "thinking";
+    let text = status.text;
+    let info = null;
+    if (active) {
+      const lead = c.kind === "group" || status.from === S.me?.id ? `${nameOf(c, status.from)}: ` : "";
+      text = [lead, h("span.act.shimmer", null, activityLine(status.text))];
+      info = { state: status.state, text: status.text };
+    } else if (status.state === "waiting" || status.state === "blocked") {
+      info = { state: status.state, text: status.text };
+    } else if (c.kind === "direct" && p) {
+      info = presenceInfo(p, c.id);
+      text = info ? info.text.replace(/^./, (x) => x.toUpperCase()) : shortFp(p.fingerprint);
     }
+    const sub = h(`span.nav-sub.s-${status.state}`, null, text);
+    const av =
+      c.kind === "group"
+        ? h("span.avatar.agent.group.sm", { "aria-hidden": "true" }, icon("users", 13))
+        : p
+          ? avatar(title, p.id, "sm")
+          : h("span.avatar.agent.pending.sm", { "aria-hidden": "true" }, icon("link", 12));
     return navItem(
       { name: "channel", ch: c.id },
       [
-        c.kind === "group" ? h("span.avatar.group.sm", { "aria-hidden": "true" }, icon("users", 14)) : avatar(title, peers(c)[0]?.id ?? c.id, "sm"),
-        h("span.nav-text", null, h("span.nav-name", null, title), h("span.nav-sub", null, sub)),
+        mark(av, info),
+        h("span.nav-text", null, h("span.nav-name", null, title), sub),
+        status.owes ? h("span.badge-flag", { role: "img", "aria-label": "needs you" }, icon("inbox", 12)) : null,
         badge(n, "unread"),
       ],
-      { cls: n ? "unread" : "", title: c.kind === "direct" && c.name !== title ? `${title} (${c.name})` : title },
+      { cls: `${n ? "unread" : ""}${status.owes ? (n ? ".owes" : "owes") : ""}`, title: c.kind === "direct" && c.name !== title ? `${title} (${c.name})` : title },
     );
   };
 
   const section = (label, items, emptyText) =>
-    h(
-      "section.nav-section",
-      { "aria-label": label },
-      h("h2.nav-heading", null, label, items.length ? h("span.nav-heading-count", null, String(items.length)) : null),
-      items.length ? items.map(channelItem) : h("p.nav-empty", null, emptyText),
-    );
+    h("section.nav-section", { "aria-label": label }, h("h2.nav-heading", null, label), items.length ? items.map(channelItem) : h("p.nav-empty", null, emptyText));
 
   const pending = actionCount();
+  const attention = attentionCount();
   const mcpBad = S.mcp.some((s) => s.status === "error");
+  const ownerSub = S.ownerBusy ? h("span.nav-sub.s-working", null, h("span.act.shimmer", null, "Working on it")) : h("span.nav-sub", null, "Your agent");
 
   // Rebuilding the sidebar would drop keyboard focus; remember what had it.
   const focused = sidebar.contains(document.activeElement) ? document.activeElement : null;
-  const focusKey = focused ? focused.getAttribute("href") ?? focused.textContent : null;
+  const focusKey = focused ? (focused.getAttribute("href") ?? focused.dataset.key ?? focused.textContent) : null;
+  const scrollTop = sidebar.querySelector(".side-nav")?.scrollTop ?? 0;
 
   append(clear(sidebar), [
     h(
       "header.side-head",
       null,
-      selfAvatar(),
+      mark(selfAvatar(), S.ownerBusy ? { state: "working", text: "working" } : null),
       h(
         "div.side-id",
         null,
         h("div.side-name", null, me?.name ?? "Spencer"),
-        h("code.side-fp", { title: me ? `Your fingerprint ${me.fingerprint}\nid ${me.id}` : "" }, me ? shortFp(me.fingerprint) : "…"),
+        h(
+          "div.side-status",
+          { title: link.title },
+          h(`span.pdot.inline.${link.state === "up" ? "on" : "warn"}`, { "aria-hidden": "true" }),
+          h("span", null, link.text),
+          me ? h("code.side-fp", { title: `Your fingerprint ${me.fingerprint}\nid ${me.id}` }, shortFp(me.fingerprint)) : null,
+        ),
       ),
-      h(`span.relay-dot${relayUp ? ".up" : ""}`, { role: "img", "aria-label": relayTitle, title: relayTitle }),
       h("button.icon-btn.close-side", { type: "button", "aria-label": "Close sidebar", on: { click: () => setSidebarOpen(false) } }, icon("close", 18)),
     ),
-    S.wsUp ? null : h("div.side-banner", { role: "status" }, "Reconnecting to Spencer…"),
+    h("button.side-search", { type: "button", dataset: { key: "search" }, on: { click: openSwitcher } }, icon("search", 15), h("span", null, "Jump to…"), h("kbd", null, /Mac|iPhone|iPad/.test(navigator.platform ?? "") ? "⌘K" : "Ctrl K")),
     h(
       "nav.side-nav",
       { "aria-label": "Conversations" },
-      navItem(
-        { name: "owner" },
-        [
-          selfAvatar("sm"),
-          h("span.nav-text", null, h("span.nav-name", null, "Spencer"), h("span.nav-sub", null, S.ownerBusy ? "working…" : "Your agent")),
-          S.ownerBusy ? h("span.busy-dot", { "aria-label": "busy" }) : null,
-        ],
-        { cls: "pinned" },
-      ),
-      section("Direct", direct, "No direct channels yet."),
+      navItem({ name: "inbox" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("inbox", 16)), h("span.nav-text", null, h("span.nav-name", null, "Needs you")), badge(attention, "waiting for you", "attn")], {
+        cls: attention ? "pinned.attn" : "pinned",
+      }),
+      navItem({ name: "owner" }, [mark(selfAvatar("sm"), S.ownerBusy ? { state: "working", text: "working" } : null), h("span.nav-text", null, h("span.nav-name", null, "Spencer"), ownerSub)], { cls: "pinned" }),
+      section("Direct", direct, "No one yet. Invite someone's Spencer."),
       section("Groups", groups, "No groups yet."),
       h(
         "div.side-actions",
         null,
-        h("button.btn.sm", { type: "button", on: { click: inviteModal } }, icon("plus", 14), " Invite"),
-        h("button.btn.sm", { type: "button", on: { click: joinModal } }, icon("link", 14), " Join"),
+        h("button.btn.sm", { type: "button", dataset: { key: "invite" }, on: { click: inviteModal } }, icon("plus", 14), "Invite"),
+        h("button.btn.sm", { type: "button", dataset: { key: "join" }, on: { click: joinModal } }, icon("link", 14), "Join"),
       ),
     ),
     h(
       "footer.side-foot",
       null,
-      navItem({ name: "transfers" }, [icon("transfer", 16), h("span.nav-name", null, "Transfers"), badge(pending, "need action")], { cls: "foot" }),
-      navItem({ name: "mcp" }, [icon("plug", 16), h("span.nav-name", null, "MCP servers"), mcpBad ? h("span.dot.error", { "aria-label": "a server has an error" }) : null], { cls: "foot" }),
+      navItem({ name: "transfers" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("transfer", 16)), h("span.nav-name", null, "Transfers"), badge(pending, "need action", "attn")], { cls: "foot" }),
+      navItem({ name: "mcp" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("plug", 16)), h("span.nav-name", null, "MCP servers"), mcpBad ? h("span.pdot.inline.bad", { role: "img", "aria-label": "a server has an error" }) : null], { cls: "foot" }),
+      h("button.nav-item.foot", { type: "button", dataset: { key: "keys" }, on: { click: shortcutsModal } }, h("span.nav-glyph", { "aria-hidden": "true" }, icon("keyboard", 16)), h("span.nav-name", null, "Shortcuts"), h("kbd", null, "?")),
     ),
   ]);
+  const nav = sidebar.querySelector(".side-nav");
+  if (nav) nav.scrollTop = scrollTop;
   if (focusKey) {
-    const again = [...sidebar.querySelectorAll("a, button")].find((el) => (el.getAttribute("href") ?? el.textContent) === focusKey);
+    const again = [...sidebar.querySelectorAll("a, button")].find((el) => (el.getAttribute("href") ?? el.dataset.key ?? el.textContent) === focusKey);
     again?.focus();
   }
+  syncAttention();
+  document.getElementById("conn").hidden = S.wsUp || !everConnected;
+}
+
+let everConnected = false;
+let sidebarQueued = false;
+/** Coalesce bursts of events (status ticks, presence) into one sidebar render per frame. */
+function queueSidebar() {
+  if (sidebarQueued) return;
+  sidebarQueued = true;
+  requestAnimationFrame(() => {
+    sidebarQueued = false;
+    renderSidebar();
+  });
 }
 
 // ---------------------------------------------------------------- routing
@@ -156,7 +205,7 @@ function mount() {
     current?.destroy?.();
     current = null;
     mountedKey = "";
-    clear(main).append(h("div.loading.center", null, "Loading…"));
+    clear(main).append(skeleton(5));
     return;
   }
   if (key === mountedKey && current) return;
@@ -167,6 +216,7 @@ function mount() {
   if (view.name === "channel") current = channelView(main, view.ch);
   else if (view.name === "transfers") current = transfersView(main);
   else if (view.name === "mcp") current = mcpView(main);
+  else if (view.name === "inbox") current = inboxView(main);
   else current = ownerView(main);
 }
 
@@ -175,8 +225,16 @@ function onRoute() {
   setSidebarOpen(false);
   mount();
   renderSidebar();
+  syncTitle();
+}
+
+const PAGE_TITLES = { mcp: "MCP servers", transfers: "Transfers", inbox: "Needs you" };
+
+function syncTitle() {
   const c = S.view.name === "channel" ? S.channels.get(S.view.ch) : null;
-  document.title = c ? `${channelTitle(c)} · Spencer` : S.view.name === "owner" ? "Spencer" : `${S.view.name === "mcp" ? "MCP servers" : "Transfers"} · Spencer`;
+  const page = c ? channelTitle(c) : PAGE_TITLES[S.view.name];
+  const n = attentionCount();
+  document.title = `${n ? `(${n}) ` : ""}${page ? `${page} · ` : ""}Spencer`;
 }
 
 // ---------------------------------------------------------------- events
@@ -210,7 +268,8 @@ function handleEvent(ev) {
       upsertTransfer(t);
       if (needsAction(t) && t.initiatedBy !== "owner" && (!prev || prev.state !== t.state) && S.view.name !== "transfers") {
         const who = t.peerName ?? "A peer";
-        toast(t.direction === "in" ? `${who} wants to send you ${t.name}` : `${t.name} needs your approval to send`, "info");
+        if (S.view.name !== "inbox")
+          toast(t.direction === "in" ? `${who} wants to send you ${t.name}` : `${t.name} needs your approval to send`, "attn", { action: { label: "Review", onClick: () => navigate({ name: "inbox" }) } });
       }
       break;
     }
@@ -222,16 +281,20 @@ function handleEvent(ev) {
       if (!r?.id) break;
       const prev = S.requests.get(r.id);
       upsertRequest(r);
-      if (!prev && r.state === "pending" && S.view.name !== "owner") toast(`${r.fromName ?? "A peer"} needs your approval — see your Spencer chat`, "info");
+      if (!prev && r.state === "pending" && S.view.name !== "owner" && S.view.name !== "inbox")
+        toast(`${r.fromName ?? "A peer's Spencer"} asks for your approval`, "attn", { action: { label: "Review", onClick: () => navigate({ name: "inbox" }) } });
       break;
     }
     case "owner_busy":
-      S.ownerBusy = !!ev.busy;
-      emit("busy");
-      renderSidebar();
+      setOwnerBusy(ev.busy);
+      break;
+    case "presence":
+      applyPresence(ev);
       break;
     case "relay":
-      S.relay = { url: ev.url ?? S.relay.url, connected: !!ev.connected };
+      // With several relays in use, the event is about one of them; "connected" overall means all are.
+      if (S.relays.length && ev.url) S.relays = S.relays.map((r) => (r.url === ev.url ? { ...r, connected: !!ev.connected } : r));
+      S.relay = { url: S.relay.url || ev.url || "", connected: S.relays.length ? S.relays.every((r) => r.connected) : !!ev.connected };
       emit("relay");
       break;
     case "mcp":
@@ -267,7 +330,48 @@ async function refresh(full) {
 
 // ---------------------------------------------------------------- boot
 
-for (const t of ["channels", "transfers", "relay", "mcp"]) on(t, renderSidebar);
+for (const t of ["channels", "transfers", "relay", "mcp", "working", "busy", "requests"]) on(t, queueSidebar);
+for (const t of ["transfers", "requests"]) on(t, syncTitle);
+
+// ---------------------------------------------------------------- keyboard
+
+const typing = (el) => el instanceof HTMLElement && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+
+/** Alt+↑/↓: the previous/next destination in sidebar order. */
+function step(delta) {
+  const items = [...sidebar.querySelectorAll("a.nav-item")];
+  if (!items.length) return;
+  const i = items.findIndex((el) => el.classList.contains("active"));
+  const next = items[(Math.max(i, 0) + delta + items.length) % items.length];
+  location.hash = next.getAttribute("href");
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.defaultPrevented) return;
+  const modalOpen = !!document.querySelector("#modal-root .overlay");
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    openSwitcher();
+    return;
+  }
+  if (modalOpen) return;
+  if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    e.preventDefault();
+    step(e.key === "ArrowDown" ? 1 : -1);
+    return;
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
+  if (e.key === "/") {
+    const input = document.querySelector(".composer-input");
+    if (input) {
+      e.preventDefault();
+      input.focus();
+    }
+  } else if (e.key === "?") {
+    e.preventDefault();
+    shortcutsModal();
+  }
+});
 document.getElementById("backdrop")?.addEventListener("click", () => setSidebarOpen(false));
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && document.getElementById("app")?.classList.contains("sidebar-open")) setSidebarOpen(false);
@@ -283,6 +387,13 @@ connectEvents({
   onOpen: (isReconnect) => refresh(isReconnect),
   onStatus: (up) => {
     S.wsUp = up;
+    if (up) everConnected = true;
     renderSidebar();
   },
 });
+setTimeout(() => {
+  if (!S.wsUp) {
+    everConnected = true;
+    renderSidebar();
+  }
+}, 2500);

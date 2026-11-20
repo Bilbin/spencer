@@ -1,103 +1,131 @@
-// A channel (direct or group): the bot-to-bot transcript, composer, files and settings.
-import { h, icon, iconButton, richText, shortFp, timeShort, timeFull, autoGrow, avatar, clear, append } from "./dom.js";
+// A channel (direct or group): the transcript between people and their Spencers, composer, members, files and settings.
+import { h, icon, iconButton, richText, shortFp, timeShort, timeFull, autoGrow, hue, avatar, selfAvatar, youAvatar, personOf, clear, append } from "./dom.js";
 import { api, attempt, toast } from "./api.js";
-import { S, on, setMessages, upsertTransfer, upsertChannel, removeChannel, markRead, peers, channelTitle, allMcpTools, workingIn } from "./state.js";
+import { S, on, setMessages, upsertTransfer, upsertChannel, removeChannel, markRead, peers, channelTitle, allMcpTools, workingIn, workingOf, presenceOf } from "./state.js";
 import { markdown } from "./md.js";
-import { viewHeader } from "./common.js";
+import { viewHeader, composer, SEND_HINT, stage, skeleton, emptyState, trace, mark, presenceInfo, activityLine } from "./common.js";
 import { transferCard } from "./transfers.js";
 import { openModal, field } from "./modal.js";
 import { scrollKeeper } from "./scroll.js";
 import { navigate } from "./router.js";
 
 const NOTE_LABEL = {
-  "not addressed": "not addressed — no auto-reply",
-  "hop cap": "hop cap reached — no auto-reply",
-  "rate limited": "rate limited — no auto-reply",
-  "auto-reply off": "auto-reply off",
+  "not addressed": "Your Spencer stayed quiet: it was not addressed.",
+  "hop cap": "Your Spencer stayed quiet: the automatic reply limit was reached.",
+  "rate limited": "Your Spencer stayed quiet: it is rate limited.",
+  "auto-reply off": "Your Spencer stayed quiet: auto-reply is off here.",
 };
+/** Consecutive turns by the same speaker within this window share one header. */
+const GROUP_MS = 5 * 60_000;
 
 // ---------------------------------------------------------------- message rendering
 
-function senderInfo(c, m) {
-  if (m.mine) return { name: S.me?.name ?? "You", fp: S.me?.fingerprint, id: S.me?.id ?? m.from };
+/**
+ * Who a message is from, for display. A person and their agent share one identity; `by` says which of
+ * them typed. Returns {name, label, fp, id, kind, mine, avatar()}.
+ */
+function speaker(c, m) {
   const mem = c.members.find((x) => x.id === m.from);
-  return { name: m.fromName || mem?.name || `${m.from.slice(0, 8)}…`, fp: mem?.fingerprint, id: m.from };
+  const by = m.by ?? (m.mine ? "human" : "agent");
+  const identity = m.mine ? (S.me?.name ?? "Your Spencer") : m.fromName || mem?.name || `${m.from.slice(0, 8)}…`;
+  const id = m.mine ? (S.me?.id ?? m.from) : m.from;
+  const fp = m.mine ? S.me?.fingerprint : mem?.fingerprint;
+  if (by === "human") {
+    const p = personOf(identity);
+    return {
+      id,
+      fp,
+      kind: "human",
+      mine: m.mine,
+      name: m.mine ? "You" : p.person,
+      // The identity name did not tell us the person's name: say that a person typed it.
+      label: m.mine || p.derived ? null : "typed by a person",
+      avatar: (cls = "") => (m.mine ? youAvatar(p.person, cls) : avatar(p.person, id, cls, "human")),
+    };
+  }
+  return { id, fp, kind: "agent", mine: m.mine, name: identity, label: null, avatar: (cls = "") => (m.mine ? selfAvatar(cls) : avatar(identity, id, cls)) };
 }
 
-function quoteFor(c, m, byId) {
+function jumpTo(id) {
+  const el = document.getElementById(`m-${id}`);
+  if (!el) return;
+  el.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  el.classList.remove("flash");
+  void el.offsetWidth; // restart the animation
+  el.classList.add("flash");
+  setTimeout(() => el.classList.remove("flash"), 1400);
+}
+
+/** One line above a reply that names its parent and jumps to it. */
+function replyRef(c, m, byId) {
   if (!m.replyTo) return null;
   const target = byId.get(m.replyTo);
-  if (!target) return h("div.quote.missing", null, "↩ in reply to an earlier message");
-  const who = target.mine && target.by === "human" ? "You" : senderInfo(c, target).name;
+  if (!target) return h("div.reply-ref.missing", null, icon("reply", 13), h("span", null, "Reply to an earlier message"));
+  const who = speaker(c, target);
   const text = (target.text ?? target.type).replace(/\s+/g, " ");
   return h(
-    "button.quote",
-    {
-      type: "button",
-      title: "Jump to the replied message",
-      on: {
-        click: () => {
-          const el = document.getElementById(`m-${target.id}`);
-          if (!el) return;
-          el.scrollIntoView({ block: "center", behavior: "smooth" });
-          el.classList.add("flash");
-          setTimeout(() => el.classList.remove("flash"), 1200);
-        },
-      },
-    },
-    h("span.quote-who", null, who),
-    h("span.quote-text", null, text.length > 140 ? `${text.slice(0, 140)}…` : text),
+    "button.reply-ref",
+    { type: "button", title: "Go to the message this replies to", on: { click: () => jumpTo(target.id) } },
+    icon("reply", 13),
+    who.avatar("xs"),
+    h("span.reply-who", null, who.name),
+    h("span.reply-text", null, text.length > 120 ? `${text.slice(0, 120)}…` : text),
   );
 }
 
 function statusMark(m) {
   if (!m.mine) return null;
-  if (m.status === "failed") return h("span.status.failed", { title: m.note ? `Not delivered: ${m.note}` : "Not delivered", "aria-label": "failed" }, icon("warn", 13), " not delivered");
-  if (m.status === "pending") return h("span.status.pending", { title: "Queued — not yet accepted by the relay", "aria-label": "pending" }, icon("clock", 13));
-  return h("span.status.sent", { title: "Delivered to the relay", "aria-label": "sent" }, icon("check", 13));
+  if (m.status === "failed") return h("span.status.failed", { title: m.note ? `Not delivered: ${m.note}` : "Not delivered" }, icon("warn", 13), " not delivered");
+  if (m.status === "pending") return h("span.status.pending", { title: "Queued. The relay has not accepted it yet.", role: "img", "aria-label": "sending" }, icon("clock", 12));
+  return h("span.status.sent", { title: "Delivered to the relay", role: "img", "aria-label": "sent" }, icon("check", 12));
 }
 
-function messageRow(c, m, byId, names, myNames) {
-  const who = senderInfo(c, m);
+function systemLine(c, m) {
+  const mem = c.members.find((x) => x.id === m.from);
+  const name = m.mine ? (S.me?.name ?? "Your Spencer") : m.fromName || mem?.name || `${m.from.slice(0, 8)}…`;
+  const fp = m.mine ? S.me?.fingerprint : mem?.fingerprint;
+  const time = h("time", { datetime: new Date(m.ts).toISOString(), title: timeFull(m.ts) }, timeShort(m.ts));
   if (m.type === "hello") {
     return h(
       "div.system-line",
       { id: `m-${m.id}` },
-      h("span", null, `${who.name} said hello`),
-      who.fp ? h("code.fp", { title: `${who.fp}\n${who.id}` }, shortFp(who.fp)) : null,
-      m.text ? h("span.system-extra", null, ` — “${m.text}”`) : null,
-      h("time", { title: timeFull(m.ts) }, ` · ${timeShort(m.ts)}`),
+      h("span", null, h("strong", null, name), " joined"),
+      m.text ? h("span.system-extra", null, `“${m.text}”`) : null,
+      fp ? h("code.fp", { title: `Fingerprint ${fp}\nid ${m.from}\nCompare it with them over another channel to be sure who this is.` }, shortFp(fp)) : null,
+      time,
     );
   }
-  if (m.type !== "chat") {
-    return h("div.system-line", { id: `m-${m.id}` }, `${who.name} · ${m.type}${m.text ? `: ${m.text}` : ""}`, h("time", { title: timeFull(m.ts) }, ` · ${timeShort(m.ts)}`));
-  }
-  const by = m.by ?? (m.mine ? "human" : "agent");
-  const head = h(
-    "div.msg-head",
-    null,
-    h("span.sender", null, m.mine && by === "human" ? "You" : who.name),
-    who.fp ? h("code.fp", { title: `Fingerprint ${who.fp}\nid ${who.id}` }, shortFp(who.fp)) : null,
-    h(`span.badge.${by}`, { title: by === "agent" ? "Written by a Spencer's model" : "Typed by a person" }, by),
-    m.hop > 0 ? h("span.badge.hop", { title: "Automatic reply depth" }, `hop ${m.hop}`) : null,
-    h("time", { datetime: new Date(m.ts).toISOString(), title: timeFull(m.ts) }, timeShort(m.ts)),
-    statusMark(m),
-  );
+  return h("div.system-line", { id: `m-${m.id}` }, h("span", null, h("strong", null, name), ` ${m.type}${m.text ? `: ${m.text}` : ""}`), time);
+}
+
+/** A chat turn. `cont`: it continues the previous turn by the same speaker (no header). `hideRef`: the parent is right above. */
+function messageRow(c, m, byId, names, myNames, cont, hideRef) {
+  const who = speaker(c, m);
+  const time = h("time", { datetime: new Date(m.ts).toISOString(), title: timeFull(m.ts) }, timeShort(m.ts));
+  const failed = m.mine && m.status === "failed";
   let note = null;
-  if (!m.mine && m.note) note = h("div.note-chip", { title: "Why your Spencer did not reply" }, NOTE_LABEL[m.note] ?? m.note);
-  else if (m.mine && m.status === "failed") note = h("div.note-chip.failed", null, `The relay rejected this message${m.note ? `: ${m.note}` : ""}. It won't be retried.`);
-  return h(
-    `div.msg-row${m.mine ? ".mine" : ""}`,
+  if (!m.mine && m.note) note = h("p.route-note", null, NOTE_LABEL[m.note] ?? `Your Spencer stayed quiet: ${m.note}.`);
+  else if (failed) note = h("p.route-note.failed", null, icon("warn", 13), ` The relay rejected this message${m.note ? `: ${m.note}` : ""}. It will not be retried.`);
+  const head = cont
+    ? null
+    : h(
+        "div.msg-head",
+        null,
+        h("span.who", { title: who.fp ? `Fingerprint ${who.fp}\nid ${who.id}` : undefined }, who.name),
+        who.kind === "agent" && who.mine ? h("span.tag", null, "yours") : null,
+        who.label ? h("span.tag", null, who.label) : null,
+        m.hop > 0 ? h("span.tag.hop", { title: `Automatic reply, ${m.hop} ${m.hop === 1 ? "step" : "steps"} from a person's message` }, `hop ${m.hop}`) : null,
+        time,
+        statusMark(m),
+      );
+  const row = h(
+    `div.msg.${who.kind}${who.mine ? ".mine" : ""}${cont ? ".cont" : ""}${failed ? ".failed" : ""}`,
     { id: `m-${m.id}` },
-    m.mine ? null : avatar(who.name, who.id),
-    h(
-      "div.msg-col",
-      null,
-      head,
-      h(`div.bubble.chat${m.mine ? ".mine" : ""}${by === "agent" ? ".agent" : ""}`, null, quoteFor(c, m, byId), h("div.bubble-text.md", null, markdown(m.text ?? "", (s) => richText(s, names, myNames)))),
-      note,
-    ),
+    h("div.msg-gutter", null, cont ? [h("span.gutter-time", { "aria-hidden": "true" }, timeShort(m.ts).replace(/\s?[AP]M$/i, "")), statusMark(m)] : who.avatar()),
+    h("div.msg-body", null, head, hideRef ? null : replyRef(c, m, byId), h("div.msg-text.md", null, markdown(m.text ?? "", (s) => richText(s, names, myNames))), note),
   );
+  if (!who.mine) row.style.setProperty("--h", String(hue(who.id)));
+  return row;
 }
 
 // ---------------------------------------------------------------- mention completion
@@ -267,7 +295,7 @@ function settingsModal(c) {
         syncTrust();
       }
     });
-    return h("label.trust-option", null, radio, h("span", null, h("strong", null, title), h("span.hint.block", null, desc)));
+    return h("label.trust-option", null, radio, h("span", null, h("strong", null, value === "full" ? [icon("shield", 14), " ", title] : title), h("span.hint.block", null, desc)));
   };
   const toolsField = h("div.field");
   const syncTrust = () => {
@@ -423,6 +451,38 @@ function settingsModal(c) {
   });
 }
 
+// ---------------------------------------------------------------- members panel
+
+const MEMBERS_KEY = "spencer.members";
+const wide = () => matchMedia("(min-width: 1180px)").matches;
+
+function membersPref() {
+  try {
+    return localStorage.getItem(MEMBERS_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function memberRow(c, m) {
+  const w = workingOf(c.id, m.id);
+  const info = presenceInfo(m, c.id);
+  const name = m.name ?? `${m.id.slice(0, 6)}…`;
+  const av = m.me ? selfAvatar() : avatar(name, m.id);
+  let status;
+  if (w) status = h("span.member-status.live", null, h("span.act.shimmer", null, activityLine(w.activity)));
+  else if (m.me) status = h("span.member-status", null, "this computer");
+  else if (info) status = h("span.member-status", null, info.text);
+  else status = h("span.member-status", null, m.name ? "presence unknown" : "has not said hello yet");
+  return h(
+    "li.member",
+    null,
+    mark(av, w ? { state: /^thinking/i.test(w.activity) ? "thinking" : "working", text: w.activity.replace(/…$/, "") } : info),
+    h("div.member-text", null, h("div.member-name", null, name), status),
+    h("code.fp", { title: `Fingerprint ${m.fingerprint}\nid ${m.id}` }, shortFp(m.fingerprint)),
+  );
+}
+
 // ---------------------------------------------------------------- view
 
 export function channelView(main, chId) {
@@ -430,53 +490,134 @@ export function channelView(main, chId) {
   const header = h("div.header-slot");
   const timeline = h("div.transcript", { role: "log", "aria-live": "polite", "aria-label": "Channel messages" });
   const olderBtn = h("button.btn.sm.load-older", { type: "button", hidden: true }, "Load older messages");
-  const workingBox = h("div.working-list", { role: "status", "aria-live": "polite" });
+  const workingBox = h("div.live", { role: "status" });
   const scroller = h("div.scroller", null, olderBtn, timeline, workingBox);
-  const input = h("textarea.composer-input", { rows: "1", placeholder: "Message as yourself (human)…", "aria-label": "Message as yourself", "aria-autocomplete": "list" });
-  const completer = mentionCompleter(input, getC);
-  const fileBtn = h("button.icon-btn.attach", { type: "button", "aria-label": "Send file", title: "Send file", on: { click: () => getC() && sendFileModal(getC()) } }, icon("paperclip", 18));
-  const sendBtn = h("button.send-btn", { type: "submit", "aria-label": "Send", title: "Send (Enter)" }, icon("send", 18));
-  const form = h(
-    "form.composer",
-    null,
-    completer.el,
-    h("div.composer-box", null, fileBtn, input, sendBtn),
-    h("p.composer-hint", null, "Sent as you (human, hop 0) · type @ to mention · Enter to send, Shift+Enter for a new line"),
-  );
-  main.append(header, scroller, form);
   const keeper = scrollKeeper(scroller);
+  const st = stage(scroller, keeper);
+  const members = h("aside.members", { "aria-label": "Members and access" });
   let hasOlder = false;
+  let membersOpen = wide() && membersPref();
+
+  const send = async (text) => {
+    const c = getC();
+    if (!c) return false;
+    const res = await attempt(() => api.channelSend(c.id, text, mentionIds(c, text)));
+    if (res) keeper.toBottom();
+    return !!res;
+  };
+  const completerHolder = { onKey: () => false };
+  const fileBtn = h("button.icon-btn.attach", { type: "button", "aria-label": "Send file", title: "Send file", on: { click: () => getC() && sendFileModal(getC()) } }, icon("paperclip", 18));
+  const comp = composer({
+    placeholder: "Write as yourself…",
+    label: "Message as yourself",
+    hint: ["You write here as a person; your Spencer answers on its own. ", h("kbd", null, "@"), " mentions. ", SEND_HINT()],
+    left: fileBtn,
+    onKey: (e) => completerHolder.onKey(e),
+    onSend: send,
+  });
+  const completer = mentionCompleter(comp.input, getC);
+  completerHolder.onKey = completer.onKey;
+  comp.input.setAttribute("aria-autocomplete", "list");
+  comp.form.prepend(completer.el);
+
+  main.append(header, st.el, comp.form, members);
+
+  const setMembersOpen = (open, remember = true) => {
+    membersOpen = open;
+    main.classList.toggle("members-open", open);
+    if (remember && wide()) {
+      try {
+        localStorage.setItem(MEMBERS_KEY, open ? "1" : "0");
+      } catch {
+        /* storage unavailable */
+      }
+    }
+    renderHeader();
+    if (open && !wide()) members.querySelector("button")?.focus();
+  };
+
+  const renderMembers = () => {
+    const c = getC();
+    if (!c) return;
+    const tools = c.allowedMcpTools ?? [];
+    const full = c.trust === "full";
+    members.replaceChildren(
+      h("div.members-head", null, h("h2", null, c.kind === "group" ? "In this group" : "In this channel"), iconButton("close", "Close members", () => setMembersOpen(false), "members-close")),
+      h("ul.member-list", null, c.members.map((m) => memberRow(c, m))),
+      h(
+        "section.access",
+        { "aria-label": "Access" },
+        h("h2", null, "What peers here can do"),
+        h(
+          `div.access-row${full ? ".full" : ""}`,
+          null,
+          icon("shield", 15),
+          h("div", null, h("strong", null, full ? "Full trust" : "Standard"), h("p", null, full ? "They can use every MCP tool and get files without your approval." : "Your Spencer asks you before doing tasks or sending files.")),
+        ),
+        full
+          ? null
+          : h(
+              "div.access-row",
+              null,
+              icon("plug", 15),
+              h(
+                "div",
+                null,
+                h("strong", null, tools.length ? `${tools.length} tool${tools.length === 1 ? "" : "s"} without asking` : "No tools without asking"),
+                tools.length ? h("ul.access-tools", null, tools.map((t) => h("li", null, h("code", null, t.replace(/^mcp__/, "").replace(/__/, " · "))))) : null,
+              ),
+            ),
+        h("div.access-row", null, icon("reply", 15), h("div", null, h("strong", null, c.autoReply ? "Auto-reply on" : "Auto-reply off"), h("p", null, c.autoReply ? (c.kind === "group" ? "Your Spencer answers when mentioned." : "Your Spencer answers on its own.") : "Your Spencer only listens."))),
+        h("button.btn.sm", { type: "button", on: { click: () => settingsModal(c) } }, icon("gear", 14), "Channel settings"),
+      ),
+    );
+  };
 
   const renderHeader = () => {
     const c = getC();
     if (!c) return;
     const title = channelTitle(c);
-    const subtitle = c.kind === "direct" ? (c.name && c.name !== title ? `Direct · ${c.name}` : "Direct") : `Group · ${c.members.length} member${c.members.length === 1 ? "" : "s"}`;
-    const chips = h(
-      "div.member-chips",
-      { "aria-label": "Members" },
-      c.members.map((m) =>
-        h(
-          `span.chip${m.me ? ".me" : ""}`,
-          { title: `${m.name ?? "(no name yet)"}${m.me ? " (you)" : ""}\nFingerprint ${m.fingerprint}\nid ${m.id}`, tabindex: "0" },
-          avatar(m.name ?? "?", m.id, "xs"),
-          m.me ? "You" : (m.name ?? `${m.id.slice(0, 6)}…`),
-        ),
-      ),
+    const p = peers(c)[0];
+    const working = workingIn(chId);
+    let av;
+    let status;
+    if (c.kind === "group") {
+      av = mark(h("span.avatar.agent.group", { "aria-hidden": "true" }, icon("users", 16)), working.length ? { state: "working", text: "working" } : null);
+      const others = peers(c);
+      const known = others.filter((m) => presenceOf(m).known);
+      const online = known.filter((m) => presenceOf(m).online).length;
+      status = `${c.members.length} member${c.members.length === 1 ? "" : "s"}${known.length ? `, ${online} online` : ""}`;
+    } else if (!p) {
+      av = mark(h("span.avatar.agent.pending", { "aria-hidden": "true" }, icon("link", 15)), null);
+      status = "Waiting for them to use the invite";
+    } else {
+      const info = presenceInfo(p, chId);
+      av = mark(avatar(title, p.id), info);
+      status = info ? info.text.replace(/^./, (x) => x.toUpperCase()) : c.name && c.name !== title ? c.name : "Direct";
+    }
+    const membersBtn = h(
+      `button.icon-btn.members-btn${membersOpen ? ".on" : ""}`,
+      { type: "button", "aria-label": membersOpen ? "Hide members" : "Show members", title: "Members and access", "aria-pressed": String(membersOpen), on: { click: () => setMembersOpen(!membersOpen) } },
+      icon("users", 18),
     );
     header.replaceChildren(
       viewHeader(
         [
-          c.kind === "group" ? h("span.avatar.group", { "aria-hidden": "true" }, icon("users", 16)) : avatar(title, peers(c)[0]?.id ?? c.id),
-          h("div.title-stack", null, h("h1", null, title), h(
-            "span.subtitle",
+          av,
+          h(
+            "div.title-stack",
             null,
-            subtitle,
-            c.trust === "full" ? h("span.pill.warn.inline", { title: "Peers here can use your Spencer's MCP tools without approval" }, "full trust") : null,
-            c.autoReply ? null : h("span.pill.muted.inline", null, "auto-reply off"),
-          )),
+            h("h1", null, title),
+            h(
+              "span.subtitle",
+              null,
+              h("span", null, status),
+              c.trust === "full" ? h("span.pill.attn", { title: "Peers here can use your Spencer's MCP tools without approval" }, icon("shield", 11), "full trust") : null,
+              c.autoReply ? null : h("span.pill.muted", null, "auto-reply off"),
+            ),
+          ),
         ],
-        [chips, iconButton("paperclip", "Send file", () => sendFileModal(c), "hide-narrow"), iconButton("gear", "Channel settings", () => settingsModal(c))],
+        [iconButton("paperclip", "Send file", () => sendFileModal(c), "hide-narrow"), membersBtn, iconButton("gear", "Channel settings", () => settingsModal(c))],
       ),
     );
   };
@@ -487,7 +628,7 @@ export function channelView(main, chId) {
     keeper.before();
     const msgs = S.messages.get(chId);
     if (!msgs) {
-      timeline.replaceChildren(h("div.loading", null, "Loading messages…"));
+      timeline.replaceChildren(skeleton(5));
       keeper.after();
       return;
     }
@@ -495,24 +636,38 @@ export function channelView(main, chId) {
     const names = [S.me?.name, ...c.members.map((m) => m.name)].filter(Boolean);
     const myNames = [S.me?.name, ...c.members.filter((m) => m.me).map((m) => m.name)].filter(Boolean);
     const items = [
-      ...msgs.map((m) => ({ ts: m.ts, node: () => messageRow(c, m, byId, names, myNames) })),
-      ...[...S.transfers.values()].filter((t) => t.ch === chId).map((t) => ({ ts: t.createdAt, node: () => h("div.xfer-inline", null, transferCard(t)) })),
+      ...msgs.map((m) => ({ ts: m.ts, m })),
+      ...[...S.transfers.values()].filter((t) => t.ch === chId).map((t) => ({ ts: t.createdAt, t })),
     ].sort((a, b) => a.ts - b.ts);
     const nodes = [];
-    if (!peers(c).length) {
+    if (!items.length) {
+      nodes.push(
+        !peers(c).length
+          ? emptyState({ icon: "link", title: "Waiting for them to join", text: "Send your invite link privately. Once their Spencer connects, it says hello here and you can start talking." })
+          : emptyState({ icon: "send", title: "Nothing said yet", text: "Write a message yourself, or ask your Spencer to talk here for you." }),
+      );
+    } else if (!peers(c).length) {
       nodes.push(h("div.callout.info", null, icon("link", 16), h("span", null, "Nobody has joined yet. Send your invite link privately; messages show up here once they connect.")));
     }
-    if (!items.length) {
-      nodes.push(h("div.empty-state", null, h("p", null, "No messages yet."), h("p.hint", null, "Say hi, or ask your Spencer (pinned at the top) to talk here for you.")));
-    }
     let lastDay = "";
+    let prev = null; // previous timeline item
     for (const it of items) {
       const day = new Date(it.ts).toDateString();
       if (day !== lastDay) {
-        nodes.push(h("div.day-sep", null, h("span", null, new Date(it.ts).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" }))));
+        nodes.push(h("div.day-sep", null, h("span", null, new Date(it.ts).toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" }))));
         lastDay = day;
+        prev = null;
       }
-      nodes.push(it.node());
+      if (it.t) nodes.push(h("div.xfer-inline", null, transferCard(it.t)));
+      else if (it.m.type !== "chat") nodes.push(systemLine(c, it.m));
+      else {
+        const m = it.m;
+        const pm = prev?.m?.type === "chat" ? prev.m : null;
+        const sameSpeaker = pm && pm.from === m.from && (pm.by ?? "") === (m.by ?? "") && m.ts - pm.ts < GROUP_MS;
+        const repliesToPrev = pm && m.replyTo === pm.id;
+        nodes.push(messageRow(c, m, byId, names, myNames, !!sameSpeaker && (!m.replyTo || repliesToPrev), !!repliesToPrev));
+      }
+      prev = it;
     }
     timeline.replaceChildren(...nodes);
     olderBtn.hidden = !hasOlder;
@@ -521,7 +676,13 @@ export function channelView(main, chId) {
 
   const load = async () => {
     const r = await attempt(() => api.channelMessages(chId, 100));
-    if (!r) return;
+    if (!r) {
+      if (!S.messages.get(chId)) {
+        const retry = h("button.btn", { type: "button", on: { click: () => (timeline.replaceChildren(skeleton(5)), load()) } }, "Try again");
+        timeline.replaceChildren(emptyState({ icon: "offline", title: "Couldn't load this conversation", text: "Spencer did not answer. Check that the daemon is running.", actions: [retry] }));
+      }
+      return;
+    }
     const items = r.items ?? [];
     hasOlder = items.length >= 100;
     setMessages(chId, items);
@@ -543,51 +704,42 @@ export function channelView(main, chId) {
     scroller.scrollTop = scroller.scrollHeight - prevH;
   });
 
-  const send = async () => {
-    const c = getC();
-    const text = input.value.trim();
-    if (!c || !text) return;
-    input.value = "";
-    autoGrow(input);
-    const res = await attempt(() => api.channelSend(c.id, text, mentionIds(c, text)));
-    if (!res) {
-      input.value = text;
-      autoGrow(input);
-    } else {
-      keeper.toBottom();
-    }
-  };
-  form.addEventListener("submit", (e) => {
-    e.preventDefault();
-    send();
-  });
-  input.addEventListener("keydown", (e) => {
-    if (completer.onKey(e)) return;
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
-      e.preventDefault();
-      send();
-    }
-  });
-  input.addEventListener("input", () => autoGrow(input));
-
   const onChannel = () => {
     if (!getC()) return; // removed: the router moves away
     renderHeader();
+    renderMembers();
     renderTimeline();
   };
+  let seen = S.messages.get(chId)?.length ?? 0;
   const onMessages = () => {
     renderTimeline();
+    const n = S.messages.get(chId)?.length ?? 0;
+    if (seen && n > seen) st.note();
+    seen = n;
     markRead(chId);
   };
   const onVisible = () => document.visibilityState === "visible" && markRead(chId);
+  const onKey = (e) => {
+    if (e.key === "Escape" && membersOpen && !wide() && !document.querySelector("#modal-root .overlay")) setMembersOpen(false, false);
+  };
+  const onResize = () => {
+    // Crossing the breakpoint: docked panels follow the saved preference, sheets start closed.
+    const want = wide() && membersPref();
+    if (want !== membersOpen) setMembersOpen(want, false);
+  };
+  const mq = matchMedia("(min-width: 1180px)");
 
+  main.classList.toggle("members-open", membersOpen);
   renderHeader();
+  renderMembers();
   renderTimeline();
   markRead(chId);
   load();
-  requestAnimationFrame(() => input.focus());
+  requestAnimationFrame(() => comp.input.focus());
 
   document.addEventListener("visibilitychange", onVisible);
+  document.addEventListener("keydown", onKey);
+  mq.addEventListener("change", onResize);
   const onTransfer = (t) => {
     if (t && t.ch !== chId) return;
     // Progress ticks: swap just that card so the transcript (and any text selection) stays put.
@@ -595,33 +747,32 @@ export function channelView(main, chId) {
     if (existing) existing.replaceWith(transferCard(t));
     else renderTimeline();
   };
-  // "PJalv's Spencer · Using t3code · thread read…" while a Spencer works on a reply (Grok-style).
+  // The live trace of every Spencer working on a reply here, mine included.
   const renderWorking = () => {
     const c = getC();
     if (!c) return;
     keeper.before();
+    const msgs = S.messages.get(chId) ?? [];
     const rows = workingIn(chId).map((w) => {
       const mine = w.from === S.me?.id;
       const mem = c.members.find((m) => m.id === w.from);
       const name = mine ? (S.me?.name ?? "Your Spencer") : (mem?.name ?? "A Spencer");
-      return h(
-        `div.working-row${mine ? ".mine" : ""}`,
-        null,
-        mine ? null : avatar(name, w.from, "xs"),
-        h(
-          "div.working-pill",
-          null,
-          h("span.dots", { "aria-hidden": "true" }, h("i"), h("i"), h("i")),
-          h("strong", null, name),
-          h("span.working-activity", null, w.activity),
-        ),
-      );
+      const target = msgs.find((m) => m.id === w.replyTo);
+      const context = target
+        ? h("button.trace-ref", { type: "button", title: "Go to the message being answered", on: { click: () => jumpTo(target.id) } }, icon("reply", 12), h("span", null, `answering ${speaker(c, target).name}`))
+        : null;
+      return trace({ key: `${chId} ${w.from}`, avatar: mine ? selfAvatar() : avatar(name, w.from), name, activity: w.activity, steps: w.steps, since: w.since, context });
     });
     workingBox.replaceChildren(...rows);
     keeper.after();
+    renderHeader();
+    renderMembers();
   };
   renderWorking();
-  const staleTimer = setInterval(() => workingIn(chId).length && renderWorking(), 15_000);
+  const staleTimer = setInterval(() => {
+    renderMembers(); // "seen 5m ago" ages
+    if (workingIn(chId).length) renderWorking();
+  }, 15_000);
   const offs = [
     on(`channel:${chId}`, onChannel),
     on(`messages:${chId}`, onMessages),
@@ -633,6 +784,9 @@ export function channelView(main, chId) {
       clearInterval(staleTimer);
       offs.forEach((f) => f());
       document.removeEventListener("visibilitychange", onVisible);
+      document.removeEventListener("keydown", onKey);
+      mq.removeEventListener("change", onResize);
+      main.classList.remove("members-open");
     },
   };
 }

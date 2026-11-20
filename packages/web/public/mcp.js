@@ -2,21 +2,21 @@
 import { h, icon } from "./dom.js";
 import { api, attempt } from "./api.js";
 import { S, on, emit } from "./state.js";
-import { viewHeader } from "./common.js";
+import { viewHeader, emptyState } from "./common.js";
 
 const STATUS_TEXT = { connected: "connected", error: "error", disabled: "disabled", connecting: "connecting…" };
 
 export function mcpView(main) {
   const list = h("div.mcp-list");
   main.append(
-    viewHeader([icon("plug", 18), h("h1", null, "MCP servers")]),
+    viewHeader([h("span.title-icon", { "aria-hidden": "true" }, icon("plug", 18)), h("div.title-stack", null, h("h1", null, "MCP servers"), h("span.subtitle", null, "Tools your Spencer can call"))]),
     h(
       "div.page",
       null,
       h(
         "div.page-body",
         null,
-        h("p.lede", null, "Tools your Spencer can call. Your own conversation can use all of them; a channel's agent only gets the ones you allow in that channel's settings."),
+        h("p.lede", null, "Your own conversation can use every tool here. In a channel, peers only reach the tools you allow in that channel's settings."),
         list,
       ),
     ),
@@ -24,7 +24,7 @@ export function mcpView(main) {
 
   const render = () => {
     if (!S.mcp.length) {
-      list.replaceChildren(h("div.empty-state", null, h("p", null, "No MCP servers configured."), h("p.hint", null, "Add them under mcpServers in Spencer's config.json, then restart the daemon.")));
+      list.replaceChildren(emptyState({ icon: "plug", title: "No MCP servers yet", text: "Add them under mcpServers in Spencer's config.json, then restart the daemon." }));
       return;
     }
     list.replaceChildren(
@@ -46,7 +46,7 @@ export function mcpView(main) {
             ? h(
                 "ul.mcp-tools",
                 null,
-                s.tools.map((t) => h("li", null, h("code", null, t.name), t.description ? h("span.check-desc", null, t.description) : null)),
+                s.tools.map((t) => h("li", null, h("code", { title: t.name }, t.name.replace(/^mcp__.+?__/, "").replace(/_/g, " ")), t.description ? h("span.check-desc", null, t.description) : null)),
               )
             : null,
         ),
