@@ -141,7 +141,7 @@ describe("crash/restart (child processes, SIGKILL)", { skip: haveCroc ? false : 
   after(async () => {
     for (const n of [A, B]) await n.kill9().catch(() => {});
     // A SIGKILLed daemon cannot stop its croc children; whatever is left of them goes here.
-    killAll(crocProcsUnder(t.dir));
+    await killAll(crocProcsUnder(t.dir));
     await relay?.stop().catch(() => {});
     await croc?.stop();
     t.cleanup();

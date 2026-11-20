@@ -235,7 +235,16 @@ export function crocProcsUnder(dir: string): number[] {
   return out;
 }
 
-export function killAll(pids: number[]): void {
+/** SIGKILLs `pids` and waits (up to 5 s) until they are gone. */
+export async function killAll(pids: number[]): Promise<void> {
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
   for (const pid of pids) {
     try {
       process.kill(pid, "SIGKILL");
@@ -243,4 +252,5 @@ export function killAll(pids: number[]): void {
       /* gone */
     }
   }
+  await waitFor(() => !pids.some(alive), "killed processes to exit", 5000, 20).catch(() => {});
 }

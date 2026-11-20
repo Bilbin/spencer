@@ -109,7 +109,7 @@ describe("two Spencers (integration)", { skip: haveCroc ? false : `croc missing 
   after(async () => {
     for (const n of nodes.reverse()) await n.daemon.stop().catch(() => {});
     await relay?.stop().catch(() => {});
-    killAll(crocProcsUnder(t.dir)); // only if something above failed half-way
+    await killAll(crocProcsUnder(t.dir)); // only if something above failed half-way
     await croc?.stop();
     t.cleanup();
   });
