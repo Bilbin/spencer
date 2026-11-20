@@ -118,13 +118,13 @@ async function openAICompatibleProvider(
     api: "openai-completions",
     provider: "openai-compatible",
     baseUrl: cfg.baseUrl,
-    reasoning: false,
+    reasoning: !!cfg.thinking && cfg.thinking !== "off",
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: cfg.contextWindow ?? 128_000,
     maxTokens: cfg.maxTokens ?? 8192,
     // Common for Ollama, vLLM, llama.cpp and similar servers.
-    compat: { supportsDeveloperRole: false, supportsReasoningEffort: false },
+    compat: { supportsDeveloperRole: false, supportsReasoningEffort: !!cfg.thinking && cfg.thinking !== "off" },
   };
   return createProvider({
     id: "openai-compatible",

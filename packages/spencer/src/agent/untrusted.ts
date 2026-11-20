@@ -24,6 +24,8 @@ export interface PeerMessageInfo {
   text: string;
   /** Extra attributes (already plain strings). */
   attrs?: Record<string, string>;
+  /** The owner set this channel to full trust: still wrapped (so it can't pose as us), but marked trusted. */
+  trusted?: boolean;
 }
 
 export function wrapPeerMessage(m: PeerMessageInfo): string {
@@ -34,7 +36,7 @@ export function wrapPeerMessage(m: PeerMessageInfo): string {
   if (m.fingerprint) attrs.push(["fingerprint", m.fingerprint]);
   attrs.push(["hop", String(m.hop)]);
   for (const [k, v] of Object.entries(m.attrs ?? {})) attrs.push([k, v]);
-  attrs.push(["untrusted", "true"]);
+  attrs.push(m.trusted ? ["trust", "full"] : ["untrusted", "true"]);
   const a = attrs.map(([k, v]) => `${k}="${escapeAttr(v)}"`).join(" ");
   return `<peer_message ${a}>\n${escapeBody(m.text)}\n</peer_message>`;
 }

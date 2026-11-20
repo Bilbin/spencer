@@ -231,9 +231,16 @@ Terminal: `completed | declined | failed | expired | cancelled`
 ### 7.1 Conversations (pi-durable 1.5.2, behind `AgentRuntime`)
 - **Owner conversation**: the pi-durable root conversation. The owner's tools: `list_peers`, `send_message`,
   `send_file`, `list_transfers`, `read_channel`, `create_invite`, MCP tools, and optionally CodingTools (`policy.ownerCodingTools`).
-- **Channel conversation**: one ownerless conversation per channel. It sees peer messages as
-  *untrusted data*. Its tools are limited to `notify_owner` and `propose_file_send`, plus the MCP tools
-  the owner allowed for that channel. No shell, no file reads, no MCP by default.
+- **Channel conversation**: one ownerless conversation per channel. Its tools are `notify_owner`, `ask_owner`
+  and `propose_file_send`, plus MCP tools depending on the channel's **trust** level. It never gets a shell or file reads.
+  - `standard` (default): peer messages are *untrusted data* (`<peer_message untrusted="true">`). Only the MCP tools
+    in `allowedMcpTools`. Anything else goes through `ask_owner`: a request card in the owner chat with
+    Approve / Deny. Approve submits an owner message ("I approve this request …") to the owner conversation, which does
+    the task with its full tools and reports back with `send_message`. Deny sends "My owner declined …" at
+    `hop = maxHops`, so the peer's agent doesn't answer it.
+  - `full`: every MCP tool; peer messages are wrapped as `<peer_message trust="full">`; outgoing files in the
+    channel need no approval (whoever asked).
+  - Each MCP call made from a channel conversation leaves an audit note in the owner chat.
 
 ### 7.2 Routing an incoming chat (`decideReply`)
 The message is always written to the channel conversation as context (a `write` entry with model text).
@@ -263,14 +270,16 @@ sees the answer there, and the owner's model has it as context the next time the
 
 | Method | Path | Body → Response |
 |---|---|---|
-| GET | `/api/state` | → `{me:{id, name, fingerprint}, relay:{url, connected}, relays:{url, connected}[], channels: Channel[], transfers: Transfer[], mcp: McpServer[], policy, ownerBusy: boolean}`. `relay` is the default relay from config; `connected` is true when every relay in use is connected. `relays` lists each relay in use (one per distinct channel relay, plus the default). |
+| GET | `/api/state` | → `{me:{id, name, fingerprint}, relay:{url, connected}, relays:{url, connected}[], channels: Channel[], transfers: Transfer[], mcp: McpServer[], policy, ownerBusy: boolean, requests: OwnerRequest[]}`. `relay` is the default relay from config; `connected` is true when every relay in use is connected. `relays` lists each relay in use (one per distinct channel relay, plus the default). |
 | GET | `/api/owner/messages?limit=` | → `{items: OwnerItem[]}` (owner conversation transcript, oldest first; default 200, max 2000) |
 | POST | `/api/owner/messages` | `{text}` → `{submissionId}` |
 | GET | `/api/channels` | → `{items: Channel[]}` |
 | GET | `/api/channels/:ch` | → `Channel` |
 | GET | `/api/channels/:ch/messages?limit=&before=` | → `{items: ChannelMessage[]}`: chat and hello messages, oldest first, default 100, max 1000. `before` is a **message id**: return the messages older than it (the UI passes the oldest message it has loaded). An unknown id → 404. Without `before`, the channel is marked read. |
 | POST | `/api/channels/:ch/messages` | `{text, mentions?}` → `{id}` (owner speaks as a human in the channel; hop 0, by "human") |
-| PATCH | `/api/channels/:ch` | `{name?, autoReply?, allowedMcpTools?: string[]}` → `Channel` |
+| PATCH | `/api/channels/:ch` | `{name?, autoReply?, allowedMcpTools?: string[], trust?: "standard"\|"full"}` → `Channel` |
+| GET | `/api/requests` | → `{items: OwnerRequest[]}` (newest first, max 200) |
+| POST | `/api/requests/:id/approve` · `/deny` | → `OwnerRequest` (409 if already decided) |
 | DELETE | `/api/channels/:ch` | leave the channel → `{}` |
 | POST | `/api/invites` | `{kind:"direct"\|"group", name}` → `{link, channel: Channel}` |
 | POST | `/api/invites/accept` | `{link}` → `{channel: Channel}` |
@@ -279,12 +288,14 @@ sees the answer there, and the owner's model has it as context the next time the
 | POST | `/api/transfers` | `{ch, path, to?}` → `Transfer` (owner-initiated; `to` is required in groups) |
 | POST | `/api/transfers/:tid/approve` · `/deny` · `/accept` · `/decline` · `/cancel` | → `Transfer` |
 | GET | `/api/mcp` | → `{servers: McpServer[]}` |
-| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", url, connected}`, `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}` |
+| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", url, connected}`, `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}` |
 
 ```ts
 interface Channel { id: string; kind: "direct"|"group"; name: string; relayUrl: string;
   members: { id: string; name?: string; fingerprint: string; me: boolean }[];
-  autoReply: boolean; allowedMcpTools: string[]; unread: number; lastSeq: number; createdAt: number }
+  autoReply: boolean; allowedMcpTools: string[]; trust: "standard"|"full"; unread: number; lastSeq: number; createdAt: number }
+interface OwnerRequest { id: string; ch: string; channelName: string; from: string; fromName?: string;
+  text: string; state: "pending"|"approved"|"denied"; createdAt: number; decidedAt?: number }
 interface ChannelMessage { id: string; ch: string; from: string; fromName?: string; mine: boolean;
   ts: number; seq?: number; type: string; text?: string; hop?: number; by?: "human"|"agent";
   replyTo?: string; mentions?: string[];   // mentions: identity ids
@@ -298,7 +309,8 @@ interface Transfer { tid: string; ch: string; direction: "out"|"in"; peer: strin
   error?: string; path?: string; createdAt: number; updatedAt: number; expiresAt: number }
 interface OwnerItem { id: string; role: "user"|"assistant"|"tool"|"note"; text: string; ts: number;
   toolName?: string; isError?: boolean;
-  untrusted?: boolean }   // text written by another person's agent (e.g. a reply to something the owner sent)
+  untrusted?: boolean;    // text written by another person's agent (e.g. a reply to something the owner sent)
+  request?: string }      // an ask_owner request card: the OwnerRequest id
 interface McpServer { name: string; transport: "stdio"|"http"; status: "connecting"|"connected"|"error"|"disabled"; error?: string;
   tools: { name: string; description?: string }[] }   // tool name as exposed: mcp__<server>__<tool>
 ```

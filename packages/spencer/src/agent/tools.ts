@@ -3,8 +3,9 @@
  *
  * Owner conversation: list_peers, send_message, send_file, list_transfers, read_channel, create_invite
  * (+ MCP tools and optionally pi-durable's coding tools, added by the agent).
- * Channel conversations, deliberately minimal: notify_owner, propose_file_send (+ MCP tools the owner allowed for
- * that channel). No shell, no file reading, no coding tools, ever.
+ * Channel conversations, deliberately minimal: notify_owner, ask_owner, propose_file_send, plus MCP tools: the ones
+ * the owner allowed for that channel, or all of them when the channel is fully trusted. No shell, no file reading,
+ * no coding tools, ever.
  *
  * Tools are global by name (see `ToolSpec`): every execute derives its channel from `ctx.conversationKey`.
  */
@@ -21,11 +22,13 @@ export interface ToolDeps {
   ownerNote(text: string, opts?: { untrusted?: boolean }): Promise<void>;
   /** The member whose message the channel agent is currently answering. */
   currentAsker(ch: string): Promise<string | undefined>;
+  /** Record a request for the owner to approve or deny (shown as a card in the owner chat). */
+  askOwner?(ch: string, from: string, text: string): Promise<string>;
   log?(msg: string): void;
 }
 
 export const OWNER_TOOL_NAMES = ["list_peers", "send_message", "send_file", "list_transfers", "read_channel", "create_invite"];
-export const CHANNEL_TOOL_NAMES = ["notify_owner", "propose_file_send"];
+export const CHANNEL_TOOL_NAMES = ["notify_owner", "ask_owner", "propose_file_send"];
 
 type Obj = Record<string, unknown>;
 const str = (description: string) => ({ type: "string", description });
@@ -46,6 +49,17 @@ export function resolveChannel(core: CoreServices, ref: string): Channel | strin
   const named = all.filter((c) => c.name.toLowerCase() === r.toLowerCase());
   if (named.length === 1) return named[0]!;
   if (named.length > 1) return `several channels are named "${r}"; use one of these ids: ${named.map((c) => c.id).join(", ")}`;
+  // Loose: "Alvin" finds the direct channel "Alvin's Spencer" (by channel name or a member's name handles).
+  const norm = r.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+  if (norm) {
+    const loose = all.filter(
+      (c) =>
+        nameHandles(c.name).includes(norm) ||
+        (c.kind === "direct" && c.members.some((m) => !m.me && m.name && nameHandles(m.name).includes(norm))),
+    );
+    if (loose.length === 1) return loose[0]!;
+    if (loose.length > 1) return `"${r}" matches several channels; use one of these ids: ${loose.map((c) => `${c.name} (${c.id})`).join(", ")}`;
+  }
   return `no channel "${r}". Known channels: ${all.map((c) => `${c.name} (${c.id})`).join(", ") || "none"}`;
 }
 
@@ -249,9 +263,27 @@ export function channelTools(deps: ToolDeps): ToolSpec[] {
       },
     },
     {
+      name: "ask_owner",
+      description:
+        "Ask your owner to approve something the peer wants that you cannot do yourself (e.g. a task needing tools you don't have). " +
+        "Your owner gets Approve/Deny buttons; if they approve, your owner's Spencer carries it out with its full tools and reports back in this channel. " +
+        "Describe the request completely and concretely: it is all your owner's Spencer will see.",
+      parameters: schema({ request: str("What exactly should be done, with every detail needed") }, ["request"]),
+      async execute(args: { request: string }, ctx) {
+        const ch = channelOfKey(core, ctx);
+        if (!ch) return fail("not in a channel conversation");
+        if (!deps.askOwner) return fail("asking the owner is not available");
+        const text = String(args.request ?? "").trim().slice(0, 4000);
+        if (!text) return fail("request is empty");
+        const from = (await deps.currentAsker(ch.id)) ?? ch.members.find((m) => !m.me)?.id ?? "";
+        await deps.askOwner(ch.id, from, text);
+        return "Your owner has been asked. If they approve, their Spencer will do it and report back in this channel. Tell the peer it is waiting for approval.";
+      },
+    },
+    {
       name: "propose_file_send",
       description:
-        "Propose sending one of your owner's files to the peer who asked. Your owner always decides; nothing is sent without their approval. You cannot see the file.",
+        "Send one of your owner's files to the peer who asked. Unless this channel is fully trusted, your owner approves it first. You cannot see the file.",
       parameters: schema({ path: str("Path of the file"), reason: str("Why the peer wants it") }, ["path", "reason"]),
       async execute(args: { path: string; reason: string }, ctx) {
         const ch = channelOfKey(core, ctx);
@@ -262,8 +294,10 @@ export function channelTools(deps: ToolDeps): ToolSpec[] {
         const to = (await deps.currentAsker(ch.id)) ?? (ch.kind === "direct" ? ch.members.find((m) => !m.me)?.id : undefined);
         if (!to) return fail("could not tell which member asked for the file");
         try {
-          await core.requestFileSend(ch.id, { path, to, initiatedBy: "peer-agent", reason });
-          return "Proposal recorded. Your owner will decide whether to send it.";
+          const t = await core.requestFileSend(ch.id, { path, to, initiatedBy: "peer-agent", reason });
+          return t.state === "awaiting_approval"
+            ? "Proposal recorded. Your owner will decide whether to send it."
+            : `Sending ${t.name} (${t.size} bytes); the peer receives an offer now.`;
         } catch (e) {
           // Do not leak details about the owner's file system to the peer.
           deps.log?.(`propose_file_send in ${ch.id} failed: ${(e as Error).message}`);

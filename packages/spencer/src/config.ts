@@ -2,10 +2,12 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high";
+
 export type ModelConfig =
   | { provider: "fake" }
   /** Built-in pi-ai provider id (anthropic, openai, openrouter, google, xai, groq, …). */
-  | { provider: string; modelId: string; apiKeyEnv?: string; apiKey?: string; baseUrl?: string }
+  | { provider: string; modelId: string; apiKeyEnv?: string; apiKey?: string; baseUrl?: string; thinking?: ThinkingLevel }
   | {
       provider: "openai-compatible";
       baseUrl: string;
@@ -14,6 +16,8 @@ export type ModelConfig =
       apiKey?: string;
       contextWindow?: number;
       maxTokens?: number;
+      /** Reasoning effort, sent as `reasoning_effort` (needs a reasoning model). Absent or "off": none. */
+      thinking?: ThinkingLevel;
     };
 
 export type McpServerConfig =

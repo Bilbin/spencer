@@ -485,6 +485,7 @@ export class Daemon {
       dataDir: this.dataDir,
       me,
       policy: () => this.need("cfg").policy,
+      trust: (ch) => channels.get(ch)?.trust ?? "standard",
       enqueue: (ch, body) => {
         outbox.enqueue(ch, body);
       },
@@ -530,6 +531,7 @@ export class Daemon {
       mcp: agent?.mcpStatus() ?? [],
       policy: cfg.policy,
       ownerBusy: agent?.ownerBusy() ?? false,
+      requests: agent?.listRequests?.() ?? [],
     };
   }
 }

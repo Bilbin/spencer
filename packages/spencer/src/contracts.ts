@@ -22,6 +22,8 @@ export interface ChannelMember {
   me: boolean;
 }
 
+export type ChannelTrust = "standard" | "full";
+
 export interface Channel {
   id: string;
   kind: "direct" | "group";
@@ -30,6 +32,12 @@ export interface Channel {
   members: ChannelMember[];
   autoReply: boolean;
   allowedMcpTools: string[];
+  /**
+   * How far the owner trusts this channel's peers. "standard": peer turns get only notify_owner, ask_owner,
+   * propose_file_send and the MCP tools in `allowedMcpTools`; every outgoing file needs approval.
+   * "full": peer turns may use every MCP tool, and file sends in this channel need no approval.
+   */
+  trust: ChannelTrust;
   unread: number;
   lastSeq: number;
   createdAt: number;
@@ -114,6 +122,23 @@ export interface OwnerItem {
   isError?: boolean;
   /** The text comes from another person's agent (e.g. a peer's reply to something the owner sent): show it as untrusted. */
   untrusted?: boolean;
+  /** The note is an owner request (`ask_owner`) the owner can approve or deny: its id. */
+  request?: string;
+}
+
+/** Something a peer asked for that needs the owner's go-ahead (channel tool `ask_owner`). */
+export interface OwnerRequest {
+  id: string;
+  ch: string;
+  channelName: string;
+  /** Who asked (identity id) and their self-chosen name. */
+  from: string;
+  fromName?: string;
+  /** What the channel agent says the peer wants (written from untrusted peer input). */
+  text: string;
+  state: "pending" | "approved" | "denied";
+  createdAt: number;
+  decidedAt?: number;
 }
 
 export interface McpServerStatus {
@@ -133,6 +158,7 @@ export type DaemonEvent =
   | { type: "transfer"; transfer: Transfer }
   | { type: "owner"; item: OwnerItem }
   | { type: "owner_busy"; busy: boolean }
+  | { type: "request"; request: OwnerRequest }
   | { type: "relay"; url: string; connected: boolean }
   | { type: "mcp"; servers: McpServerStatus[] };
 
@@ -148,6 +174,8 @@ export interface TransferDeps {
   dataDir: string;
   me: Identity;
   policy: () => Policy;
+  /** The channel's trust level ("full" skips approval of outgoing files). Absent: "standard". */
+  trust?: (ch: string) => ChannelTrust;
   /**
    * Durably enqueue a file_* body to the channel's outbox. Synchronous: it only inserts a row,
    * so it can be called inside a db transaction (BEGIN/COMMIT) together with a state change.
@@ -275,4 +303,8 @@ export interface AgentService {
   /** A channel was created/joined/updated (settings, members): reconfigure its conversation. */
   channelChanged(ch: string): Promise<void>;
   mcpStatus(): McpServerStatus[];
+  /** Owner requests (`ask_owner`), newest first. */
+  listRequests?(): OwnerRequest[];
+  /** Approve (the owner conversation carries it out) or deny a pending request. */
+  decideRequest?(id: string, approve: boolean): Promise<OwnerRequest>;
 }

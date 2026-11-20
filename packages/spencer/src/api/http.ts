@@ -304,6 +304,13 @@ export class ApiServer {
       }
     }
 
+    if (p === "/api/requests" && method === "GET") return { items: b.agent().listRequests?.() ?? [] };
+    if ((m = /^\/api\/requests\/([A-Za-z0-9_-]{1,64})\/(approve|deny)$/.exec(p)) && method === "POST") {
+      const agent = b.agent();
+      if (!agent.decideRequest) throw new HttpError(404, "requests are not supported");
+      return await agent.decideRequest(m[1]!, m[2] === "approve");
+    }
+
     if (p === "/api/channels" && method === "GET") return { items: b.core.listChannels() };
 
     if ((m = /^\/api\/channels\/([A-Za-z0-9_-]{1,64})\/messages$/.exec(p))) {

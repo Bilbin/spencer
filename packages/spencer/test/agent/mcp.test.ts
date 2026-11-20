@@ -5,7 +5,7 @@ import { McpManager, mcpToolName } from "../../src/agent/mcp.ts";
 import { SpencerAgent } from "../../src/agent/agent.ts";
 import type { FakeRequestInfo } from "../../src/agent/fake-brain.ts";
 import type { DaemonEvent } from "../../src/contracts.ts";
-import { channel, makeCore, peerChat } from "./helpers.ts";
+import { channel, makeCore, peerChat, waitFor } from "./helpers.ts";
 
 const FIXTURE = fileURLToPath(new URL("./fixtures/echo-mcp-server.ts", import.meta.url));
 const ECHO = { command: process.execPath, args: [FIXTURE] };
@@ -83,8 +83,8 @@ test("agent: owner /tool calls an MCP tool end to end; channels get only allowed
     assert.deepEqual(items.at(-1), { ...items.at(-1)!, role: "assistant", text: "done: echo: hi" });
     assert.ok(items.some((i) => i.role === "tool" && i.toolName === "mcp__echo__echo" && i.text === "echo: hi"));
 
-    assert.deepEqual(await agent.agentRuntime!.offeredTools("ch:chA"), ["notify_owner", "propose_file_send", "mcp__echo__echo"]);
-    assert.deepEqual(await agent.agentRuntime!.offeredTools("ch:chB"), ["notify_owner", "propose_file_send"]);
+    assert.deepEqual(await agent.agentRuntime!.offeredTools("ch:chA"), ["notify_owner", "ask_owner", "propose_file_send", "mcp__echo__echo"]);
+    assert.deepEqual(await agent.agentRuntime!.offeredTools("ch:chB"), ["notify_owner", "ask_owner", "propose_file_send"]);
     await agent.onPeerChat(peerChat(core.getChannel("chB")!, "hello"));
     await agent.idle();
     const chReq = requests.find((r) => r.conversation === "channel")!;
@@ -93,7 +93,7 @@ test("agent: owner /tool calls an MCP tool end to end; channels get only allowed
     // Revoking the permission takes effect on channelChanged.
     core.channels.set("chA", { ...core.getChannel("chA")!, allowedMcpTools: [] });
     await agent.channelChanged("chA");
-    assert.deepEqual(await agent.agentRuntime!.offeredTools("ch:chA"), ["notify_owner", "propose_file_send"]);
+    assert.deepEqual(await agent.agentRuntime!.offeredTools("ch:chA"), ["notify_owner", "ask_owner", "propose_file_send"]);
 
     await agent.ownerSend("/tool mcp__echo__pid {}");
     await agent.idle();
@@ -104,4 +104,34 @@ test("agent: owner /tool calls an MCP tool end to end; channels get only allowed
     core.cleanup();
   }
   assert.equal(alive(pid), false, "MCP child gone after agent.stop()");
+});
+
+test("agent: a full-trust channel gets every MCP tool; calls leave an audit note for the owner", async () => {
+  const core = makeCore({
+    channels: [channel("chFull", "direct", "Trusted", { trust: "full" })],
+    config: { mcpServers: { echo: ECHO } },
+  });
+  const agent = new SpencerAgent(core, { log: () => {} });
+  await agent.start();
+  try {
+    await agent.mcpSettled();
+    const offered = await agent.agentRuntime!.offeredTools("ch:chFull");
+    assert.deepEqual(offered.slice(0, 3), ["notify_owner", "ask_owner", "propose_file_send"]);
+    assert.ok(offered.includes("mcp__echo__echo") && offered.includes("mcp__echo__pid"));
+    await agent.onPeerChat(peerChat(core.getChannel("chFull")!, 'please call mcp__echo__echo {"text":"from bob"}'));
+    await agent.idle();
+    assert.equal(core.sent.at(-1)!.text, "done: echo: from bob");
+    await waitFor(async () => (await agent.ownerTranscript(20)).some((i) => i.role === "note" && i.text.includes("mcp__echo__echo")));
+    const note = (await agent.ownerTranscript(20)).find((i) => i.role === "note" && i.text.includes("mcp__echo__echo"))!;
+    assert.ok(note.untrusted);
+    assert.match(note.text, /^Trusted \(full trust\): your Spencer called mcp__echo__echo/);
+
+    // Back to standard: only the allow-listed tools (none).
+    core.channels.set("chFull", { ...core.getChannel("chFull")!, trust: "standard" });
+    await agent.channelChanged("chFull");
+    assert.deepEqual(await agent.agentRuntime!.offeredTools("ch:chFull"), ["notify_owner", "ask_owner", "propose_file_send"]);
+  } finally {
+    await agent.stop();
+    core.cleanup();
+  }
 });

@@ -33,6 +33,7 @@ export interface ChannelRow {
   last_seq: number;
   auto_reply: number;
   allowed_mcp_tools: string;
+  trust: string;
   last_hello_members: string;
   unread: number;
   gap: number;
@@ -184,6 +185,7 @@ export class ChannelManager {
       members,
       autoReply: !!r.auto_reply,
       allowedMcpTools: safeJsonArray(r.allowed_mcp_tools),
+      trust: r.trust === "full" ? "full" : "standard",
       unread: r.unread,
       lastSeq: r.last_seq,
       createdAt: r.created_at,
@@ -521,7 +523,7 @@ export class ChannelManager {
     void this.pruneRelays();
   }
 
-  update(ch: string, patch: { name?: unknown; autoReply?: unknown; allowedMcpTools?: unknown }): Channel {
+  update(ch: string, patch: { name?: unknown; autoReply?: unknown; allowedMcpTools?: unknown; trust?: unknown }): Channel {
     const r = this.row(ch);
     if (!r) throw new UserError(404, "unknown channel");
     const sets: string[] = [];
@@ -544,6 +546,11 @@ export class ChannelManager {
       }
       sets.push("allowed_mcp_tools = ?");
       args.push(JSON.stringify([...new Set(t as string[])]));
+    }
+    if (patch.trust !== undefined) {
+      if (patch.trust !== "standard" && patch.trust !== "full") throw new UserError(400, 'trust must be "standard" or "full"');
+      sets.push("trust = ?");
+      args.push(patch.trust);
     }
     if (sets.length > 0) {
       this.d.sql.run(`UPDATE channels SET ${sets.join(", ")} WHERE id = ?`, ...args, ch);

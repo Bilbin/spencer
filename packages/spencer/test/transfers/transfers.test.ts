@@ -95,6 +95,16 @@ describe("transfers (fake croc)", () => {
     assert.throws(() => A.s.approve("nope"), (e: unknown) => e instanceof TransferError && e.code === "not_found");
   });
 
+  it("full-trust channel: even a peer agent's send needs no approval", async () => {
+    const { A, B, ch } = await setup();
+    A.trustOf.set(ch, "full");
+    const { path } = makeFile(A, "a.txt");
+    const t = await A.s.request(ch, { path, initiatedBy: "peer-agent", reason: "they asked" });
+    assert.equal(t.state, "offered");
+    assert.ok(!A.notes.some((n) => n.includes("waiting for approval")));
+    await waitFor(() => A.state(t.tid) === "completed" && B.state(t.tid) === "completed", "completion");
+  });
+
   it("outgoing approval: deny deletes the staged copy and tells nobody", async () => {
     const { A, B, ch, bus } = await setup();
     const { path } = makeFile(A, "a.txt");

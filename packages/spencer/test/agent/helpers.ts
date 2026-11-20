@@ -56,6 +56,7 @@ export function channel(id: string, kind: "direct" | "group", name: string, extr
     members: [{ ...ME, me: true }, ...peers.map((p) => ({ ...p, me: false }))],
     autoReply: true,
     allowedMcpTools: [],
+    trust: "standard",
     unread: 0,
     lastSeq: 0,
     createdAt: Date.now(),

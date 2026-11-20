@@ -71,6 +71,7 @@ export class TNode {
   policy: Policy;
   clock = { offset: 0 };
   peersOf = new Map<string, string[]>();
+  trustOf = new Map<string, "standard" | "full">();
   bus: Bus;
   opts: NodeOptions;
   info: CrocInfo | undefined = { relay: "fake-relay:9009", pass: "fake-pass" };
@@ -99,6 +100,7 @@ export class TNode {
         dataDir: this.dataDir,
         me: this.id,
         policy: () => this.policy,
+        trust: (ch) => this.trustOf.get(ch) ?? "standard",
         enqueue: (ch, body) => {
           this.enqueued.push(body);
           this.bus.send(this.id.id, ch, body);

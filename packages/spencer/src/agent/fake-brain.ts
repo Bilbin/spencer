@@ -8,6 +8,8 @@
  *   - text containing `SLOW_REPLY_TEST` → the answer comes after `SLOW_REPLY_MS` (for crash tests that run the
  *     daemon as a child process, where `hooks.gate` is out of reach)
  *   - `please send file <path>` → tool call `propose_file_send`, then `Asked my owner to approve sending <path>`
+ *   - `please ask owner: <text>` → tool call `ask_owner`, then `Waiting for my owner's approval`
+ *   - `please call <tool> <json args>` → that tool call (e.g. an MCP tool), then `done: <first 200 chars of the result>`
  * Owner conversation:
  *   /send <channel> <text>   /file <channel> <path> [to]   /peers   /transfers   /read <channel>
  *   /invite direct|group <name>   /tool <toolName> <json args>   anything else → `ok: <text>`
@@ -136,6 +138,18 @@ function channelAnswer(raw: string, myName: string): AssistantMessage {
   if (t.includes("NO_REPLY_TEST")) return text("NO_REPLY");
   const file = /please send file (\S+)/i.exec(t);
   if (file) return call("propose_file_send", { path: file[1], reason: "The peer asked for it." });
+  const ask = /please ask owner: ([\s\S]+)/i.exec(t);
+  if (ask) return call("ask_owner", { request: ask[1]!.trim() });
+  const tool = /please call (\S+)\s*(\{[\s\S]*\})?/i.exec(t);
+  if (tool) {
+    let args: Record<string, unknown> = {};
+    try {
+      args = tool[2] ? JSON.parse(tool[2]) : {};
+    } catch {
+      /* bad JSON: no args */
+    }
+    return call(tool[1]!, args);
+  }
   return text(`Echo from ${myName}: ${t}`);
 }
 
@@ -145,6 +159,8 @@ function afterTool(result: Message & { role: "toolResult" }, messages: readonly 
     const args = findCallArgs(messages, result.toolCallId);
     return text(`Asked my owner to approve sending ${String(args?.path ?? "the file")}`);
   }
+  if (channel && result.toolName === "ask_owner") return text("Waiting for my owner's approval");
+  if (channel && result.toolName.startsWith("mcp__")) return text(`done: ${out.slice(0, 200)}`);
   if (channel) return text("NO_REPLY");
   return text(`done: ${out.slice(0, 200)}`);
 }

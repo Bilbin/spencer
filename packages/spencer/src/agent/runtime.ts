@@ -67,6 +67,8 @@ export interface ConversationSetup {
   instructions: string;
   /** Owner only: also enable pi-durable's read/write/edit/bash, running in `cwd` (default: home dir). */
   codingTools?: { cwd?: string };
+  /** Reasoning effort ("off", "minimal", "low", "medium", "high"); absent: the model's default. */
+  thinkingLevel?: string;
 }
 
 export interface NoteInput {
@@ -266,6 +268,7 @@ export class PiRuntime implements AgentRuntime {
       sameList(current.tools.map((t) => t.name), tools.map((t) => t.name)) &&
       current.model?.provider === model?.provider &&
       current.model?.modelId === model?.modelId &&
+      (setup.thinkingLevel === undefined || current.thinkingLevel === setup.thinkingLevel) &&
       (current.cwd ?? undefined) === (coding ? setup.codingTools?.cwd : undefined);
     if (same) return;
     await conv.configure(
@@ -275,6 +278,7 @@ export class PiRuntime implements AgentRuntime {
         tools,
         instructions: setup.instructions,
         cwd: coding ? (setup.codingTools?.cwd ?? null) : null,
+        ...(setup.thinkingLevel !== undefined ? { thinkingLevel: setup.thinkingLevel as never } : {}),
       },
       BACKGROUND_CONTEXT,
     );
@@ -522,13 +526,14 @@ function entryItems(e: EntryRecord): OwnerItem[] {
       return [{ id, role: "note", text: "(earlier conversation summarized)", ts }];
     default: {
       // Our own kinds: notes, peer messages, errors.
-      const d = (e.data ?? {}) as { text?: string; ts?: number; isError?: boolean; untrusted?: boolean; role?: OwnerItem["role"] };
+      const d = (e.data ?? {}) as { text?: string; ts?: number; isError?: boolean; untrusted?: boolean; request?: string; role?: OwnerItem["role"] };
       const text = d.text ?? contentText(msg?.content);
       if (!text) return [];
       const role = d.role ?? "note";
       const item: OwnerItem = { id, role, text, ts: d.ts ?? ts };
       if (d.isError) item.isError = true;
       if (d.untrusted) item.untrusted = true;
+      if (typeof d.request === "string") item.request = d.request;
       return [item];
     }
   }

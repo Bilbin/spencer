@@ -688,7 +688,9 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
         throw new TransferError("stopped", "transfer service is stopped");
       }
       const policy = deps.policy();
-      const needsApproval = req.initiatedBy === "peer-agent" || policy.requireApprovalForOutgoingFiles;
+      // A fully trusted channel needs no approval; otherwise the policy decides, and a peer's ask always does.
+      const trusted = deps.trust?.(ch) === "full";
+      const needsApproval = !trusted && (req.initiatedBy === "peer-agent" || policy.requireApprovalForOutgoingFiles);
       const t = now();
       const row: TransferRow = {
         tid,

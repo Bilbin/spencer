@@ -68,6 +68,8 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX outbox_pending ON outbox (ch, state, created_at);
   `,
+  // 2: per-channel trust level
+  `ALTER TABLE channels ADD COLUMN trust TEXT NOT NULL DEFAULT 'standard'`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
