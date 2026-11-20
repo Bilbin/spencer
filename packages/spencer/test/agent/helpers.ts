@@ -16,6 +16,9 @@ import type {
   TransferRequest,
 } from "../../src/contracts.ts";
 
+/** What a channel conversation is offered without MCP tools. */
+export const CHANNEL_TOOLS = ["notify_owner", "ask_owner", "propose_file_send", "schedule_followup", "cancel_followup"];
+
 export const ME = { id: "me-id-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", name: "Alice's Spencer", fingerprint: "aaaa-aaaa-aaaa-aaaa-aaaa" };
 export const BOB = { id: "bob-id-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", name: "Bob's Spencer", fingerprint: "bbbb-bbbb-bbbb-bbbb-bbbb" };
 export const CAROL = { id: "carol-id-CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", name: "Carol's Spencer", fingerprint: "cccc-cccc-cccc-cccc-cccc" };

@@ -13,23 +13,39 @@
  */
 import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
-import type { AgentService, Channel, CoreServices, IncomingChat, McpServerStatus, OutgoingChat, OwnerItem, OwnerRequest } from "../contracts.ts";
+import type {
+  AgentService,
+  Channel,
+  CoreServices,
+  Followup,
+  IncomingChat,
+  McpServerStatus,
+  OutgoingChat,
+  OwnerItem,
+  OwnerRequest,
+} from "../contracts.ts";
 import { END_MARKER, REPEAT_WINDOW, decideReply, isRepeat, loopLimits, parseAgentAnswer } from "../policy.ts";
 import { TurnBudget } from "./budget.ts";
 import type { FakeBrainHooks } from "./fake-brain.ts";
 import { McpManager } from "./mcp.ts";
 import { setupModels, type ModelSetup } from "./models.ts";
 import { OWNER_KEY, PiRuntime, channelKey, type AgentRuntime, type ToolSpec } from "./runtime.ts";
-import { MAX_CHAT_TEXT, channelTools, ownerTools } from "./tools.ts";
-import { wrapPeerMessage, wrapUntrustedNote } from "./untrusted.ts";
+import { FollowupStore, toFollowup, type FollowupRow } from "./followups.ts";
+import { MAX_CHAT_TEXT, channelTools, followupTools, ownerTools } from "./tools.ts";
+import { escapeBody, wrapPeerMessage, wrapUntrustedNote } from "./untrusted.ts";
 
 export interface AgentOptions {
   /** Hooks into the fake model (`model.provider = "fake"`), for tests. */
   fakeHooks?: FakeBrainHooks;
   log?: (msg: string) => void;
-  /** Clock for the turn budget. */
+  /** Clock for the turn budget and follow-ups. */
   now?: () => number;
 }
+
+/** A follow-up that cannot fire because of the per-minute window is retried this much later… */
+const FOLLOWUP_POSTPONE_MS = 60_000;
+/** …and this much later when the channel's budget is used up (it waits for the owner to refill it). */
+const FOLLOWUP_PAUSED_MS = 10 * 60_000;
 
 interface PendingRow {
   msg_id: string;
@@ -71,6 +87,7 @@ export class SpencerAgent implements AgentService {
   private mcp: McpManager | undefined;
   private models: ModelSetup | undefined;
   private budget: TurnBudget;
+  private followups: FollowupStore;
   private ownerSpecs: ToolSpec[] = [];
   private channelSpecs: ToolSpec[] = [];
   private configured = new Set<string>();
@@ -91,6 +108,12 @@ export class SpencerAgent implements AgentService {
     this.opts = opts;
     this.log = opts.log ?? ((m) => console.error(`[agent] ${m}`));
     this.budget = new TurnBudget(core.db, opts.now);
+    this.followups = new FollowupStore(core.db, {
+      ...(opts.now ? { now: opts.now } : {}),
+      onDue: (rows) => this.fireDue(rows),
+      onChange: (row) => this.core.events.emit({ type: "followup", followup: toFollowup(row) }),
+      log: this.log,
+    });
   }
 
   /** The runtime (tests and diagnostics). */
@@ -131,6 +154,7 @@ export class SpencerAgent implements AgentService {
     if (!cols.has("kind")) db.exec("ALTER TABLE agent_owner_requests ADD COLUMN kind TEXT");
     if (!cols.has("msg_id")) db.exec("ALTER TABLE agent_owner_requests ADD COLUMN msg_id TEXT");
     this.budget.init();
+    this.followups.init();
 
     const cfg = this.core.config();
     this.models = await setupModels(cfg.model, { name: () => this.core.me().name, fakeHooks: this.opts.fakeHooks });
@@ -150,10 +174,16 @@ export class SpencerAgent implements AgentService {
       ownerNote: (text: string, opts?: { untrusted?: boolean }) => this.ownerNote(text, opts),
       currentAsker: (ch: string) => this.currentAsker(ch),
       askOwner: (ch: string, from: string, text: string) => this.askOwner(ch, from, text),
+      followups: {
+        schedule: (key: string, args: { inMinutes: number; note: string }) => this.scheduleFollowup(key, args),
+        cancel: (key: string, id: string) => this.cancelFollowupTool(key, id),
+      },
       log: this.log,
     };
-    this.ownerSpecs = ownerTools(deps);
-    this.channelSpecs = channelTools(deps);
+    // One spec per tool name, shared by every conversation that offers it (tools are global by name).
+    const followup = followupTools(deps);
+    this.ownerSpecs = [...ownerTools(deps), ...followup];
+    this.channelSpecs = [...channelTools(deps), ...followup];
 
     this.mcp = new McpManager(cfg.mcpServers ?? {}, { events: this.core.events, log: this.log });
     this.mcp.onChange(() => void this.reconfigureAll());
@@ -170,11 +200,15 @@ export class SpencerAgent implements AgentService {
     // Resume replies a previous process left unfinished.
     const rows = db.prepare("SELECT * FROM agent_pending_replies WHERE state = 'pending' ORDER BY created_at").all() as unknown as PendingRow[];
     for (const row of rows) this.kick(row);
+    // …and follow-ups that fired but did not finish; then the timer for the pending ones.
+    for (const row of this.followups.unfinished()) this.kickFollowup(row);
+    this.followups.start();
   }
 
   async stop(): Promise<void> {
     if (!this.started || this.stopping) return;
     this.stopping = true;
+    await this.followups.stop();
     await this.stopWatch?.().catch(() => {});
     for (const w of this.chWatches.values()) await w.then((stop) => stop()).catch(() => {});
     // Closing the runtime cancels every pending wait, so the background tasks below settle.
@@ -283,6 +317,8 @@ export class SpencerAgent implements AgentService {
         | undefined;
       if (row) ids.push(row.msg_id);
     }
+    const fu = this.followups.bySubmission(channelKey(chId), sids);
+    if (fu?.reply_to) ids.push(fu.reply_to);
     if (ids.length) return ids;
     const rows = db.prepare("SELECT msg_id FROM agent_pending_replies WHERE ch = ? AND state = 'pending' ORDER BY created_at").all(chId) as {
       msg_id: string;
@@ -341,7 +377,8 @@ export class SpencerAgent implements AgentService {
       '- "[note from <channel> agent …]": something your owner should know or decide.',
       "- Requests with Approve/Deny buttons (from ask_owner). When your owner approves one, a message starting",
       '  "I approve this request" arrives here: carry it out yourself, right away, with your own tools (MCP tools, files, shell),',
-      "  then report the result to that channel with send_message.",
+      "  then report the result to that channel with send_message. If it takes a while, say so, schedule a follow-up, and report",
+      "  when it is done.",
       '- If your owner answers a relayed request with "yes", "go ahead" or similar, that means YOU do it now with your tools.',
       "  Do not send the request back to the peer, and do not ask the peer to do it.",
       "- Replies from peers to messages you sent, and file transfer updates.",
@@ -354,6 +391,10 @@ export class SpencerAgent implements AgentService {
       "  owner's approval in the UI.",
       "- read_channel: read recent messages of a channel.",
       "- create_invite: create a channel and its invite link for your owner to share.",
+      "- schedule_followup / cancel_followup: reminders you set for yourself. Use them whenever you say you will get back",
+      "  to someone: a task that takes a while (e.g. a T3 Code thread) or a result to check later. When it fires you get a turn",
+      "  here with your note:",
+      "  check on the task and report with send_message (final: true when nothing more is expected), or schedule another one.",
       ...(mcp ? ["- mcp__<server>__<tool>: tools from your owner's MCP servers (for example T3 Code: projects and threads)."] : []),
       ...(coding ? ["- read, write, edit, bash: your owner's machine (working directory: the home directory). Be careful."] : []),
       "",
@@ -403,6 +444,9 @@ export class SpencerAgent implements AgentService {
       "- notify_owner: tell your owner something they should know (no action needed from them).",
       "- ask_owner: ask your owner to approve a task you cannot or should not do yourself.",
       `- propose_file_send: send one of your owner's files to the peer who asked${full ? "" : " (your owner approves first)"}. You cannot see files.`,
+      "- schedule_followup / cancel_followup: a reminder for yourself. When you start something that takes a while (or",
+      "  promise to get back to the peer), schedule a follow-up; when it fires you get a turn, and your answer is sent to",
+      "  the channel as a new message. Then report the result, or schedule another check if it is not done yet.",
       mcpLine,
       "You cannot run shell commands or read files directly.",
       "",
@@ -585,6 +629,215 @@ export class SpencerAgent implements AgentService {
     }
   }
 
+  // ---------------------------------------------------------------- follow-ups (§7.4)
+
+  /** The `schedule_followup` tool, in conversation `key`. */
+  private async scheduleFollowup(
+    key: string,
+    args: { inMinutes: number; note: string },
+  ): Promise<string | { text: string; isError: true }> {
+    const fail = (text: string) => ({ text, isError: true as const });
+    const policy = this.core.config().policy;
+    if (this.followups.open(key).length >= policy.maxPendingFollowups) {
+      return fail(`you already have ${policy.maxPendingFollowups} follow-ups pending here; cancel one first (cancel_followup)`);
+    }
+    const sids = await this.rt().runningInputs(key).catch(() => [] as string[]);
+    const parent = this.followups.bySubmission(key, sids);
+    const depth = parent ? parent.depth + 1 : 0;
+    if (depth > policy.maxFollowupChain) {
+      return fail(
+        `this would be follow-up number ${depth + 1} in a row (the limit is ${policy.maxFollowupChain + 1}). ` +
+          "Report what you have now instead" + (key === OWNER_KEY ? "." : ", or ask your owner (ask_owner)."),
+      );
+    }
+    const dueAt = this.now() + Math.round(args.inMinutes * 60_000);
+    const when = new Date(dueAt).toISOString();
+    if (key === OWNER_KEY) {
+      const row = this.followups.insert({ conv: key, note: args.note, dueAt, depth });
+      return `Follow-up ${row.id} scheduled for ${when}.`;
+    }
+    const chId = key.slice(3);
+    const ch = this.core.getChannel(chId);
+    if (!ch) return fail("not in a channel conversation");
+    // The follow-up continues the exchange this run belongs to: same peer, same chain.
+    let hop = 1;
+    let replyTo: string | undefined;
+    let toId: string | undefined;
+    if (parent) {
+      hop = parent.hop;
+      replyTo = parent.reply_to ?? undefined;
+      toId = parent.to_id ?? undefined;
+    } else {
+      const { db } = this.core;
+      let row: { msg_id: string; hop: number; from_id: string } | undefined;
+      for (const sid of sids) {
+        row = db.prepare("SELECT msg_id, hop, from_id FROM agent_pending_replies WHERE ch = ? AND submission_id = ?").get(chId, sid) as typeof row;
+        if (row) break;
+      }
+      if (row) {
+        hop = row.hop + 1;
+        replyTo = row.msg_id;
+        toId = row.from_id;
+      } else {
+        toId = await this.currentAsker(chId);
+      }
+    }
+    const row = this.followups.insert({
+      conv: key,
+      ch: chId,
+      note: args.note,
+      dueAt,
+      depth,
+      hop,
+      ...(replyTo ? { replyTo } : {}),
+      ...(toId ? { toId } : {}),
+    });
+    return `Follow-up ${row.id} scheduled for ${when}. Tell the peer you will get back to them.`;
+  }
+
+  /** The `cancel_followup` tool: only this conversation's follow-ups. */
+  private async cancelFollowupTool(key: string, id: string): Promise<string | { text: string; isError: true }> {
+    if (id === "all") {
+      const open = this.followups.open(key);
+      for (const r of open) this.followups.finish(r.id, "cancelled", "cancelled by the agent");
+      return open.length ? `Cancelled ${open.length} follow-up(s).` : "No pending follow-ups.";
+    }
+    const row = this.followups.get(id);
+    if (!row || row.conv !== key) return { text: `no follow-up ${id} in this conversation`, isError: true };
+    if (!this.followups.finish(id, "cancelled", "cancelled by the agent")) return { text: `follow-up ${id} is already ${row.state}`, isError: true };
+    return `Follow-up ${id} cancelled.`;
+  }
+
+  private now(): number {
+    return (this.opts.now ?? Date.now)();
+  }
+
+  private async fireDue(rows: FollowupRow[]): Promise<void> {
+    for (const row of rows) {
+      if (this.stopping) return;
+      await this.fireFollowup(row, "time").catch((e) => this.log(`follow-up ${row.id}: ${(e as Error).message}`));
+    }
+  }
+
+  private async fireFollowup(row: FollowupRow, by: "time" | "reply"): Promise<void> {
+    if (this.stopping || row.state !== "pending") return;
+    if (row.conv !== OWNER_KEY) {
+      const ch = row.ch ? this.core.getChannel(row.ch) : undefined;
+      if (!ch) {
+        this.followups.finish(row.id, "cancelled", "the channel is gone");
+        return;
+      }
+      if (!ch.autoReply) {
+        this.followups.finish(row.id, "cancelled", "auto-reply is off in this channel");
+        return;
+      }
+      // A follow-up is an automatic turn too: it spends the channel's turn budget, or waits for it.
+      const verdict = this.budget.check(ch.id, loopLimits(this.core.config().policy, ch.trust));
+      if (!verdict.ok) {
+        this.followups.postpone(row.id, this.now() + (verdict.why === "rate limited" ? FOLLOWUP_POSTPONE_MS : FOLLOWUP_PAUSED_MS));
+        return;
+      }
+      if (!this.followups.markFired(row.id, by)) return;
+      this.budget.record(ch.id);
+      this.kickFollowup(this.followups.get(row.id)!);
+      return;
+    }
+    if (!this.followups.markFired(row.id, by)) return;
+    this.kickFollowup(this.followups.get(row.id)!);
+  }
+
+  private kickFollowup(row: FollowupRow): void {
+    const key = `followup:${row.id}`;
+    if (this.stopping || this.inflight.has(key)) return;
+    const p = this.processFollowup(row).finally(() => this.inflight.delete(key));
+    this.inflight.set(key, p);
+  }
+
+  private async processFollowup(row: FollowupRow): Promise<void> {
+    try {
+      const rt = this.rt();
+      let sid = row.submission_id;
+      if (!sid) {
+        if (row.ch) await this.ensureChannel(row.ch);
+        const shown = row.conv === OWNER_KEY ? "Follow-up (scheduled by your Spencer)" : "Follow-up";
+        sid = await rt.submitInput(row.conv, {
+          content: this.followupInput(row),
+          requestId: `followup:${row.id}`,
+          display: { kind: "spencer.followup", data: { text: `${shown}: ${row.note}`, ts: this.now(), followup: row.id } },
+        });
+        this.followups.setSubmission(row.id, sid);
+      }
+      const answer = await rt.waitAnswer(sid);
+      if (this.stopping) return;
+      if (answer.status !== "done") {
+        this.log(`follow-up ${row.id}: no answer: ${answer.reason}`);
+        this.followups.finish(row.id, "failed", answer.reason);
+        return;
+      }
+      if (row.conv !== OWNER_KEY && row.ch) {
+        const out = parseAgentAnswer(answer.text);
+        const ch = this.core.getChannel(row.ch);
+        if (out.send && ch) {
+          this.core.sendChat(row.ch, {
+            text: clip(out.text),
+            hop: row.hop,
+            by: "agent",
+            origin: "agent-followup",
+            ...(row.reply_to ? { replyTo: row.reply_to } : {}),
+            ...(ch.kind === "group" && row.to_id ? { mentions: [row.to_id] } : {}),
+            ...(out.final ? { final: true } : {}),
+            idempotencyKey: `followup:${row.id}`,
+          });
+        }
+      }
+      this.followups.finish(row.id, "done");
+    } catch (e) {
+      // Left "fired": the next start() resumes it.
+      if (!this.stopping) this.log(`follow-up ${row.id} failed: ${(e as Error).message}`);
+    }
+  }
+
+  /** What the model sees when its follow-up fires. */
+  private followupInput(row: FollowupRow): string {
+    const set = new Date(row.created_at).toISOString();
+    const why =
+      row.fired_by === "reply" && row.wake_ch
+        ? `a peer just wrote in ${this.core.getChannel(row.wake_ch)?.name ?? row.wake_ch} (see the note above)`
+        : "its time has come";
+    const note = `<followup_note>\n${escapeBody(row.note)}\n</followup_note>`;
+    if (row.conv === OWNER_KEY) {
+      return [
+        `[Follow-up you scheduled at ${set}; it fired because ${why}. Your owner did not just write.]`,
+        note,
+        "Do what the note says with your tools, and report with send_message if someone is waiting. If it is not done yet,",
+        "you can schedule another follow-up.",
+      ].join("\n");
+    }
+    const to = row.to_id ? (this.core.getChannel(row.ch ?? "")?.members.find((m) => m.id === row.to_id)?.name ?? "the peer") : "the channel";
+    return [
+      `[Follow-up you scheduled at ${set}. Nobody wrote to you just now: this is your own reminder.]`,
+      note,
+      `Your answer is sent to the channel as a new message (to ${to}). Report the progress or the result. Answer NO_REPLY if`,
+      "there is nothing worth saying yet (you can schedule another follow-up), and end with [END] when you are done.",
+    ].join("\n");
+  }
+
+  listFollowups(): Followup[] {
+    return this.followups.list().map(toFollowup);
+  }
+
+  cancelFollowup(id: string): Followup {
+    const row = this.followups.get(id);
+    if (!row) throw new AgentHttpError(404, "unknown follow-up");
+    if (!this.followups.finish(id, "cancelled", "cancelled by the owner")) throw new AgentHttpError(409, `follow-up already ${toFollowup(row).state}`);
+    return toFollowup(this.followups.get(id)!);
+  }
+
+  /** Fire every follow-up that is due now (tests; the timer does this on its own). */
+  async followupTick(): Promise<void> {
+    await this.followups.tick();
+  }
+
   /**
    * The member whose message the channel agent is answering: the sender of the input its current run answers
    * (from pi-durable's live run), else the oldest reply still pending, else the newest one answered.
@@ -628,13 +881,13 @@ export class SpencerAgent implements AgentService {
     });
   }
 
-  private async notifyOwnerOfReply(msg: IncomingChat, ch: Channel | undefined): Promise<void> {
+  private async notifyOwnerOfReply(msg: IncomingChat, ch: Channel | undefined, what: "Reply" | "Message" = "Reply"): Promise<void> {
     const from = msg.fromName ?? ch?.members.find((m) => m.id === msg.from)?.name ?? msg.from;
-    const text = `Reply from ${from} in ${msg.channelName} (untrusted): ${msg.body.text}`;
+    const text = `${what} from ${from} in ${msg.channelName} (untrusted): ${msg.body.text}`;
     await this.rt().appendNote(OWNER_KEY, {
       kind: "spencer.note",
       data: { text, ts: msg.ts, ch: msg.ch, from: msg.from, msgId: msg.id, untrusted: true },
-      modelText: `[Reply from ${from} in ${msg.channelName} (untrusted)]\n${this.wrap(msg, ch)}`,
+      modelText: `[${what} from ${from} in ${msg.channelName} (untrusted)]\n${this.wrap(msg, ch)}`,
       requestId: `reply-note:${msg.id}`,
     });
   }

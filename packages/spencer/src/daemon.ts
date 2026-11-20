@@ -563,6 +563,7 @@ export class Daemon {
       policy: cfg.policy,
       ownerBusy: agent?.ownerBusy() ?? false,
       requests: agent?.listRequests?.() ?? [],
+      followups: agent?.listFollowups?.() ?? [],
     };
   }
 }

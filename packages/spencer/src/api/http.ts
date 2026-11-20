@@ -305,6 +305,12 @@ export class ApiServer {
     }
 
     if (p === "/api/requests" && method === "GET") return { items: b.agent().listRequests?.() ?? [] };
+    if (p === "/api/followups" && method === "GET") return { items: b.agent().listFollowups?.() ?? [] };
+    if ((m = /^\/api\/followups\/([A-Za-z0-9_-]{1,64})\/cancel$/.exec(p)) && method === "POST") {
+      const agent = b.agent();
+      if (!agent.cancelFollowup) throw new HttpError(404, "follow-ups are not supported");
+      return agent.cancelFollowup(m[1]!);
+    }
     if ((m = /^\/api\/requests\/([A-Za-z0-9_-]{1,64})\/(approve|deny)$/.exec(p)) && method === "POST") {
       const agent = b.agent();
       if (!agent.decideRequest) throw new HttpError(404, "requests are not supported");

@@ -6,6 +6,7 @@
  * Channel conversations, deliberately minimal: notify_owner, ask_owner, propose_file_send, plus MCP tools: the ones
  * the owner allowed for that channel, or all of them when the channel is fully trusted. No shell, no file reading,
  * no coding tools, ever.
+ * Both: schedule_followup and cancel_followup (reminders the agent sets on itself, see followups.ts).
  *
  * Tools are global by name (see `ToolSpec`): every execute derives its channel from `ctx.conversationKey`.
  */
@@ -24,11 +25,20 @@ export interface ToolDeps {
   currentAsker(ch: string): Promise<string | undefined>;
   /** Record a request for the owner to approve or deny (shown as a card in the owner chat). */
   askOwner?(ch: string, from: string, text: string): Promise<string>;
+  /** Follow-ups for the conversation `key` (owner or ch:<id>). Return the tool's answer. */
+  followups?: {
+    schedule(key: string, args: { inMinutes: number; note: string }): Promise<string | { text: string; isError: true }>;
+    cancel(key: string, id: string): Promise<string | { text: string; isError: true }>;
+  };
   log?(msg: string): void;
 }
 
 export const OWNER_TOOL_NAMES = ["list_peers", "send_message", "send_file", "list_transfers", "read_channel", "create_invite"];
 export const CHANNEL_TOOL_NAMES = ["notify_owner", "ask_owner", "propose_file_send"];
+export const FOLLOWUP_TOOL_NAMES = ["schedule_followup", "cancel_followup"];
+/** Bounds of `schedule_followup`'s `in_minutes`: at least a minute (no tight self-polling), at most a week. */
+export const FOLLOWUP_MIN_MINUTES = 1;
+export const FOLLOWUP_MAX_MINUTES = 7 * 24 * 60;
 
 type Obj = Record<string, unknown>;
 const str = (description: string) => ({ type: "string", description });
@@ -107,16 +117,18 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
     {
       name: "send_message",
       description:
-        "Send a chat message to a channel (by channel id or name) as your owner's Spencer. In groups, `mention` names members (by name, fingerprint or id) who should answer.",
+        "Send a chat message to a channel (by channel id or name) as your owner's Spencer. In groups, `mention` names members (by name, fingerprint or id) who should answer. " +
+        "Set `final` when the message closes the exchange (e.g. a final report) and you expect no answer.",
       parameters: schema(
         {
           channel: str("Channel id or name"),
           text: str("Message text"),
           mention: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }], description: "Member(s) to mention (groups)" },
+          final: { type: "boolean", description: "No answer expected: the other Spencer will not reply automatically" },
         },
         ["channel", "text"],
       ),
-      async execute(args: { channel: string; text: string; mention?: string | string[] }, ctx) {
+      async execute(args: { channel: string; text: string; mention?: string | string[]; final?: boolean }, ctx) {
         const ch = resolveChannel(core, args.channel);
         if (typeof ch === "string") return fail(ch);
         const text = String(args.text ?? "");
@@ -138,6 +150,7 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
           by: "agent",
           origin: "owner-agent",
           ...(mentions?.length ? { mentions } : {}),
+          ...(args.final === true ? { final: true } : {}),
           idempotencyKey: `owner-tool:${ctx.callId}`,
         });
         return `Sent to ${ch.name} (message ${sent.id}). Replies will show up in this conversation as untrusted notes.`;
@@ -306,6 +319,49 @@ export function channelTools(deps: ToolDeps): ToolSpec[] {
             .catch(() => {});
           return "Could not prepare that proposal. Your owner has been told.";
         }
+      },
+    },
+  ];
+}
+
+// ------------------------------------------------------------------ follow-ups (owner and channel conversations)
+
+export function followupTools(deps: ToolDeps): ToolSpec[] {
+  return [
+    {
+      name: "schedule_followup",
+      description:
+        "Set a reminder for yourself, so you come back to a task without anyone writing first (\"I'll get back to you\"). " +
+        `After in_minutes (${FOLLOWUP_MIN_MINUTES}–${FOLLOWUP_MAX_MINUTES}) you get a turn with your note. In a channel, what you answer then is sent ` +
+        "to the channel as a new message (answer NO_REPLY if there is nothing to report yet; you may schedule another). " +
+        "In your owner's conversation you act with your full tools and report with send_message.",
+      parameters: schema(
+        {
+          in_minutes: { type: "number", minimum: FOLLOWUP_MIN_MINUTES, maximum: FOLLOWUP_MAX_MINUTES, description: "Minutes from now" },
+          note: str("What to do then, with every detail you will need (ids, links, who asked)"),
+        },
+        ["in_minutes", "note"],
+      ),
+      async execute(args: { in_minutes: number; note: string }, ctx) {
+        if (!deps.followups) return fail("follow-ups are not available");
+        const minutes = Number(args.in_minutes);
+        if (!Number.isFinite(minutes) || minutes < FOLLOWUP_MIN_MINUTES || minutes > FOLLOWUP_MAX_MINUTES) {
+          return fail(`in_minutes must be between ${FOLLOWUP_MIN_MINUTES} and ${FOLLOWUP_MAX_MINUTES}`);
+        }
+        const note = String(args.note ?? "").trim().slice(0, 4000);
+        if (!note) return fail("note is empty");
+        return deps.followups.schedule(ctx.conversationKey, { inMinutes: minutes, note });
+      },
+    },
+    {
+      name: "cancel_followup",
+      description: 'Cancel a follow-up you scheduled (by its id), or all of this conversation\'s pending follow-ups with id "all".',
+      parameters: schema({ id: str('Follow-up id, or "all"') }, ["id"]),
+      async execute(args: { id: string }, ctx) {
+        if (!deps.followups) return fail("follow-ups are not available");
+        const id = String(args.id ?? "").trim();
+        if (!id) return fail("id is required");
+        return deps.followups.cancel(ctx.conversationKey, id);
       },
     },
   ];

@@ -11,9 +11,14 @@
  *   - `please send file <path>` → tool call `propose_file_send`, then `Asked my owner to approve sending <path>`
  *   - `please ask owner: <text>` → tool call `ask_owner`, then `Waiting for my owner's approval`
  *   - `please call <tool> <json args>` → that tool call (e.g. an MCP tool), then `done: <first 200 chars of the result>`
+ *   - `please follow up in <n> minutes: <note>` → tool call `schedule_followup`, then `I'll get back to you`
+ *   - a follow-up firing (`<followup_note>`) → `Follow-up from <myName>: <note>`; a note containing `again` schedules
+ *     the next follow-up instead; a note containing `quiet` answers NO_REPLY
  * Owner conversation:
  *   /send <channel> <text>   /file <channel> <path> [to]   /peers   /transfers   /read <channel>
- *   /invite direct|group <name>   /tool <toolName> <json args>   anything else → `ok: <text>`
+ *   /invite direct|group <name>   /tool <toolName> <json args>   /followup <minutes> <note>
+ *   a follow-up firing → the note is handled like an owner command (so `/followup 5 /send Bob hi` sends later)
+ *   anything else → `ok: <text>`
  *   after a tool result → `done: <first 200 chars of the result>`
  * Channel names with spaces can be quoted: /send "Bob chat" hi
  */
@@ -108,7 +113,7 @@ function lastRelevant(messages: readonly Message[], channel: boolean): Message |
     if (m.role === "assistant") return undefined;
     if (m.role !== "user") continue;
     const t = contentText(m.content);
-    if (channel ? t.includes("<peer_message") : !NOTE_PREFIX.test(t.trim())) return m;
+    if (channel ? t.includes("<peer_message") || t.includes("<followup_note") : !NOTE_PREFIX.test(t.trim())) return m;
   }
   return undefined;
 }
@@ -134,7 +139,21 @@ export function peerText(s: string): string {
   return s.slice(start + 1, end === -1 ? undefined : end).trim();
 }
 
+/** Text inside the last <followup_note>…</followup_note>, if `s` is a follow-up firing. */
+function followupNote(s: string): string | undefined {
+  const open = s.lastIndexOf("<followup_note>");
+  if (open === -1) return undefined;
+  const end = s.indexOf("</followup_note>", open);
+  return s.slice(open + "<followup_note>".length, end === -1 ? undefined : end).trim();
+}
+
 function channelAnswer(raw: string, myName: string): AssistantMessage {
+  const fu = followupNote(raw);
+  if (fu !== undefined) {
+    if (/\bquiet\b/i.test(fu)) return text("NO_REPLY");
+    if (/\bagain\b/i.test(fu)) return call("schedule_followup", { in_minutes: 1, note: fu });
+    return text(`Follow-up from ${myName}: ${fu}`);
+  }
   const t = peerText(raw);
   if (t.includes("NO_REPLY_TEST")) return text("NO_REPLY");
   if (t.includes("FINAL_TEST")) return text(`Bye from ${myName}\n[END]`);
@@ -142,6 +161,8 @@ function channelAnswer(raw: string, myName: string): AssistantMessage {
   if (file) return call("propose_file_send", { path: file[1], reason: "The peer asked for it." });
   const ask = /please ask owner: ([\s\S]+)/i.exec(t);
   if (ask) return call("ask_owner", { request: ask[1]!.trim() });
+  const fol = /please follow up in (\d+(?:\.\d+)?) minutes?: ([\s\S]+)/i.exec(t);
+  if (fol) return call("schedule_followup", { in_minutes: Number(fol[1]), note: fol[2]!.trim() });
   const tool = /please call (\S+)\s*(\{[\s\S]*\})?/i.exec(t);
   if (tool) {
     let args: Record<string, unknown> = {};
@@ -162,6 +183,9 @@ function afterTool(result: Message & { role: "toolResult" }, messages: readonly 
     return text(`Asked my owner to approve sending ${String(args?.path ?? "the file")}`);
   }
   if (channel && result.toolName === "ask_owner") return text("Waiting for my owner's approval");
+  if (channel && result.toolName === "schedule_followup") {
+    return text(result.isError ? `could not schedule: ${out.slice(0, 200)}` : "I'll get back to you");
+  }
   if (channel && result.toolName.startsWith("mcp__")) return text(`done: ${out.slice(0, 200)}`);
   if (channel) return text("NO_REPLY");
   return text(`done: ${out.slice(0, 200)}`);
@@ -192,6 +216,8 @@ function head(s: string): [string, string] {
 }
 
 function ownerAnswer(input: string): AssistantMessage {
+  const fu = followupNote(input);
+  if (fu !== undefined) return ownerAnswer(fu);
   const t = input.trim();
   const [cmd, rest] = head(t);
   switch (cmd) {
@@ -217,6 +243,11 @@ function ownerAnswer(input: string): AssistantMessage {
     case "/invite": {
       const [kind, name] = head(rest);
       if ((kind === "direct" || kind === "group") && name) return call("create_invite", { kind, name: name.trim() });
+      break;
+    }
+    case "/followup": {
+      const [minutes, note] = head(rest);
+      if (minutes && note) return call("schedule_followup", { in_minutes: Number(minutes), note: note.trim() });
       break;
     }
     case "/tool": {

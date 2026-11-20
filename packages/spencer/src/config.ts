@@ -43,6 +43,10 @@ export interface Policy {
   repliesPerMinuteFullTrust: number;
   repliesPerHourFullTrust: number;
   repliesPerDayFullTrust: number;
+  /** Follow-ups (schedule_followup) one conversation may have pending at once. */
+  maxPendingFollowups: number;
+  /** How many times in a row a follow-up may schedule the next one (polling a long task). */
+  maxFollowupChain: number;
   autoAcceptIncomingFiles: boolean;
   maxIncomingFileBytes: number;
   requireApprovalForOutgoingFiles: boolean;
@@ -73,6 +77,8 @@ export const DEFAULT_POLICY: Policy = {
   repliesPerMinuteFullTrust: 20,
   repliesPerHourFullTrust: 200,
   repliesPerDayFullTrust: 1000,
+  maxPendingFollowups: 5,
+  maxFollowupChain: 12,
   autoAcceptIncomingFiles: true,
   maxIncomingFileBytes: 512 * 1024 * 1024,
   requireApprovalForOutgoingFiles: true,
@@ -126,6 +132,8 @@ export function resolveConfig(raw: Partial<SpencerConfig> & Record<string, unkno
     "repliesPerMinuteFullTrust",
     "repliesPerHourFullTrust",
     "repliesPerDayFullTrust",
+    "maxPendingFollowups",
+    "maxFollowupChain",
   ] as const) {
     if (!Number.isSafeInteger(cfg.policy[k]) || cfg.policy[k] < 0) throw new Error(`policy.${k} must be a non-negative integer`);
   }

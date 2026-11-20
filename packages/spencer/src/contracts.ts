@@ -43,7 +43,12 @@ export interface Channel {
   createdAt: number;
 }
 
-export type MessageOrigin = "human" | "owner-agent" | "agent-reply" | "peer";
+/**
+ * Who made one of our messages: the owner typed it ("human"), the owner's Spencer sent it ("owner-agent"), the channel
+ * agent answered a peer ("agent-reply"), or the channel agent reported back on its own after a follow-up it had
+ * scheduled ("agent-followup"). Incoming messages are "peer".
+ */
+export type MessageOrigin = "human" | "owner-agent" | "agent-reply" | "agent-followup" | "peer";
 
 export interface ChannelMessage {
   id: string;
@@ -154,6 +159,28 @@ export interface OwnerRequest {
   decidedAt?: number;
 }
 
+/** A reminder an agent scheduled on itself (`schedule_followup`), see PROTOCOL.md §7.4. */
+export interface Followup {
+  id: string;
+  /** Which conversation it wakes: the owner's, or a channel's (`ch`). */
+  conversation: "owner" | "channel";
+  ch?: string;
+  /** What the agent wrote for itself (may be based on untrusted peer input). */
+  note: string;
+  /** When it fires at the latest. */
+  dueAt: number;
+  /** Owner follow-ups: also fire as soon as a peer writes in this channel. */
+  wakeOnReplyIn?: string;
+  /** "running": fired, the agent is working on it. */
+  state: "pending" | "running" | "done" | "cancelled" | "failed";
+  /** How many follow-ups in a row led to this one (0 = scheduled from an ordinary turn). */
+  depth: number;
+  createdAt: number;
+  firedAt?: number;
+  firedBy?: "time" | "reply";
+  error?: string;
+}
+
 export interface McpServerStatus {
   name: string;
   transport: "stdio" | "http";
@@ -172,6 +199,7 @@ export type DaemonEvent =
   | { type: "owner"; item: OwnerItem }
   | { type: "owner_busy"; busy: boolean }
   | { type: "request"; request: OwnerRequest }
+  | { type: "followup"; followup: Followup }
   /** A member's Spencer is working on a reply (`from` may be me). Ephemeral: not stored for the UI. */
   | { type: "status"; ch: string; from: string; replyTo: string; state: "working" | "done"; activity?: string; ts: number }
   | { type: "relay"; url: string; connected: boolean }
@@ -326,4 +354,8 @@ export interface AgentService {
   listRequests?(): OwnerRequest[];
   /** Approve (the owner conversation carries it out) or deny a pending request. */
   decideRequest?(id: string, approve: boolean): Promise<OwnerRequest>;
+  /** Open follow-ups, then the most recently finished ones. */
+  listFollowups?(): Followup[];
+  /** The owner cancels a pending follow-up. */
+  cancelFollowup?(id: string): Followup;
 }

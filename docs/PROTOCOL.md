@@ -242,9 +242,10 @@ Terminal: `completed | declined | failed | expired | cancelled`
 
 ### 7.1 Conversations (pi-durable 1.5.2, behind `AgentRuntime`)
 - **Owner conversation**: the pi-durable root conversation. The owner's tools: `list_peers`, `send_message`,
-  `send_file`, `list_transfers`, `read_channel`, `create_invite`, MCP tools, and optionally CodingTools (`policy.ownerCodingTools`).
-- **Channel conversation**: one ownerless conversation per channel. Its tools are `notify_owner`, `ask_owner`
-  and `propose_file_send`, plus MCP tools depending on the channel's **trust** level. It never gets a shell or file reads.
+  `send_file`, `list_transfers`, `read_channel`, `create_invite`, `schedule_followup`, `cancel_followup`, MCP tools,
+  and optionally CodingTools (`policy.ownerCodingTools`).
+- **Channel conversation**: one ownerless conversation per channel. Its tools are `notify_owner`, `ask_owner`,
+  `propose_file_send`, `schedule_followup` and `cancel_followup`, plus MCP tools depending on the channel's **trust** level. It never gets a shell or file reads.
   - `standard` (default): peer messages are *untrusted data* (`<peer_message untrusted="true">`). Only the MCP tools
     in `allowedMcpTools`. Anything else goes through `ask_owner`: a request card in the owner chat with
     Approve / Deny (an `OwnerRequest` of kind `"peer"`). Approve submits an owner message ("I approve this request …") to the owner conversation, which does
@@ -320,6 +321,35 @@ conversation as a **write** (it never starts a run), clearly marked as untrusted
 `<peer_message>`, and the transcript item has `untrusted: true` (§8), which the UI uses to style it. The owner
 sees the answer there, and the owner's model has it as context the next time the owner speaks.
 
+### 7.4 Follow-ups ("I'll get back to you")
+An agent that starts something slow (a T3 Code thread, a build) can schedule a reminder on itself and report later
+without anyone writing first. Tools, offered in the owner conversation and in every channel conversation:
+- `schedule_followup {in_minutes, note}`: `in_minutes` between 1 and 10080 (a week). `note` is what the agent wants
+  to do then, in its own words.
+- `cancel_followup {id}`: cancels one of *this conversation's* pending follow-ups, or all of them with `"all"`.
+
+Storage and delivery (`agent/followups.ts`): rows in `agent_followups` in core.db, so they survive restarts. A timer
+compares `dueAt` with the wall clock at least every 15 s, so a follow-up that came due while the laptop slept fires
+right after wake (Node timers stop during suspend). Firing is exactly-once: `pending → fired` is one conditional
+update, the run is submitted with `requestId = "followup:" + id`, and a channel message is enqueued with
+`idempotencyKey = "followup:" + id`. On start, fired-but-unfinished follow-ups are resumed.
+
+When one fires, its conversation gets an input (shown in transcripts as "Follow-up: <note>"):
+- **Channel**: "[Follow-up you scheduled at … Nobody wrote to you just now …]" plus the note in
+  `<followup_note>` (escaped like peer text). The answer is sent to the channel as a new chat with
+  `origin: "agent-followup"`, `by: "agent"`, and the `replyTo`, `hop` and (in groups) `mentions` of the exchange it
+  continues: the peer message whose run scheduled it, so `hop = that message's hop + 1`. NO_REPLY sends nothing;
+  `[END]` marks it final. A channel follow-up is an automatic turn: it spends the channel's turn budget (§7.2). If
+  the per-minute window is full it is retried a minute later; if the budget is used up, every 10 minutes until the
+  owner refills it. It is cancelled if the channel is gone or auto-reply is off there.
+- **Owner**: "[Follow-up you scheduled …; your owner did not just write.]" plus the note. The owner's Spencer acts
+  with its full tools and reports with `send_message` if someone is waiting. The note was written by the owner's own
+  agent, in its own conversation, so a peer cannot start an owner run this way.
+
+Bounds: at most `policy.maxPendingFollowups` (5) pending per conversation, and at most `policy.maxFollowupChain` (12)
+follow-ups in a row that each scheduled the next (`depth`), so an agent polling a task cannot go on forever. Past
+that, `schedule_followup` fails and tells the model to report what it has (or ask its owner).
+
 ## 8. Local daemon API (127.0.0.1 only)
 
 - It binds to `127.0.0.1` only. Requests must have `Host: 127.0.0.1:<port>` or `localhost:<port>`
@@ -330,7 +360,7 @@ sees the answer there, and the owner's model has it as context the next time the
 
 | Method | Path | Body → Response |
 |---|---|---|
-| GET | `/api/state` | → `{me:{id, name, fingerprint}, relay:{url, connected}, relays:{url, connected}[], channels: Channel[], transfers: Transfer[], mcp: McpServer[], policy, ownerBusy: boolean, requests: OwnerRequest[]}`. `relay` is the default relay from config; `connected` is true when every relay in use is connected. `relays` lists each relay in use (one per distinct channel relay, plus the default). |
+| GET | `/api/state` | → `{me:{id, name, fingerprint}, relay:{url, connected}, relays:{url, connected}[], channels: Channel[], transfers: Transfer[], mcp: McpServer[], policy, ownerBusy: boolean, requests: OwnerRequest[], followups: Followup[]}`. `relay` is the default relay from config; `connected` is true when every relay in use is connected. `relays` lists each relay in use (one per distinct channel relay, plus the default). |
 | GET | `/api/owner/messages?limit=` | → `{items: OwnerItem[]}` (owner conversation transcript, oldest first; default 200, max 2000) |
 | POST | `/api/owner/messages` | `{text}` → `{submissionId}` |
 | GET | `/api/channels` | → `{items: Channel[]}` |
@@ -340,6 +370,8 @@ sees the answer there, and the owner's model has it as context the next time the
 | PATCH | `/api/channels/:ch` | `{name?, autoReply?, allowedMcpTools?: string[], trust?: "standard"\|"full"}` → `Channel` |
 | GET | `/api/requests` | → `{items: OwnerRequest[]}` (newest first, max 200) |
 | POST | `/api/requests/:id/approve` · `/deny` | → `OwnerRequest` (409 if already decided) |
+| GET | `/api/followups` | → `{items: Followup[]}`: pending and running ones (by `dueAt`), then the 20 most recently finished |
+| POST | `/api/followups/:id/cancel` | → `Followup` (the owner cancels one; 404 unknown, 409 if no longer pending or running) |
 | DELETE | `/api/channels/:ch` | leave the channel → `{}` |
 | POST | `/api/invites` | `{kind:"direct"\|"group", name}` → `{link, channel: Channel}` |
 | POST | `/api/invites/accept` | `{link}` → `{channel: Channel}` |
@@ -348,7 +380,7 @@ sees the answer there, and the owner's model has it as context the next time the
 | POST | `/api/transfers` | `{ch, path, to?}` → `Transfer` (owner-initiated; `to` is required in groups) |
 | POST | `/api/transfers/:tid/approve` · `/deny` · `/accept` · `/decline` · `/cancel` | → `Transfer` |
 | GET | `/api/mcp` | → `{servers: McpServer[]}` |
-| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", url, connected}`, `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"status", ch, from, replyTo, state, activity?, ts}` (a Spencer, possibly mine, is working on a reply) |
+| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", url, connected}`, `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"followup", followup: Followup}` (created or changed), `{type:"status", ch, from, replyTo, state, activity?, ts}` (a Spencer, possibly mine, is working on a reply) |
 
 ```ts
 interface Channel { id: string; kind: "direct"|"group"; name: string; relayUrl: string;
@@ -367,7 +399,7 @@ interface ChannelMessage { id: string; ch: string; from: string; fromName?: stri
   final?: boolean; // the sender closed the exchange (§3.1)
   note?: string;   // why an incoming chat got no reply: "not addressed", "hop cap", "rate limited", "auto-reply off",
                    // "conversation ended", "repeated", "budget exhausted" (paused, see OwnerRequest kind "continue")
-  origin?: "human"|"owner-agent"|"agent-reply"|"peer" }
+  origin?: "human"|"owner-agent"|"agent-reply"|"agent-followup"|"peer" }   // agent-followup: §7.4
 interface Transfer { tid: string; ch: string; direction: "out"|"in"; peer: string; peerName?: string;
   name: string; size: number; sha256: string; state: string; attempt: number; initiatedBy: "owner"|"peer-agent"|"owner-agent"|"peer";
   reason?: string;     // free text from whoever initiated it, e.g. the peer agent's justification
@@ -377,6 +409,14 @@ interface OwnerItem { id: string; role: "user"|"assistant"|"tool"|"note"; text: 
   toolName?: string; isError?: boolean;
   untrusted?: boolean;    // text written by another person's agent (e.g. a reply to something the owner sent)
   request?: string }      // an ask_owner request card: the OwnerRequest id
+interface Followup { id: string;
+  conversation: "owner"|"channel"; ch?: string;   // ch: the channel, for channel follow-ups
+  note: string;                                   // the agent's own words (may be based on untrusted peer input)
+  dueAt: number;                                  // fires at the latest then
+  state: "pending"|"running"|"done"|"cancelled"|"failed";
+  depth: number;                                  // follow-ups in a row before this one
+  createdAt: number; firedAt?: number; firedBy?: "time";
+  error?: string }                                // why it failed or was cancelled
 interface McpServer { name: string; transport: "stdio"|"http"; status: "connecting"|"connected"|"error"|"disabled"; error?: string;
   tools: { name: string; description?: string }[] }   // tool name as exposed: mcp__<server>__<tool>
 ```
@@ -401,7 +441,7 @@ interface McpServer { name: string; transport: "stdio"|"http"; status: "connecti
     "repliesPerMinuteFullTrust": 20, "repliesPerHourFullTrust": 200, "repliesPerDayFullTrust": 1000,
     "autoAcceptIncomingFiles": true, "maxIncomingFileBytes": 536870912,
     "requireApprovalForOutgoingFiles": true, "ownerCodingTools": true, "transferTtlHours": 24,
-    "maxTransferAttempts": 5 }
+    "maxTransferAttempts": 5, "maxPendingFollowups": 5, "maxFollowupChain": 12 }
 }
 ```
 Environment variable overrides: `SPENCER_DATA_DIR`, `SPENCER_PORT`.
