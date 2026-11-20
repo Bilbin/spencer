@@ -5,6 +5,8 @@
  * Channel conversations (recognized by the `notify_owner` tool being offered):
  *   - `Echo from <myName>: <last peer message text>`
  *   - text containing `NO_REPLY_TEST` → `NO_REPLY`
+ *   - text containing `SLOW_REPLY_TEST` → the answer comes after `SLOW_REPLY_MS` (for crash tests that run the
+ *     daemon as a child process, where `hooks.gate` is out of reach)
  *   - `please send file <path>` → tool call `propose_file_send`, then `Asked my owner to approve sending <path>`
  * Owner conversation:
  *   /send <channel> <text>   /file <channel> <path> [to]   /peers   /transfers   /read <channel>
@@ -61,10 +63,30 @@ export function createFakeBrain(opts: { name: () => string; hooks?: FakeBrainHoo
     opts.hooks?.onRequest?.(info);
     if (opts.hooks?.gate) await opts.hooks.gate(info, options?.signal);
     if (!target) return text("NO_REPLY");
+    if (channel && target.role === "user" && peerText(contentText(target.content)).includes("SLOW_REPLY_TEST")) {
+      await abortableDelay(SLOW_REPLY_MS, options?.signal);
+    }
     if (target.role === "toolResult") return afterTool(target, messages, channel);
     const userText = contentText(target.content);
     return channel ? channelAnswer(userText, opts.name()) : ownerAnswer(userText);
   };
+}
+
+export const SLOW_REPLY_MS = 3000;
+
+function abortableDelay(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal!.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function text(s: string): AssistantMessage {
