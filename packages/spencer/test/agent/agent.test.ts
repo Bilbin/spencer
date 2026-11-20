@@ -534,3 +534,31 @@ test("loop guard: when the streak budget runs out the channel pauses and asks th
     core.cleanup();
   }
 });
+
+test("loop guard: a repeated agent message gets no answer, and I don't send the same answer to agents twice", async () => {
+  await withAgent(async ({ core, agent, requests }) => {
+    const ch = core.getChannel("chDirect")!;
+    // The stub core only lists what we sent; record incoming peer messages too, as the daemon's store would.
+    const deliver = async (m: ReturnType<typeof peerChat>) => {
+      core.messages.push({ id: m.id, ch: m.ch, from: m.from, mine: false, ts: m.ts, type: "chat", text: m.body.text, hop: m.body.hop, by: m.body.by, status: "received" });
+      return agent.onPeerChat(m);
+    };
+    assert.deepEqual(await deliver(peerChat(ch, "Great, thanks! Talk soon.", { by: "agent", hop: 1 })), {});
+    assert.deepEqual(await deliver(peerChat(ch, "great thanks talk soon", { by: "agent", hop: 3 })), { note: "repeated" });
+    // People may repeat themselves.
+    assert.deepEqual(await deliver(peerChat(ch, "great thanks talk soon", { by: "human", hop: 0 })), {});
+    await agent.idle();
+    assert.equal(requests.length, 2);
+
+    // Two different agent messages that make my model say the same thing: the second answer is not sent.
+    const before = core.sent.length;
+    await deliver(peerChat(ch, "first FINAL_TEST", { by: "agent", hop: 5 }));
+    await agent.idle();
+    await deliver(peerChat(ch, "second FINAL_TEST", { by: "agent", hop: 7 }));
+    await agent.idle();
+    assert.deepEqual(
+      core.sent.slice(before).map((m) => m.text),
+      [`Bye from ${ME.name}`],
+    );
+  });
+});

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { decideReply, isAddressed, loopLimits, nameHandles, parseAgentAnswer, textMentions } from "../../src/policy.ts";
+import { decideReply, isAddressed, isRepeat, loopLimits, nameHandles, parseAgentAnswer, textMentions } from "../../src/policy.ts";
 import { TurnBudget } from "../../src/agent/budget.ts";
 import { DEFAULT_POLICY, resolveConfig } from "../../src/config.ts";
 
@@ -149,3 +149,16 @@ test("TurnBudget: streak, minute/hour/day windows, resets, and it survives a reo
 });
 
 const HOUR_PLUS = 3_600_001;
+
+test("isRepeat: same words, or near-identical long texts; short different acks are not repeats", () => {
+  assert.equal(isRepeat("Thanks, all good!", ["thanks all good"]), true);
+  assert.equal(isRepeat("Thanks!", ["Thank you!"]), false);
+  assert.equal(isRepeat("anything", []), false);
+  const long = "The build finished on commit abc123 and all 113 tests passed on the CI runner today";
+  assert.equal(isRepeat(long + ".", [long]), true);
+  assert.equal(isRepeat(long.replace("today", "this morning"), [long]), false, "a real change is not a repeat");
+  assert.equal(isRepeat("Echo from Alice: Echo from Bob: hi there friend of mine ok", ["Echo from Alice: hi there friend of mine ok"]), false);
+  // Text that repeats a phrase is not its shorter self (count-based, not set-based, overlap).
+  const nested = (n: number) => "Echo from Alice: Echo from Bob: ".repeat(n) + "let's work through this together";
+  assert.equal(isRepeat(nested(2), [nested(1)]), false);
+});

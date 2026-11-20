@@ -264,13 +264,18 @@ It triggers a model run (`submit input`, `requestId = msg.id`) only if **all** o
    standard trust and `policy.maxHopsFullTrust` (default 0) in full trust. A cap of 0 means no cap. Else `"hop cap"`.
 4. Direct channel, **or** a group where `mentions` contains my id or the text contains `@<my name>` (case-insensitive).
    Else `"not addressed"`.
-5. The channel's turn budget allows it (below). Else `"rate limited"` (per-minute burst: the message is skipped) or
+5. Not a repeat: an agent message (`by: "agent"`) that repeats one of the same sender's last 3 agent messages in the
+   channel (`isRepeat`: the same words ignoring case, punctuation and spacing, or for texts of 8+ words a word-trigram
+   Jaccard overlap of at least 0.85, counting repeated trigrams) gets `"repeated"`. Human messages are never suppressed this way.
+6. The channel's turn budget allows it (below). Else `"rate limited"` (per-minute burst: the message is skipped) or
    `"budget exhausted"` (the channel pauses and the owner is asked).
 
 The answer becomes `chat {hop: in.hop+1, by:"agent", replyTo: in.id, mentions:[in.from]}`, unless the
 trimmed answer is `NO_REPLY` (nothing is sent). If the answer ends with the marker `[END]` (on its own line or at the
 end of the last line), the marker is removed and the chat carries `final: true`; an answer that is only `[END]` sends
-nothing. A crash between the answer and the enqueue is covered by the `pending_replies` table plus a deterministic
+nothing. When the message being answered is itself automatic (`hop > 0`) and the answer repeats one of my own last 3
+agent messages in the channel, it is not sent either (logged): that is a loop, not a conversation. A crash between the
+answer and the enqueue is covered by the `pending_replies` table plus a deterministic
 reply key, so the reply is enqueued exactly once.
 
 **Turn budget** (`agent/budget.ts`, persisted in core.db, so a restart does not refill it). It is counted by this
@@ -301,6 +306,8 @@ message (a run with `requestId = "resume:" + msgId`). **Deny** sends "My owner p
 without trading acknowledgements forever and without a peer being able to run up your model bill.
 - *End signal* (cooperative): NO_REPLY and `[END]`/`final` let well-behaved agents stop politely. The channel
   instructions tell the model when to use them.
+- *Repeat detection* (local): catches the most common failure of agents that don't know when to stop, saying the
+  same thing again ("step repetition").
 - *Turn budget* (local, persistent): the protection that holds against a misbehaving or malicious peer, and it never
   stops a conversation silently: the owner decides.
 - *Hop cap* (cooperative backstop): `hop` counts the agent-only messages since a human last spoke (a human message, and
@@ -359,7 +366,7 @@ interface ChannelMessage { id: string; ch: string; from: string; fromName?: stri
   status: "pending"|"sent"|"received"|"failed";   // failed: the relay permanently rejected our message (see note); not retried
   final?: boolean; // the sender closed the exchange (§3.1)
   note?: string;   // why an incoming chat got no reply: "not addressed", "hop cap", "rate limited", "auto-reply off",
-                   // "conversation ended", "budget exhausted" (paused, see OwnerRequest kind "continue")
+                   // "conversation ended", "repeated", "budget exhausted" (paused, see OwnerRequest kind "continue")
   origin?: "human"|"owner-agent"|"agent-reply"|"peer" }
 interface Transfer { tid: string; ch: string; direction: "out"|"in"; peer: string; peerName?: string;
   name: string; size: number; sha256: string; state: string; attempt: number; initiatedBy: "owner"|"peer-agent"|"owner-agent"|"peer";

@@ -142,7 +142,7 @@ After pairing, you can:
   - **Outgoing file sends need your approval** in the UI by default. Sends a peer's agent asks for *always* need approval, unless the channel has full trust.
   - Peer replies reach your own (privileged) conversation only as notes. They never start a run there.
 - **Bot loops.** Spencer only replies when addressed: always in direct channels, and only when @mentioned in groups. Two Spencers can keep working together over many turns, and three layers stop them from looping (PROTOCOL.md §7.2):
-  - An agent ends an exchange with `NO_REPLY` (sends nothing) or `[END]` (its last message is marked `final`, and the other side does not answer).
+  - An agent ends an exchange with `NO_REPLY` (sends nothing) or `[END]` (its last message is marked `final`, and the other side does not answer). An agent message that repeats one of the last few gets no answer, and Spencer doesn't send the same answer to an agent twice.
   - A per-channel turn budget, counted locally and kept across restarts, so a peer can't get around it: replies in a row since a person wrote (20, or 50 with full trust), and replies per minute, hour and day. When it runs out, the channel pauses and you get a **Continue / Stop** card instead of the conversation silently dying. It refills when you type in the channel; messages your own Spencer sends don't refill it.
   - A hop count on every chat, restarting at 0 when a person speaks, is a backstop that older Spencers understand too.
 - **Durability.**

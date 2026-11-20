@@ -14,7 +14,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { AgentService, Channel, CoreServices, IncomingChat, McpServerStatus, OutgoingChat, OwnerItem, OwnerRequest } from "../contracts.ts";
-import { END_MARKER, decideReply, loopLimits, parseAgentAnswer } from "../policy.ts";
+import { END_MARKER, REPEAT_WINDOW, decideReply, isRepeat, loopLimits, parseAgentAnswer } from "../policy.ts";
 import { TurnBudget } from "./budget.ts";
 import type { FakeBrainHooks } from "./fake-brain.ts";
 import { McpManager } from "./mcp.ts";
@@ -465,6 +465,7 @@ export class SpencerAgent implements AgentService {
     let note: string | undefined;
     let paused: string | undefined;
     if (!decision.reply) note = decision.note;
+    else if (msg.body.by === "agent" && isRepeat(msg.body.text, this.recentAgentTexts(msg.ch, msg.from, msg.id))) note = "repeated";
     else {
       const verdict = this.budget.check(msg.ch, limits);
       if (verdict.ok) this.budget.record(msg.ch);
@@ -518,6 +519,15 @@ export class SpencerAgent implements AgentService {
     return {};
   }
 
+  /** The last few agent-written chat texts `from` sent in `ch` (newest last), excluding message `except`. */
+  private recentAgentTexts(ch: string, from: string, except?: string): string[] {
+    return this.core
+      .readChannel(ch, 50)
+      .filter((m) => m.type === "chat" && m.from === from && m.by === "agent" && m.id !== except && typeof m.text === "string")
+      .slice(-REPEAT_WINDOW)
+      .map((m) => m.text!);
+  }
+
   private row(msgId: string): PendingRow | undefined {
     return this.core.db.prepare("SELECT * FROM agent_pending_replies WHERE msg_id = ?").get(msgId) as PendingRow | undefined;
   }
@@ -545,7 +555,10 @@ export class SpencerAgent implements AgentService {
       if (answer.status === "done") {
         const out = parseAgentAnswer(answer.text);
         const ch = this.core.getChannel(row.ch);
-        if (out.send && ch) {
+        // Answering an automatic message with what I just said is a loop, not a conversation: drop it.
+        const repeat = out.send && row.hop > 0 && isRepeat(out.text, this.recentAgentTexts(row.ch, this.core.me().id));
+        if (repeat) this.log(`reply to ${row.msg_id} in ${row.ch} repeats an earlier message; not sent`);
+        if (out.send && ch && !repeat) {
           this.core.sendChat(row.ch, {
             text: clip(out.text),
             hop: row.hop + 1,

@@ -117,6 +117,8 @@ function matchesAt(text: string, start: number, handle: string): boolean {
  *
  *  1. End signal: an agent message with `final: true` ("[END]" from the model) gets no automatic answer, and
  *     NO_REPLY sends nothing at all. Well-behaved agents stop on their own instead of trading acknowledgements.
+ *     Agent turns that repeat one of the last few (`isRepeat`) are dropped on both sides: a near-duplicate agent message
+ *     from a peer gets no answer, and an answer of mine to an agent message that repeats what I just said is not sent.
  *  2. Turn budget (local and persistent, see agent/budget.ts): automatic replies since a person last wrote in the
  *     channel, plus per-minute / hour / day windows. When it runs out the channel pauses and the owner is asked
  *     whether to continue, instead of the conversation silently stopping.
@@ -180,4 +182,51 @@ export function parseAgentAnswer(raw: string): { send: false } | { send: true; t
   }
   if (!text || text === "NO_REPLY") return { send: false };
   return { send: true, text, final };
+}
+
+// ------------------------------------------------------------------ repeated turns
+
+/** How many recent agent messages of the same sender a new one is compared with. */
+export const REPEAT_WINDOW = 3;
+
+function normalize(text: string): string {
+  return text
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+/** Word k-grams with their counts (a multiset, so text that repeats a phrase is not mistaken for its shorter self). */
+function shingles(words: string[], k: number): Map<string, number> {
+  const out = new Map<string, number>();
+  const add = (g: string) => out.set(g, (out.get(g) ?? 0) + 1);
+  if (words.length < k) add(words.join(" "));
+  else for (let i = 0; i + k <= words.length; i++) add(words.slice(i, i + k).join(" "));
+  return out;
+}
+
+/**
+ * Whether `text` repeats one of `previous` (the same sender's last few agent messages): the same words once case,
+ * punctuation and spacing are ignored, or, for texts of 8+ words, word-trigram overlap of at least 0.85 (Jaccard over
+ * trigram counts).
+ * Short different acknowledgements ("Thanks!" / "Thank you!") are not repeats; the end signal handles those.
+ */
+export function isRepeat(text: string, previous: string[]): boolean {
+  const a = normalize(text);
+  if (!a) return false;
+  const aw = a.split(" ");
+  for (const p of previous) {
+    const b = normalize(p);
+    if (a === b) return true;
+    const bw = b.split(" ");
+    if (aw.length < 8 || bw.length < 8) continue;
+    const x = shingles(aw, 3);
+    const y = shingles(bw, 3);
+    let inter = 0;
+    for (const [g, n] of x) inter += Math.min(n, y.get(g) ?? 0);
+    const union = aw.length - 2 + (bw.length - 2) - inter;
+    if (inter / union >= 0.85) return true;
+  }
+  return false;
 }
