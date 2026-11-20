@@ -51,7 +51,8 @@ export interface ChannelMessage {
   by?: "human" | "agent";
   replyTo?: string;
   mentions?: string[];
-  status: "pending" | "sent" | "received";
+  /** "failed": the relay permanently rejected our message (see `note`); it will not be retried. */
+  status: "pending" | "sent" | "received" | "failed";
   /** Why an incoming chat did not trigger a reply ("not addressed", "hop cap", "rate limited", "auto-reply off"). */
   note?: string;
   origin?: MessageOrigin;
