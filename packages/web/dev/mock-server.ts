@@ -6,7 +6,11 @@
  * Serves packages/web/public with the token substituted (and the daemon's CSP), and implements
  * the local API of docs/PROTOCOL.md §8 in memory with sample data. POSTs mutate the state and
  * push events on /api/events, and a few timers push live events (incoming messages, transfer
- * progress), so every screen can be exercised without a daemon.
+ * progress, working status, presence changes, an owner request), so every screen can be exercised
+ * without a daemon.
+ *
+ * Presence is not in the daemon's contracts yet. The mock sends the shape the UI reads defensively:
+ * `member.presence = {online, lastSeenAt}` on channel members, plus `{type:"presence", id, presence}` events.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -14,7 +18,14 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { join, normalize, extname, basename, sep } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { Channel, ChannelMessage, Transfer, OwnerItem, McpServerStatus, DaemonEvent } from "../../spencer/src/contracts.ts";
+import type { Channel, ChannelMember, ChannelMessage, Transfer, OwnerItem, OwnerRequest, McpServerStatus, DaemonEvent } from "../../spencer/src/contracts.ts";
+
+interface Presence {
+  online: boolean;
+  lastSeenAt?: number;
+}
+type MockMember = ChannelMember & { presence?: Presence };
+type MockEvent = DaemonEvent | { type: "presence"; id: string; presence: Presence };
 
 const PORT = Number(process.argv[2] ?? process.env.PORT ?? 7421);
 const TOKEN = process.env.SPENCER_TOKEN ?? randomBytes(16).toString("hex");
@@ -44,6 +55,13 @@ const carol = person("Carol's Spencer");
 const dave = person("Dave's Spencer");
 
 const relay = { url: "wss://spencer.pjalv.com/ws", connected: true };
+const relays = [relay, { url: "wss://relay.example.org/ws", connected: true }];
+/** Peer presence by identity id (the owner's own Spencer has none: it is this daemon). */
+const presence = new Map<string, Presence>([
+  [bob.id, { online: true, lastSeenAt: now() }],
+  [carol.id, { online: false, lastSeenAt: now() - 47 * 60_000 }],
+  [dave.id, { online: true, lastSeenAt: now() }],
+]);
 const policy = {
   maxHops: 4,
   repliesPerMinute: 6,
@@ -62,10 +80,23 @@ const channels = new Map<string, Channel>();
 const messages = new Map<string, ChannelMessage[]>();
 const transfers = new Map<string, Transfer>();
 const owner: OwnerItem[] = [];
+const requests = new Map<string, OwnerRequest>();
+/** Live working statuses (ch -> from -> event), replayed to a UI that connects mid-run. */
+const working = new Map<string, Extract<DaemonEvent, { type: "status" }>>();
 let ownerBusy = false;
 const people = new Map<string, Person>([me, bob, carol, dave].map((p) => [p.id, p]));
 
 const mcp: McpServerStatus[] = [
+  {
+    name: "t3code",
+    transport: "stdio",
+    status: "connected",
+    tools: [
+      { name: "mcp__t3code__thread_read", description: "Read a T3 Code thread" },
+      { name: "mcp__t3code__thread_launch", description: "Start a new agent thread in a project" },
+      { name: "mcp__t3code__project_list", description: "List projects" },
+    ],
+  },
   {
     name: "github",
     transport: "http",
@@ -85,8 +116,9 @@ const mcp: McpServerStatus[] = [
   },
 ];
 
-function member(p: Person) {
-  return { id: p.id, name: p.name, fingerprint: p.fingerprint, me: p.id === me.id };
+function member(p: Person): MockMember {
+  const pr = presence.get(p.id);
+  return { id: p.id, name: p.name, fingerprint: p.fingerprint, me: p.id === me.id, ...(pr ? { presence: { ...pr } } : {}) };
 }
 
 function addChannel(kind: "direct" | "group", name: string, ps: Person[], extra: Partial<Channel> = {}): Channel {
@@ -98,6 +130,7 @@ function addChannel(kind: "direct" | "group", name: string, ps: Person[], extra:
     members: [me, ...ps].map(member),
     autoReply: true,
     allowedMcpTools: [],
+    trust: "standard",
     unread: 0,
     lastSeq: 0,
     createdAt: now() - 3 * 24 * HOUR,
@@ -167,6 +200,35 @@ const answer = addMsg(
 const thanks = addMsg(bobCh.id, me, { text: "Thanks! Yes please, send the log over.", hop: 0, by: "human", replyTo: answer.id }, t0 + 6 * MIN);
 addMsg(bobCh.id, me, { text: "Sure — I'll ask Bob to approve sending backup-2026-11-19.log.", hop: 2, by: "agent", replyTo: thanks.id }, t0 + 6.5 * MIN);
 addMsg(bobCh.id, bob, { text: "👍 Approved on my side. It should show up in your transfers.", hop: 3, by: "agent", note: "hop cap" }, t0 + 7 * MIN);
+addMsg(
+  bobCh.id,
+  bob,
+  {
+    text: [
+      "Here is the summary of last night's run:",
+      "",
+      "| Step | Duration | Result |",
+      "|---|---:|---|",
+      "| snapshot | 1m 12s | ok |",
+      "| upload | 14m 03s | ok, **41.2 GB** |",
+      "| verify | 2m 40s | ok |",
+      "",
+      "The job is driven by this unit:",
+      "",
+      "```ini",
+      "[Timer]",
+      "OnCalendar=*-*-* 03:00:00",
+      "Persistent=true",
+      "```",
+      "",
+      "- [x] retention pruned to 14 days",
+      "- [ ] off-site copy (waiting on *Bob*)",
+    ].join("\n"),
+    hop: 1,
+    by: "agent",
+  },
+  t0 + 7.2 * MIN,
+);
 addMsg(bobCh.id, bob, { text: "(Bob here, typing myself) are we still on for Friday?", hop: 0, by: "human", note: "not addressed" }, t0 + 20 * MIN);
 addMsg(bobCh.id, me, { text: "Friday works — see you at 7. Details: https://example.com/friday?ref=spencer", hop: 0, by: "human", status: "pending" }, t0 + 21 * MIN);
 
@@ -178,15 +240,45 @@ const myReply = addMsg(group.id, me, { text: "Sure — I'll ask Alice to approve
 addMsg(group.id, carol, { text: "Thanks @Dave's Spencer and @Alice's Spencer! Agenda is up at https://example.com/agenda", hop: 2, by: "agent", replyTo: myReply.id, note: "rate limited" }, t0 + 5 * MIN);
 addMsg(group.id, me, { text: "(huge paste of the meetup notes…)", hop: 0, by: "human", status: "failed", note: "envelope too large" }, t0 + 8 * MIN);
 addMsg(group.id, dave, { text: "Auto-replies are off on my side today, ping Dave directly if urgent.", hop: 0, by: "human", note: "auto-reply off" }, t0 + 9 * MIN);
+addMsg(group.id, dave, { text: "Also, could someone restart the staging preview? It has been stuck since lunch.", hop: 0, by: "human", note: "not addressed" }, t0 + 9.4 * MIN);
+const daveTask = addMsg(group.id, dave, { text: "@Alice's Spencer can you start a T3 Code thread in `staging` to restart the preview server?", hop: 0, by: "agent", mentions: [me.id] }, t0 + 12 * MIN);
+addMsg(group.id, me, { text: "I've asked Alice. I'll report back here once she decides.", hop: 1, by: "agent", replyTo: daveTask.id, mentions: [dave.id] }, t0 + 12.3 * MIN);
+addMsg(
+  group.id,
+  carol,
+  {
+    text: "Here's the badge layout for Thursday:\n\n```html\n<!doctype html><body style=\"font-family:sans-serif;padding:16px\"><h2 style=\"margin:0\">Networking Night</h2><p>Thursday 19:00 · Room 4</p></body>\n```",
+    hop: 0,
+    by: "agent",
+  },
+  t0 + 14 * MIN,
+);
 
 addOwner({ role: "user", text: "Ask Bob's Spencer if the nightly backup finished" }, t0 + 1 * MIN);
+addOwner({ role: "tool", toolName: "list_peers", text: "call {}" }, t0 + 1.1 * MIN);
 addOwner({ role: "tool", toolName: "list_peers", text: JSON.stringify([{ name: "Bob's Spencer", channel: "Bob", kind: "direct" }, { name: "Networking Group", members: 3 }], null, 2) }, t0 + 1.2 * MIN);
+addOwner({ role: "tool", toolName: "send_message", text: 'call {"to":"Bob\'s Spencer","text":"Hi Bob\'s Spencer — Alice wants to know whether last night\'s backup finished."}' }, t0 + 1.4 * MIN);
 addOwner({ role: "tool", toolName: "send_message", text: `sent to Bob's Spencer (direct), id ${ask.id}` }, t0 + 1.5 * MIN);
 addOwner({ role: "assistant", text: "I asked Bob's Spencer whether last night's backup finished. I'll tell you when it answers." }, t0 + 2 * MIN);
-addOwner({ role: "note", untrusted: true, text: "Reply from Bob's Spencer (untrusted peer content):\nYes. The nightly backup finished at 03:12 UTC: 41.2 GB, no errors. Do you want the log?" }, t0 + 3 * MIN);
+addOwner({ role: "note", untrusted: true, text: "Reply from Bob's Spencer in Bob (untrusted): Yes. The nightly backup finished at 03:12 UTC: 41.2 GB, no errors. Do you want the log?" }, t0 + 3 * MIN);
+addOwner({ role: "note", untrusted: true, text: "Reply from Bob's Spencer in Bob (untrusted): The log is 18 MB. I can send it over croc if Alice wants it." }, t0 + 3.2 * MIN);
 addOwner({ role: "user", text: "Great. Also check if there are open issues about backups in our repo" }, t0 + 10 * MIN);
+addOwner({ role: "tool", toolName: "mcp__github__list_issues", text: 'call {"repo":"alice/infra","query":"backup"}' }, t0 + 10.2 * MIN);
 addOwner({ role: "tool", toolName: "mcp__github__list_issues", isError: true, text: "401 Unauthorized: bad credentials\n(check the GITHUB_TOKEN env of the github MCP server)" }, t0 + 10.3 * MIN);
-addOwner({ role: "assistant", text: "Bob's Spencer confirmed the backup finished at 03:12 UTC with no errors.\n\nI couldn't check GitHub: the github MCP server rejected my credentials (401). Could you refresh its token?" }, t0 + 11 * MIN);
+addOwner({ role: "assistant", text: "Bob's Spencer confirmed the backup finished at **03:12 UTC** with no errors.\n\nI couldn't check GitHub: the `github` MCP server rejected my credentials (401). To fix it:\n\n1. Create a new token with `repo` scope\n2. Put it in `GITHUB_TOKEN` in Spencer's config\n3. Restart the daemon" }, t0 + 11 * MIN);
+addOwner({ role: "note", text: "Channel Networking Group used mcp__t3code__project_list (allowed in that channel)." }, t0 + 12.1 * MIN);
+const req: OwnerRequest = {
+  id: b64u(12),
+  ch: group.id,
+  channelName: group.name,
+  from: dave.id,
+  fromName: dave.name,
+  text: "Dave's Spencer asks me to start a T3 Code thread in the project “staging” that restarts the preview server (`systemctl --user restart preview`).",
+  state: "pending",
+  createdAt: t0 + 12.2 * MIN,
+};
+requests.set(req.id, req);
+addOwner({ role: "note", untrusted: true, request: req.id, text: `Request from ${dave.name} in ${group.name}:\n${req.text}` }, t0 + 12.2 * MIN);
 addOwner({ role: "note", text: "Transfer photos.zip from Bob's Spencer completed. It is in quarantine." }, t0 + 30 * MIN);
 
 addTransfer({ ch: bobCh.id, direction: "out", peer: bob.id, name: "q3-report.pdf", size: 2_516_582, state: "awaiting_approval", initiatedBy: "peer-agent", reason: "Bob asked for the Q3 report for tomorrow's review", createdAt: t0 + 8 * MIN, path: "/home/alice/.local/share/spencer/outgoing/x/q3-report.pdf" });
@@ -201,7 +293,7 @@ if (process.env.MOCK_EMPTY_OWNER) owner.length = 0;
 // ---------------------------------------------------------------- events
 
 const sockets = new Set<WebSocket>();
-function emit(e: DaemonEvent) {
+function emit(e: MockEvent) {
   const data = JSON.stringify(e);
   for (const s of sockets) if (s.readyState === s.OPEN) s.send(data);
 }
@@ -214,6 +306,32 @@ const setBusy = (b: boolean) => {
   emit({ type: "owner_busy", busy: b });
 };
 const later = (ms: number, fn: () => void) => setTimeout(fn, ms).unref();
+
+function setStatus(ch: string, from: string, replyTo: string, state: "working" | "done", activity?: string) {
+  const e = { type: "status" as const, ch, from, replyTo, state, activity, ts: now() };
+  if (state === "done") working.delete(`${ch} ${from}`);
+  else working.set(`${ch} ${from}`, e);
+  emit(e);
+}
+
+/** Run `steps` as a working status (one every `gap` ms), then call `done`. */
+function workThrough(ch: string, from: string, replyTo: string, steps: string[], gap: number, done?: () => void) {
+  steps.forEach((a, i) => later(i * gap, () => channels.has(ch) && setStatus(ch, from, replyTo, "working", a)));
+  later(steps.length * gap, () => {
+    setStatus(ch, from, replyTo, "done");
+    if (channels.has(ch)) done?.();
+  });
+}
+
+function setPresence(p: Person, online: boolean) {
+  const pr: Presence = { online, lastSeenAt: now() };
+  presence.set(p.id, pr);
+  for (const c of channels.values()) {
+    const m = (c.members as MockMember[]).find((x) => x.id === p.id);
+    if (m) m.presence = { ...pr };
+  }
+  emit({ type: "presence", id: p.id, presence: pr });
+}
 
 function incoming(ch: Channel, from: Person, m: Partial<ChannelMessage> & { text?: string }) {
   const msg = addMsg(ch.id, from, m);
@@ -267,13 +385,34 @@ later(8_000, () => {
   }
 });
 
+// Bob's Spencer is in the middle of a long task when the UI opens, then starts another one every minute.
+const BOB_STEPS = ["Thinking…", "Using t3code · project list", "Using t3code · thread read", "Using github · list issues", "Using t3code · thread read", "Thinking…"];
+let bobRuns = 0;
+function bobWorks() {
+  if (!channels.has(bobCh.id)) return;
+  const target = messages.get(bobCh.id)!.findLast((m) => m.mine) ?? messages.get(bobCh.id)![0];
+  if (!target) return;
+  workThrough(bobCh.id, bob.id, target.id, BOB_STEPS, 6000, () => {
+    if (bobRuns++ === 0) incoming(bobCh, bob, { text: "Checked the staging thread and the open issues: nothing blocks Friday. One issue (**#42**, backup retention) is still open; I left a comment.", hop: 1, by: "agent", replyTo: target.id, mentions: [me.id] });
+  });
+}
+bobWorks();
+setInterval(bobWorks, 60_000).unref();
+// My own Spencer answers Dave in the group for a while (shows the "mine" working row).
+workThrough(group.id, me.id, daveAsk.id, ["Thinking…", "Asking its owner for approval", "Using t3code · project list"], 15_000);
+
+// Carol's Spencer comes and goes.
+setInterval(() => setPresence(carol, !presence.get(carol.id)!.online), 40_000).unref();
+
 // One relay blip so the connection dot can be seen changing.
 later(60_000, () => {
   relay.connected = false;
   emit({ type: "relay", url: relay.url, connected: false });
+  setPresence(dave, false);
   later(6_000, () => {
     relay.connected = true;
     emit({ type: "relay", url: relay.url, connected: true });
+    setPresence(dave, true);
   });
 });
 
@@ -322,6 +461,7 @@ function ownerReply(text: string) {
   const lower = text.toLowerCase();
   later(700, () => {
     if (lower.includes("peer")) {
+      emitOwner(addOwner({ role: "tool", toolName: "list_peers", text: "call {}" }));
       emitOwner(addOwner({ role: "tool", toolName: "list_peers", text: JSON.stringify([...channels.values()].map((c) => ({ channel: c.name, kind: c.kind, members: c.members.filter((m) => !m.me).map((m) => m.name) })), null, 2) }));
     } else if (lower.includes("bob")) {
       const m = addMsg(bobCh.id, me, { text: text.replace(/^ask bob'?s spencer (for|to)?\s*/i, "Alice asks: "), hop: 0, by: "agent", origin: "owner-agent" });
@@ -329,13 +469,16 @@ function ownerReply(text: string) {
       emitOwner(addOwner({ role: "tool", toolName: "send_message", text: `sent to Bob's Spencer (direct), id ${m.id}` }));
       later(3500, () => {
         const r = incoming(bobCh, bob, { text: "Here's the tail of the log:\n03:10:58 snapshot ok\n03:12:04 upload ok (41.2 GB)\nWant the full file?", hop: 1, by: "agent", replyTo: m.id, mentions: [me.id] });
-        emitOwner(addOwner({ role: "note", untrusted: true, text: `Reply from Bob's Spencer (untrusted peer content):\n${r.text}` }));
+        emitOwner(addOwner({ role: "note", untrusted: true, text: `Reply from Bob's Spencer in Bob (untrusted): ${r.text}` }));
       });
+    } else if (lower.includes("issue") || lower.includes("github")) {
+      emitOwner(addOwner({ role: "tool", toolName: "mcp__github__list_issues", text: 'call {"repo":"alice/infra"}' }));
     } else if (lower.includes("transfer")) {
+      emitOwner(addOwner({ role: "tool", toolName: "list_transfers", text: "call {}" }));
       emitOwner(addOwner({ role: "tool", toolName: "list_transfers", text: [...transfers.values()].map((t) => `${t.direction} ${t.name} ${t.state}`).join("\n") }));
     }
   });
-  later(1800, () => {
+  later(lower.includes("issue") || lower.includes("github") ? 6000 : 1800, () => {
     let answer: string;
     if (lower.includes("peer")) answer = `You have ${[...channels.values()].filter((c) => c.kind === "direct").length} direct channels and ${[...channels.values()].filter((c) => c.kind === "group").length} group(s). Bob's Spencer is the most active.`;
     else if (lower.includes("bob")) answer = "I've asked Bob's Spencer. Its answer will show up here as a note.";
@@ -355,10 +498,10 @@ function channelSend(c: Channel, text: string, mentions: string[]) {
   const others = c.members.filter((m) => !m.me);
   const responders = c.kind === "direct" ? others : others.filter((m) => mentions.includes(m.id) || text.toLowerCase().includes(`@${(m.name ?? "").toLowerCase()}`));
   responders.forEach((m, i) => {
-    later(1800 + i * 1200, () => {
+    later(900 + i * 1200, () => {
       const p = people.get(m.id);
       if (!p || !channels.has(c.id)) return;
-      incoming(c, p, { text: `(${p.name}, auto-reply) Got your message: “${text.slice(0, 80)}”.`, hop: 1, by: "agent", replyTo: msg.id, mentions: [me.id] });
+      workThrough(c.id, p.id, msg.id, ["Thinking…", "Using t3code · thread read", "Thinking…"], 1500, () => incoming(c, p, { text: `(${p.name}, auto-reply) Got your message: “${text.slice(0, 80)}”.`, hop: 1, by: "agent", replyTo: msg.id, mentions: [me.id] }));
     });
   });
   return msg;
@@ -401,7 +544,17 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
   const [, a, b, c] = parts;
 
   if (method === "GET" && a === "state" && !b) {
-    return { me, relay, channels: [...channels.values()], transfers: [...transfers.values()], mcp, policy };
+    return {
+      me,
+      relay: { url: relay.url, connected: relays.every((r) => r.connected) },
+      relays,
+      channels: [...channels.values()],
+      transfers: [...transfers.values()],
+      mcp,
+      policy,
+      ownerBusy,
+      requests: [...requests.values()].reverse(),
+    };
   }
   if (a === "owner" && b === "messages" && !c) {
     if (method === "GET") {
@@ -448,6 +601,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       const body = await readJson(req);
       if (typeof body.name === "string" && body.name.trim()) ch.name = body.name.trim();
       if (typeof body.autoReply === "boolean") ch.autoReply = body.autoReply;
+      if (body.trust === "standard" || body.trust === "full") ch.trust = body.trust;
       if (Array.isArray(body.allowedMcpTools)) ch.allowedMcpTools = body.allowedMcpTools.filter((x): x is string => typeof x === "string");
       emitChannel(ch);
       return ch;
@@ -513,12 +667,32 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     if (b && !c && method === "GET") return getTransfer(b);
   }
   if (a === "mcp" && method === "GET" && !b) return { servers: mcp };
+  if (a === "requests") {
+    if (!b && method === "GET") return { items: [...requests.values()].reverse() };
+    if (b && (c === "approve" || c === "deny") && method === "POST") {
+      const r = requests.get(b);
+      if (!r) throw new HttpError(404, "unknown request");
+      if (r.state !== "pending") throw new HttpError(409, `request already ${r.state}`);
+      r.state = c === "approve" ? "approved" : "denied";
+      r.decidedAt = now();
+      emit({ type: "request", request: r });
+      if (c === "approve") {
+        emitOwner(addOwner({ role: "user", text: `I approve this request from ${r.fromName}: ${r.text}` }));
+        ownerReply("approved request");
+      } else if (channels.has(r.ch)) {
+        emitMsg(addMsg(r.ch, me, { text: "My owner declined this request.", hop: policy.maxHops, by: "agent", origin: "agent-reply" }));
+      }
+      return r;
+    }
+  }
   throw new HttpError(404, "not found");
 }
 
 // ---------------------------------------------------------------- HTTP
 
 const TYPES: Record<string, string> = {
+  ".woff2": "font/woff2",
+  ".txt": "text/plain; charset=utf-8",
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -598,6 +772,7 @@ server.on("upgrade", (req, socket, head) => {
     ws.on("close", () => sockets.delete(ws));
     ws.send(JSON.stringify({ type: "relay", url: relay.url, connected: relay.connected } satisfies DaemonEvent));
     if (ownerBusy) ws.send(JSON.stringify({ type: "owner_busy", busy: true } satisfies DaemonEvent));
+    for (const e of working.values()) ws.send(JSON.stringify(e));
   });
 });
 
