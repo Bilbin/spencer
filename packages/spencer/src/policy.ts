@@ -23,7 +23,8 @@ export type ReplyNote =
   | "not addressed"
   | "rate limited"
   | "budget exhausted"
-  | "repeated";
+  | "repeated"
+  | "handled by owner";
 
 export interface ReplyInput {
   channelKind: "direct" | "group";

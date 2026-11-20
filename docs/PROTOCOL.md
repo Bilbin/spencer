@@ -321,12 +321,20 @@ conversation as a **write** (it never starts a run), clearly marked as untrusted
 `<peer_message>`, and the transcript item has `untrusted: true` (§8), which the UI uses to style it. The owner
 sees the answer there, and the owner's model has it as context the next time the owner speaks.
 
+By default a peer can never start a run in the owner conversation. The owner's Spencer can opt in, one message at a
+time: an owner follow-up with `on_reply_from` (or `send_message` with `await_reply`) fires as soon as a peer writes
+in that channel (§7.4).
+
 ### 7.4 Follow-ups ("I'll get back to you")
 An agent that starts something slow (a T3 Code thread, a build) can schedule a reminder on itself and report later
 without anyone writing first. Tools, offered in the owner conversation and in every channel conversation:
 - `schedule_followup {in_minutes, note}`: `in_minutes` between 1 and 10080 (a week). `note` is what the agent wants
   to do then, in its own words.
 - `cancel_followup {id}`: cancels one of *this conversation's* pending follow-ups, or all of them with `"all"`.
+- Owner conversation only: `schedule_followup {…, on_reply_from: <channel>}` also fires as soon as a peer writes in
+  that channel; `send_message {…, await_reply: true}` sends and schedules such a follow-up for 60 minutes with the
+  note "Handle the answer from <channel> to what you sent: <text>". (`send_message {…, final: true}` sends a closing
+  message instead, §3.1.)
 
 Storage and delivery (`agent/followups.ts`): rows in `agent_followups` in core.db, so they survive restarts. A timer
 compares `dueAt` with the wall clock at least every 15 s, so a follow-up that came due while the laptop slept fires
@@ -344,7 +352,20 @@ When one fires, its conversation gets an input (shown in transcripts as "Follow-
   owner refills it. It is cancelled if the channel is gone or auto-reply is off there.
 - **Owner**: "[Follow-up you scheduled …; your owner did not just write.]" plus the note. The owner's Spencer acts
   with its full tools and reports with `send_message` if someone is waiting. The note was written by the owner's own
-  agent, in its own conversation, so a peer cannot start an owner run this way.
+  agent, in its own conversation.
+
+**Waking the owner on a reply (opt-in).** This is the one way a peer's message can start a run in the privileged owner
+conversation, so it is guarded by everything above:
+- Only a follow-up the owner's Spencer scheduled with `on_reply_from` fires this way, once (one-shot). The peer
+  decides only *when*; the instruction that runs is the owner agent's own note. The peer's message is appended first as
+  an untrusted note ("Message from … (untrusted)" / "Reply from …"), never as instructions.
+- The wake is an automatic turn in that channel: it needs and spends the channel's turn budget (§7.2). If the budget
+  is used up, nothing fires early (the follow-up fires at its time) and the usual "continue?" card appears.
+- One responder: the message that woke the owner gets the note `"handled by owner"` and no channel-agent run.
+- A message the owner conversation sends from a run a follow-up started carries `hop = last chat hop in the channel + 1`,
+  not 0, and like every `owner-agent` message it does not refill any budget, here or at the peer (it is `by: "agent"`).
+  Only a run my owner started (typing, or approving a request) sends at hop 0.
+- Chains of wake → send with `await_reply` → wake are bounded by `maxFollowupChain` and both sides' turn budgets.
 
 Bounds: at most `policy.maxPendingFollowups` (5) pending per conversation, and at most `policy.maxFollowupChain` (12)
 follow-ups in a row that each scheduled the next (`depth`), so an agent polling a task cannot go on forever. Past
@@ -398,7 +419,8 @@ interface ChannelMessage { id: string; ch: string; from: string; fromName?: stri
   status: "pending"|"sent"|"received"|"failed";   // failed: the relay permanently rejected our message (see note); not retried
   final?: boolean; // the sender closed the exchange (§3.1)
   note?: string;   // why an incoming chat got no reply: "not addressed", "hop cap", "rate limited", "auto-reply off",
-                   // "conversation ended", "repeated", "budget exhausted" (paused, see OwnerRequest kind "continue")
+                   // "conversation ended", "repeated", "budget exhausted" (paused, see OwnerRequest kind "continue"),
+                   // "handled by owner" (it woke an owner follow-up, §7.4)
   origin?: "human"|"owner-agent"|"agent-reply"|"agent-followup"|"peer" }   // agent-followup: §7.4
 interface Transfer { tid: string; ch: string; direction: "out"|"in"; peer: string; peerName?: string;
   name: string; size: number; sha256: string; state: string; attempt: number; initiatedBy: "owner"|"peer-agent"|"owner-agent"|"peer";
@@ -415,7 +437,8 @@ interface Followup { id: string;
   dueAt: number;                                  // fires at the latest then
   state: "pending"|"running"|"done"|"cancelled"|"failed";
   depth: number;                                  // follow-ups in a row before this one
-  createdAt: number; firedAt?: number; firedBy?: "time";
+  wakeOnReplyIn?: string;                         // owner: fires early when a peer writes in this channel
+  createdAt: number; firedAt?: number; firedBy?: "time"|"reply";
   error?: string }                                // why it failed or was cancelled
 interface McpServer { name: string; transport: "stdio"|"http"; status: "connecting"|"connected"|"error"|"disabled"; error?: string;
   tools: { name: string; description?: string }[] }   // tool name as exposed: mcp__<server>__<tool>

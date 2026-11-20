@@ -17,6 +17,7 @@
  * Owner conversation:
  *   /send <channel> <text>   /file <channel> <path> [to]   /peers   /transfers   /read <channel>
  *   /invite direct|group <name>   /tool <toolName> <json args>   /followup <minutes> <note>
+ *   /followup-on <channel> <minutes> <note> (on_reply_from)   /ask <channel> <text> (send_message with await_reply)
  *   a follow-up firing → the note is handled like an owner command (so `/followup 5 /send Bob hi` sends later)
  *   anything else → `ok: <text>`
  *   after a tool result → `done: <first 200 chars of the result>`
@@ -243,6 +244,17 @@ function ownerAnswer(input: string): AssistantMessage {
     case "/invite": {
       const [kind, name] = head(rest);
       if ((kind === "direct" || kind === "group") && name) return call("create_invite", { kind, name: name.trim() });
+      break;
+    }
+    case "/followup-on": {
+      const [channel, r1] = head(rest);
+      const [minutes, note] = head(r1);
+      if (channel && minutes && note) return call("schedule_followup", { in_minutes: Number(minutes), note: note.trim(), on_reply_from: channel });
+      break;
+    }
+    case "/ask": {
+      const [channel, msg] = head(rest);
+      if (channel && msg) return call("send_message", { channel, text: msg, await_reply: true });
       break;
     }
     case "/followup": {

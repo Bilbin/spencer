@@ -31,7 +31,7 @@ import { McpManager } from "./mcp.ts";
 import { setupModels, type ModelSetup } from "./models.ts";
 import { OWNER_KEY, PiRuntime, channelKey, type AgentRuntime, type ToolSpec } from "./runtime.ts";
 import { FollowupStore, toFollowup, type FollowupRow } from "./followups.ts";
-import { MAX_CHAT_TEXT, channelTools, followupTools, ownerTools } from "./tools.ts";
+import { MAX_CHAT_TEXT, channelTools, followupTools, ownerTools, resolveChannel } from "./tools.ts";
 import { escapeBody, wrapPeerMessage, wrapUntrustedNote } from "./untrusted.ts";
 
 export interface AgentOptions {
@@ -175,9 +175,10 @@ export class SpencerAgent implements AgentService {
       currentAsker: (ch: string) => this.currentAsker(ch),
       askOwner: (ch: string, from: string, text: string) => this.askOwner(ch, from, text),
       followups: {
-        schedule: (key: string, args: { inMinutes: number; note: string }) => this.scheduleFollowup(key, args),
+        schedule: (key: string, args: { inMinutes: number; note: string; onReplyFrom?: string }) => this.scheduleFollowup(key, args),
         cancel: (key: string, id: string) => this.cancelFollowupTool(key, id),
       },
+      ownerSendHop: (chId: string) => this.ownerSendHop(chId),
       log: this.log,
     };
     // One spec per tool name, shared by every conversation that offers it (tools are global by name).
@@ -392,8 +393,9 @@ export class SpencerAgent implements AgentService {
       "- read_channel: read recent messages of a channel.",
       "- create_invite: create a channel and its invite link for your owner to share.",
       "- schedule_followup / cancel_followup: reminders you set for yourself. Use them whenever you say you will get back",
-      "  to someone: a task that takes a while (e.g. a T3 Code thread) or a result to check later. When it fires you get a turn",
-      "  here with your note:",
+      "  to someone: a task that takes a while (e.g. a T3 Code thread), a result to check later, or an answer you are waiting",
+      "  for (on_reply_from wakes you as soon as that channel's peer writes; send_message with await_reply does the same).",
+      "  When it fires you get a turn here with your note:",
       "  check on the task and report with send_message (final: true when nothing more is expected), or schedule another one.",
       ...(mcp ? ["- mcp__<server>__<tool>: tools from your owner's MCP servers (for example T3 Code: projects and threads)."] : []),
       ...(coding ? ["- read, write, edit, bash: your owner's machine (working directory: the home directory). Be careful."] : []),
@@ -494,6 +496,20 @@ export class SpencerAgent implements AgentService {
     const limits = loopLimits(policy, ch?.trust);
     // A person wrote: the channel's streak of agent turns starts over (the rate windows do not; see budget.ts).
     if (msg.body.by === "human") this.budget.humanSpoke(msg.ch);
+
+    // §7.4: owner follow-ups that wait for this channel (opt-in: on_reply_from / await_reply) fire now. The peer only
+    // decides *when*: what runs is the note the owner's Spencer wrote for itself, and the peer's message reaches it
+    // only as an untrusted note. The wake is an automatic turn in this channel, so it spends the channel's budget (if
+    // that is used up, the follow-up fires at its time instead). One responder: the channel agent then stays quiet.
+    let ownerHandles = false;
+    const waiting = this.followups.waitingOn(msg.ch);
+    if (waiting.length && this.budget.check(msg.ch, limits).ok) {
+      this.budget.record(msg.ch);
+      if (msg.replyToOrigin !== "owner-agent") await this.notifyOwnerOfReply(msg, ch, "Message");
+      for (const row of waiting) await this.fireFollowup(row, "reply");
+      ownerHandles = true;
+    }
+
     const decision = decideReply({
       channelKind: msg.channelKind,
       autoReply: ch?.autoReply ?? true,
@@ -508,7 +524,8 @@ export class SpencerAgent implements AgentService {
     });
     let note: string | undefined;
     let paused: string | undefined;
-    if (!decision.reply) note = decision.note;
+    if (ownerHandles) note = "handled by owner";
+    else if (!decision.reply) note = decision.note;
     else if (msg.body.by === "agent" && isRepeat(msg.body.text, this.recentAgentTexts(msg.ch, msg.from, msg.id))) note = "repeated";
     else {
       const verdict = this.budget.check(msg.ch, limits);
@@ -634,7 +651,7 @@ export class SpencerAgent implements AgentService {
   /** The `schedule_followup` tool, in conversation `key`. */
   private async scheduleFollowup(
     key: string,
-    args: { inMinutes: number; note: string },
+    args: { inMinutes: number; note: string; onReplyFrom?: string },
   ): Promise<string | { text: string; isError: true }> {
     const fail = (text: string) => ({ text, isError: true as const });
     const policy = this.core.config().policy;
@@ -653,9 +670,17 @@ export class SpencerAgent implements AgentService {
     const dueAt = this.now() + Math.round(args.inMinutes * 60_000);
     const when = new Date(dueAt).toISOString();
     if (key === OWNER_KEY) {
-      const row = this.followups.insert({ conv: key, note: args.note, dueAt, depth });
-      return `Follow-up ${row.id} scheduled for ${when}.`;
+      let wakeCh: string | undefined;
+      if (args.onReplyFrom) {
+        const ch = resolveChannel(this.core, args.onReplyFrom);
+        if (typeof ch === "string") return fail(ch);
+        wakeCh = ch.id;
+      }
+      const row = this.followups.insert({ conv: key, note: args.note, dueAt, depth, ...(wakeCh ? { wakeCh } : {}) });
+      const early = wakeCh ? ` or as soon as a peer writes in ${this.core.getChannel(wakeCh)?.name ?? wakeCh}` : "";
+      return `Follow-up ${row.id} scheduled for ${when}${early}.`;
     }
+    if (args.onReplyFrom) return fail("on_reply_from only works in your owner's conversation");
     const chId = key.slice(3);
     const ch = this.core.getChannel(chId);
     if (!ch) return fail("not in a channel conversation");
@@ -693,6 +718,22 @@ export class SpencerAgent implements AgentService {
       ...(toId ? { toId } : {}),
     });
     return `Follow-up ${row.id} scheduled for ${when}. Tell the peer you will get back to them.`;
+  }
+
+  /**
+   * The hop of a message the owner conversation sends to `chId` now. 0 when my owner started this run (they typed,
+   * or approved a request): a new exchange. When a follow-up started it (possibly woken by a peer's reply), it
+   * continues the channel's chain instead: the last chat's hop + 1, so the hop cap still bounds an owner agent that
+   * keeps answering replies.
+   */
+  private async ownerSendHop(chId: string): Promise<number> {
+    const sids = await this.rt().runningInputs(OWNER_KEY).catch(() => [] as string[]);
+    if (!this.followups.bySubmission(OWNER_KEY, sids)) return 0;
+    const last = this.core
+      .readChannel(chId, 20)
+      .filter((m) => m.type === "chat" && typeof m.hop === "number")
+      .at(-1);
+    return (last?.hop ?? 0) + 1;
   }
 
   /** The `cancel_followup` tool: only this conversation's follow-ups. */

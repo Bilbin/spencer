@@ -740,3 +740,76 @@ test("follow-ups: a crash while one runs → the new process finishes it and sen
 function agent_followup_state(core: StubCore): string {
   return (core.db.prepare("SELECT state FROM agent_followups").get() as { state: string }).state;
 }
+
+// ---------------------------------------------------------------- owner wakes on a peer's reply (opt-in)
+
+test("owner wake-on-reply: opt-in, one responder, continues the hop chain, spends the channel budget", async () => {
+  await withAgent(
+    async ({ core, agent, requests }) => {
+      const ch = core.getChannel("chDirect")!;
+      const deliver = async (m: ReturnType<typeof peerChat>) => {
+        core.messages.push({ id: m.id, ch: m.ch, from: m.from, mine: false, ts: m.ts, type: "chat", text: m.body.text, hop: m.body.hop, by: m.body.by, status: "received" });
+        return agent.onPeerChat(m);
+      };
+      // Without opting in, a peer message never starts an owner run.
+      await deliver(peerChat(ch, "unsolicited", { by: "agent", hop: 1 }));
+      await agent.idle();
+      assert.equal(requests.filter((r) => r.conversation === "owner").length, 0);
+
+      // /followup-on: wait for Bob's answer, then thank him (from a follow-up run).
+      await agent.ownerSend('/followup-on "bob chat" 60 /send "bob chat" thanks, got it');
+      await agent.idle();
+      const f = agent.listFollowups().find((x) => x.state === "pending")!;
+      assert.equal(f.wakeOnReplyIn, "chDirect");
+      const ownerRuns = requests.filter((r) => r.conversation === "owner").length;
+      const channelRuns = requests.filter((r) => r.conversation === "channel").length;
+
+      const answer = peerChat(ch, "here are the build logs", { by: "agent", hop: 3 });
+      assert.deepEqual(await deliver(answer), { note: "handled by owner" });
+      await agent.idle();
+      assert.equal(requests.filter((r) => r.conversation === "channel").length, channelRuns, "the channel agent stayed quiet");
+      assert.ok(requests.filter((r) => r.conversation === "owner").length > ownerRuns, "the owner agent ran");
+      const fired = agent.listFollowups().find((x) => x.id === f.id)!;
+      assert.equal(fired.state, "done");
+      assert.equal(fired.firedBy, "reply");
+      const thanks = core.sent.at(-1)!;
+      assert.equal(thanks.text, "thanks, got it");
+      assert.equal(thanks.origin, "owner-agent");
+      assert.equal(thanks.hop, 4, "a follow-up run continues the chain (last hop 3 + 1) instead of resetting it to 0");
+      const items = await agent.ownerTranscript(50);
+      const note = items.find((i) => i.text === `Message from ${BOB.name} in ${ch.name} (untrusted): here are the build logs`);
+      assert.ok(note?.untrusted, "the peer's text reached the owner conversation only as an untrusted note");
+
+      // A follow-up is one-shot: the next message is the channel agent's again.
+      assert.deepEqual(await deliver(peerChat(ch, "anything else?", { by: "agent", hop: 5 })), {});
+      await agent.idle();
+
+      // send_message with await_reply: hop 0 (my owner asked), and a wake on the answer.
+      await agent.ownerSend('/ask "bob chat" what is the status?');
+      await agent.idle();
+      const asked = core.sent.at(-1)!;
+      assert.equal(asked.hop, 0);
+      const w = agent.listFollowups().find((x) => x.state === "pending")!;
+      assert.equal(w.wakeOnReplyIn, "chDirect");
+      assert.match(w.note, /^Handle the answer from Bob chat to what you sent: what is the status\?/);
+    },
+    { config: { policy: { maxAgentTurns: 10 } as never } },
+  );
+});
+
+test("owner wake-on-reply: when the channel's budget is used up, it does not fire early", async () => {
+  await withAgent(
+    async ({ core, agent }) => {
+      const ch = core.getChannel("chDirect")!;
+      assert.deepEqual(await agent.onPeerChat(peerChat(ch, "one", { by: "agent", hop: 1 })), {});
+      await agent.idle();
+      await agent.ownerSend('/followup-on "bob chat" 60 /send "bob chat" ok');
+      await agent.idle();
+      assert.deepEqual(await agent.onPeerChat(peerChat(ch, "two", { by: "agent", hop: 3 })), { note: "budget exhausted" });
+      await agent.idle();
+      assert.equal(agent.listFollowups()[0]!.state, "pending");
+      assert.ok(agent.listRequests().some((r) => r.kind === "continue" && r.state === "pending"));
+    },
+    { config: { policy: { maxAgentTurns: 1 } as never } },
+  );
+});

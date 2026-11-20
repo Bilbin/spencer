@@ -23,11 +23,13 @@ export interface ToolDeps {
   ownerNote(text: string, opts?: { untrusted?: boolean }): Promise<void>;
   /** The member whose message the channel agent is currently answering. */
   currentAsker(ch: string): Promise<string | undefined>;
+  /** Hop for a message the owner conversation sends to a channel now (0, or the chain's next hop in a follow-up run). */
+  ownerSendHop?(ch: string): Promise<number>;
   /** Record a request for the owner to approve or deny (shown as a card in the owner chat). */
   askOwner?(ch: string, from: string, text: string): Promise<string>;
   /** Follow-ups for the conversation `key` (owner or ch:<id>). Return the tool's answer. */
   followups?: {
-    schedule(key: string, args: { inMinutes: number; note: string }): Promise<string | { text: string; isError: true }>;
+    schedule(key: string, args: { inMinutes: number; note: string; onReplyFrom?: string }): Promise<string | { text: string; isError: true }>;
     cancel(key: string, id: string): Promise<string | { text: string; isError: true }>;
   };
   log?(msg: string): void;
@@ -39,6 +41,8 @@ export const FOLLOWUP_TOOL_NAMES = ["schedule_followup", "cancel_followup"];
 /** Bounds of `schedule_followup`'s `in_minutes`: at least a minute (no tight self-polling), at most a week. */
 export const FOLLOWUP_MIN_MINUTES = 1;
 export const FOLLOWUP_MAX_MINUTES = 7 * 24 * 60;
+/** `send_message` with `await_reply`: how long to wait for the answer at most. */
+export const AWAIT_REPLY_MINUTES = 60;
 
 type Obj = Record<string, unknown>;
 const str = (description: string) => ({ type: "string", description });
@@ -118,17 +122,19 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
       name: "send_message",
       description:
         "Send a chat message to a channel (by channel id or name) as your owner's Spencer. In groups, `mention` names members (by name, fingerprint or id) who should answer. " +
-        "Set `final` when the message closes the exchange (e.g. a final report) and you expect no answer.",
+        "Set `final` when the message closes the exchange (e.g. a final report) and you expect no answer. " +
+        "Set `await_reply` to get a turn here as soon as the peer answers (or after an hour), so you can act on the answer.",
       parameters: schema(
         {
           channel: str("Channel id or name"),
           text: str("Message text"),
           mention: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }], description: "Member(s) to mention (groups)" },
           final: { type: "boolean", description: "No answer expected: the other Spencer will not reply automatically" },
+          await_reply: { type: "boolean", description: "Wake me when the peer answers (a follow-up with on_reply_from)" },
         },
         ["channel", "text"],
       ),
-      async execute(args: { channel: string; text: string; mention?: string | string[]; final?: boolean }, ctx) {
+      async execute(args: { channel: string; text: string; mention?: string | string[]; final?: boolean; await_reply?: boolean }, ctx) {
         const ch = resolveChannel(core, args.channel);
         if (typeof ch === "string") return fail(ch);
         const text = String(args.text ?? "");
@@ -144,16 +150,27 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
             mentions.push(m.id);
           }
         }
+        const hop = (await deps.ownerSendHop?.(ch.id)) ?? 0;
         const sent = core.sendChat(ch.id, {
           text,
-          hop: 0,
+          hop,
           by: "agent",
           origin: "owner-agent",
           ...(mentions?.length ? { mentions } : {}),
           ...(args.final === true ? { final: true } : {}),
           idempotencyKey: `owner-tool:${ctx.callId}`,
         });
-        return `Sent to ${ch.name} (message ${sent.id}). Replies will show up in this conversation as untrusted notes.`;
+        let wait = "";
+        if (args.await_reply === true && args.final !== true && deps.followups) {
+          const short = text.length > 300 ? text.slice(0, 299) + "…" : text;
+          const r = await deps.followups.schedule(ctx.conversationKey, {
+            inMinutes: AWAIT_REPLY_MINUTES,
+            note: `Handle the answer from ${ch.name} to what you sent: ${short}`,
+            onReplyFrom: ch.id,
+          });
+          wait = typeof r === "string" ? ` ${r}` : ` (Could not wait for the answer: ${r.text}.)`;
+        }
+        return `Sent to ${ch.name} (message ${sent.id}). Replies will show up in this conversation as untrusted notes.${wait}`;
       },
     },
     {
@@ -334,15 +351,18 @@ export function followupTools(deps: ToolDeps): ToolSpec[] {
         "Set a reminder for yourself, so you come back to a task without anyone writing first (\"I'll get back to you\"). " +
         `After in_minutes (${FOLLOWUP_MIN_MINUTES}–${FOLLOWUP_MAX_MINUTES}) you get a turn with your note. In a channel, what you answer then is sent ` +
         "to the channel as a new message (answer NO_REPLY if there is nothing to report yet; you may schedule another). " +
-        "In your owner's conversation you act with your full tools and report with send_message.",
+        "In your owner's conversation you act with your full tools and report with send_message. " +
+        "on_reply_from (owner conversation only): fire as soon as a peer writes in that channel, or at in_minutes at the latest. " +
+        "Use it to wait for an answer to something you sent.",
       parameters: schema(
         {
           in_minutes: { type: "number", minimum: FOLLOWUP_MIN_MINUTES, maximum: FOLLOWUP_MAX_MINUTES, description: "Minutes from now" },
           note: str("What to do then, with every detail you will need (ids, links, who asked)"),
+          on_reply_from: str("Owner conversation only: channel id or name whose next peer message wakes you early"),
         },
         ["in_minutes", "note"],
       ),
-      async execute(args: { in_minutes: number; note: string }, ctx) {
+      async execute(args: { in_minutes: number; note: string; on_reply_from?: string }, ctx) {
         if (!deps.followups) return fail("follow-ups are not available");
         const minutes = Number(args.in_minutes);
         if (!Number.isFinite(minutes) || minutes < FOLLOWUP_MIN_MINUTES || minutes > FOLLOWUP_MAX_MINUTES) {
@@ -350,7 +370,11 @@ export function followupTools(deps: ToolDeps): ToolSpec[] {
         }
         const note = String(args.note ?? "").trim().slice(0, 4000);
         if (!note) return fail("note is empty");
-        return deps.followups.schedule(ctx.conversationKey, { inMinutes: minutes, note });
+        return deps.followups.schedule(ctx.conversationKey, {
+          inMinutes: minutes,
+          note,
+          ...(args.on_reply_from ? { onReplyFrom: String(args.on_reply_from) } : {}),
+        });
       },
     },
     {
