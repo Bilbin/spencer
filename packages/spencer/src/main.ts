@@ -5,13 +5,34 @@ import { join, resolve } from "node:path";
 import { defaultDataDir, loadConfig, type SpencerConfig } from "./config.ts";
 import { Daemon } from "./daemon.ts";
 import { writeSecretFile } from "./store/files.ts";
+import { spawn } from "node:child_process";
+import { isBinary } from "./sea.ts";
+import { serviceCommand } from "./service.ts";
 
-const USAGE = `usage: node packages/spencer/src/main.ts [--data-dir DIR] [--port N] [--name NAME]
+const SELF = isBinary() ? "spencer" : "node packages/spencer/src/main.ts";
+const USAGE = `usage: ${SELF} [--data-dir DIR] [--port N] [--name NAME] [--no-open]
+       ${SELF} service install|uninstall|status   (optional: start Spencer at login)
 
   --data-dir DIR  data directory (env SPENCER_DATA_DIR; default ~/.local/share/spencer)
   --port N        local UI/API port on 127.0.0.1 (env SPENCER_PORT; 0 = random)
   --name NAME     display name; saved to config.json on first run
+  --open          open the web UI in a browser once started (default when run from a terminal)
+  --no-open       don't
+  --version       print the version
 `;
+
+/** Best-effort: open the UI in the default browser. */
+function openBrowser(url: string): void {
+  const [cmd, args] =
+    process.platform === "darwin" ? ["open", [url]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : ["xdg-open", [url]];
+  try {
+    const child = spawn(cmd, args, { stdio: "ignore", detached: true });
+    child.on("error", () => {});
+    child.unref();
+  } catch {
+    /* no browser: the URL is printed anyway */
+  }
+}
 
 async function main(): Promise<void> {
   let args;
@@ -21,38 +42,54 @@ async function main(): Promise<void> {
         "data-dir": { type: "string" },
         port: { type: "string" },
         name: { type: "string" },
+        open: { type: "boolean" },
+        "no-open": { type: "boolean" },
+        version: { type: "boolean", short: "v" },
         help: { type: "boolean", short: "h" },
       },
       strict: true,
-    }).values;
+      allowPositionals: true,
+    });
   } catch (e) {
     process.stderr.write(`${(e as Error).message}\n${USAGE}`);
     process.exit(2);
   }
-  if (args.help) {
+  const { values: opts, positionals } = args;
+  if (opts.help) {
     process.stdout.write(USAGE);
     return;
   }
-  const dataDir = resolve(args["data-dir"] ?? defaultDataDir());
-  if (args.port !== undefined) {
-    const p = Number(args.port);
+  if (opts.version) {
+    process.stdout.write(`spencer ${process.env.SPENCER_BUILD ?? "dev"} (node ${process.versions.node})\n`);
+    return;
+  }
+  const dataDir = resolve(opts["data-dir"] ?? defaultDataDir());
+  if (positionals[0] === "service") {
+    process.exit(serviceCommand(positionals[1], dataDir, (m) => process.stdout.write(m)));
+  }
+  if (positionals.length) {
+    process.stderr.write(`unknown command ${positionals[0]}\n${USAGE}`);
+    process.exit(2);
+  }
+  if (opts.port !== undefined) {
+    const p = Number(opts.port);
     if (!Number.isInteger(p) || p < 0 || p > 65535) {
-      process.stderr.write(`invalid --port ${args.port}\n`);
+      process.stderr.write(`invalid --port ${opts.port}\n`);
       process.exit(2);
     }
     process.env.SPENCER_PORT = String(p); // CLI wins over env and config.json
   }
 
   const override: Partial<SpencerConfig> = {};
-  if (args.name !== undefined) {
+  if (opts.name !== undefined) {
     const file = join(dataDir, "config.json");
     if (!existsSync(file)) {
       loadConfig(dataDir); // writes the default config
       const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
-      raw.name = args.name;
+      raw.name = opts.name;
       writeSecretFile(file, JSON.stringify(raw, null, 2) + "\n");
     } else {
-      override.name = args.name;
+      override.name = opts.name;
     }
   }
 
@@ -66,7 +103,11 @@ async function main(): Promise<void> {
   const { name, fingerprint } = daemon.identity;
   const infoFile = join(dataDir, "daemon.json");
   writeSecretFile(infoFile, JSON.stringify({ pid: process.pid, port: daemon.port }) + "\n");
-  process.stdout.write(`Spencer "${name}" ${fingerprint} — UI: http://127.0.0.1:${daemon.port}/\n`);
+  const url = `http://127.0.0.1:${daemon.port}/`;
+  process.stdout.write(`Spencer "${name}" ${fingerprint} — UI: ${url}\n`);
+  // Open the UI when started by hand from a terminal; never under systemd/launchd or with --no-open.
+  const interactive = process.stdout.isTTY && !process.env.INVOCATION_ID;
+  if (!opts["no-open"] && (opts.open || interactive)) openBrowser(url);
 
   let stopping = false;
   const shutdown = (sig: string) => {

@@ -27,7 +27,30 @@ TypeScript runs directly on Node ≥ 22.18 through type stripping. There is no b
 
 ## Install
 
-### With Nix (recommended)
+### Single binary (no Node, no npm, no systemd)
+
+Download `spencer-<os>-<arch>` from the [releases](https://github.com/PJalv/spencer/releases) (or build it,
+below), make it executable and run it:
+
+```sh
+chmod +x spencer-linux-x64 && ./spencer-linux-x64     # opens the web UI in your browser
+./spencer-linux-x64 --no-open --port 7420 --name "Alice's Spencer"
+./spencer-linux-x64 service install                     # optional: start at login (systemd user unit / launchd)
+./spencer-linux-x64 service uninstall
+```
+
+The binary is Node 24 plus Spencer, its web UI and the pinned croc v10.3.1. On first start it unpacks the UI and
+croc into `~/.cache/spencer/<build>/` (macOS: `~/Library/Caches/spencer/`); data lives in `~/.local/share/spencer`
+as usual. Builds exist for `linux-x64`, `linux-arm64`, `darwin-arm64` and `darwin-x64`.
+
+Build them yourself (needs Node 24.12.0, the version embedded in the binary):
+
+```sh
+npm ci && npm run build:binary                        # this machine's platform → dist/binary/spencer-<target>
+npm run build:binary -- --target all                  # every target (macOS ones need codesign or rcodesign)
+```
+
+### With Nix
 
 ```sh
 nix run github:PJalv/spencer                          # the daemon (croc 10.3.1 is on its PATH)

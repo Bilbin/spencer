@@ -35,6 +35,7 @@ import { Outbox } from "./net/outbox.ts";
 import { Inbox, type StoredMessage } from "./net/inbox.ts";
 import { ChannelManager, UserError } from "./channels.ts";
 import { ApiServer } from "./api/http.ts";
+import { embedded } from "./sea.ts";
 
 /** Incoming working-status updates older than this are a catch-up after being offline: dropped. */
 const STATUS_MAX_AGE_MS = 120_000;
@@ -59,18 +60,19 @@ export interface DaemonOptions {
 }
 
 async function defaultAgentFactory(core: CoreServices): Promise<AgentService> {
-  const spec = new URL("./agent/index.ts", import.meta.url).href;
-  const mod = (await import(spec)) as { createAgent(core: CoreServices): AgentService | Promise<AgentService> };
+  // Literal specifiers so a bundler (scripts/build-binary.mjs) can follow them; still loaded lazily.
+  const mod = (await import("./agent/index.ts")) as { createAgent(core: CoreServices): AgentService | Promise<AgentService> };
   return mod.createAgent(core);
 }
 
 async function defaultTransferFactory(deps: TransferDeps): Promise<TransferService> {
-  const spec = new URL("./transfers/index.ts", import.meta.url).href;
-  const mod = (await import(spec)) as { createTransferService(deps: TransferDeps): TransferService | Promise<TransferService> };
+  const mod = (await import("./transfers/index.ts")) as { createTransferService(deps: TransferDeps): TransferService | Promise<TransferService> };
   return mod.createTransferService(deps);
 }
 
 async function defaultWebRoot(log: (m: string) => void): Promise<string | undefined> {
+  const bin = embedded();
+  if (bin) return bin.webRoot;
   const spec = "@spencer/web";
   try {
     const mod = (await import(spec)) as { webRoot?: unknown };
@@ -582,7 +584,8 @@ export class Daemon {
       pairKey: (ch, peerId) => pairKey(me.secret, peerId, me.id, ch),
       peers: (ch) => channels.peers(ch),
       peerName: (ch, peerId) => channels.peerName(ch, peerId),
-      crocPath: this.need("cfg").croc.path,
+      // The binary carries the pinned croc; a croc.path the owner set explicitly still wins.
+      crocPath: this.need("cfg").croc.path === "croc" ? (embedded()?.croc ?? "croc") : this.need("cfg").croc.path,
       ...(this.need("cfg").croc.throttleUpload ? { crocThrottleUpload: this.need("cfg").croc.throttleUpload! } : {}),
       events: this.events,
       log: this.log,
