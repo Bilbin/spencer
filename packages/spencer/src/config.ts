@@ -25,16 +25,24 @@ export type McpServerConfig =
   | { url: string; headers?: Record<string, string>; disabled?: boolean };
 
 export interface Policy {
-  /** Loop guard (PROTOCOL.md §7.2), standard trust: max hop of a message that still gets an automatic reply. 0 = no cap. */
+  /**
+   * Loop guard (PROTOCOL.md §7.2). Standard trust: the highest hop that still gets an automatic reply (a backstop that
+   * old Spencers understand too; 0 = no cap). The turn budget below is the main limit.
+   */
   maxHops: number;
-  /** The same for channels with full trust. 0 = no cap (the turn budget below still applies). */
+  /** The same for channels with full trust. 0 = no cap. */
   maxHopsFullTrust: number;
-  /** Automatic replies per channel per minute / per hour, standard trust. */
+  /** Automatic replies in a channel since a person last wrote there, standard trust; then the channel pauses and asks. 0 = no limit. */
+  maxAgentTurns: number;
+  maxAgentTurnsFullTrust: number;
+  /** Automatic replies per channel per minute (skipped above it) and per hour / day (pauses and asks), standard trust. */
   repliesPerMinute: number;
   repliesPerHour: number;
+  repliesPerDay: number;
   /** The same for channels with full trust. */
   repliesPerMinuteFullTrust: number;
   repliesPerHourFullTrust: number;
+  repliesPerDayFullTrust: number;
   autoAcceptIncomingFiles: boolean;
   maxIncomingFileBytes: number;
   requireApprovalForOutgoingFiles: boolean;
@@ -55,12 +63,16 @@ export interface SpencerConfig {
 }
 
 export const DEFAULT_POLICY: Policy = {
-  maxHops: 8,
+  maxHops: 40,
   maxHopsFullTrust: 0,
+  maxAgentTurns: 20,
+  maxAgentTurnsFullTrust: 50,
   repliesPerMinute: 6,
   repliesPerHour: 60,
+  repliesPerDay: 300,
   repliesPerMinuteFullTrust: 20,
   repliesPerHourFullTrust: 200,
+  repliesPerDayFullTrust: 1000,
   autoAcceptIncomingFiles: true,
   maxIncomingFileBytes: 512 * 1024 * 1024,
   requireApprovalForOutgoingFiles: true,
@@ -106,10 +118,14 @@ export function resolveConfig(raw: Partial<SpencerConfig> & Record<string, unkno
   for (const k of [
     "maxHops",
     "maxHopsFullTrust",
+    "maxAgentTurns",
+    "maxAgentTurnsFullTrust",
     "repliesPerMinute",
     "repliesPerHour",
+    "repliesPerDay",
     "repliesPerMinuteFullTrust",
     "repliesPerHourFullTrust",
+    "repliesPerDayFullTrust",
   ] as const) {
     if (!Number.isSafeInteger(cfg.policy[k]) || cfg.policy[k] < 0) throw new Error(`policy.${k} must be a non-negative integer`);
   }

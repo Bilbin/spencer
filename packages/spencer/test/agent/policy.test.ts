@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { RateLimiter, decideReply, isAddressed, loopLimits, nameHandles, parseAgentAnswer, textMentions } from "../../src/policy.ts";
+import { DatabaseSync } from "node:sqlite";
+import { decideReply, isAddressed, loopLimits, nameHandles, parseAgentAnswer, textMentions } from "../../src/policy.ts";
+import { TurnBudget } from "../../src/agent/budget.ts";
 import { DEFAULT_POLICY, resolveConfig } from "../../src/config.ts";
 
 const base = {
@@ -56,34 +58,7 @@ test("agent-written messages with explicit mentions are addressed only by them",
   assert.equal(isAddressed({ ...m, by: "human", mentions: ["CAROL"] }), true);
 });
 
-test("RateLimiter: per-minute and per-hour sliding windows, per channel", () => {
-  let now = 1_000_000;
-  const rl = new RateLimiter({ perMinute: 2, perHour: 3 }, () => now);
-  assert.equal(rl.tryAcquire("a"), true);
-  assert.equal(rl.tryAcquire("a"), true);
-  assert.equal(rl.tryAcquire("a"), false, "minute window full");
-  assert.equal(rl.tryAcquire("b"), true, "other channel unaffected");
-  now += 60_001;
-  assert.equal(rl.check("a"), true);
-  assert.equal(rl.tryAcquire("a"), true);
-  assert.equal(rl.tryAcquire("a"), false, "hour window full (3)");
-  now += 58 * 60_000;
-  assert.equal(rl.tryAcquire("a"), false, "first two hits are 59 min old, still in the hour window");
-  now += 60_000;
-  assert.equal(rl.tryAcquire("a"), true, "hour window slid");
-  rl.record("c");
-  rl.record("c");
-  assert.equal(rl.check("c"), false);
-});
 
-test("RateLimiter reads live limits", () => {
-  let limits = { perMinute: 1, perHour: 10 };
-  const rl = new RateLimiter(() => limits, () => 0);
-  assert.equal(rl.tryAcquire("x"), true);
-  assert.equal(rl.tryAcquire("x"), false);
-  limits = { perMinute: 5, perHour: 10 };
-  assert.equal(rl.tryAcquire("x"), true);
-});
 
 test("decideReply: maxHops 0 means no hop cap", () => {
   assert.deepEqual(decideReply({ ...base, maxHops: 0, hop: 10_000 }), { reply: true });
@@ -96,9 +71,10 @@ test("decideReply: an agent message marked final ends the exchange; final on a h
 });
 
 test("loopLimits: per trust level, from the policy defaults", () => {
-  assert.deepEqual(loopLimits(DEFAULT_POLICY, "standard"), { maxHops: 8, perMinute: 6, perHour: 60 });
-  assert.deepEqual(loopLimits(DEFAULT_POLICY, undefined), { maxHops: 8, perMinute: 6, perHour: 60 });
-  assert.deepEqual(loopLimits(DEFAULT_POLICY, "full"), { maxHops: 0, perMinute: 20, perHour: 200 });
+  const std = { maxHops: 40, maxTurns: 20, perMinute: 6, perHour: 60, perDay: 300 };
+  assert.deepEqual(loopLimits(DEFAULT_POLICY, "standard"), std);
+  assert.deepEqual(loopLimits(DEFAULT_POLICY, undefined), std);
+  assert.deepEqual(loopLimits(DEFAULT_POLICY, "full"), { maxHops: 0, maxTurns: 50, perMinute: 20, perHour: 200, perDay: 1000 });
 });
 
 test("config: loop-guard numbers must be non-negative integers", () => {
@@ -118,15 +94,58 @@ test("parseAgentAnswer: NO_REPLY, empty, and the [END] marker", () => {
   assert.deepEqual(parseAgentAnswer("[END] is how I close"), { send: true, text: "[END] is how I close", final: false });
 });
 
-test("RateLimiter: reset refills a channel; usage counts; limits may depend on the channel", () => {
-  const now = 5_000_000;
-  const rl = new RateLimiter((ch) => (ch === "full" ? { perMinute: 3, perHour: 10 } : { perMinute: 1, perHour: 10 }), () => now);
-  assert.equal(rl.tryAcquire("std"), true);
-  assert.equal(rl.tryAcquire("std"), false);
-  assert.deepEqual(rl.usage("std"), { lastMinute: 1, lastHour: 1 });
-  rl.reset("std");
-  assert.deepEqual(rl.usage("std"), { lastMinute: 0, lastHour: 0 });
-  assert.equal(rl.tryAcquire("std"), true);
-  for (let i = 0; i < 3; i++) assert.equal(rl.tryAcquire("full"), true);
-  assert.equal(rl.tryAcquire("full"), false);
+test("TurnBudget: streak, minute/hour/day windows, resets, and it survives a reopen", () => {
+  const db = new DatabaseSync(":memory:");
+  let now = 10_000_000;
+  const limits = { maxTurns: 3, perMinute: 2, perHour: 4, perDay: 5 };
+  let b = new TurnBudget(db, () => now);
+  b.init();
+  assert.deepEqual(b.check("c", limits), { ok: true });
+  b.record("c");
+  b.record("c");
+  const minute = b.check("c", limits);
+  assert.equal(minute.ok, false);
+  assert.equal(!minute.ok && minute.why, "rate limited", "per-minute burst: skip, don't pause");
+  assert.deepEqual(b.check("other", limits), { ok: true }, "per channel");
+  now += 61_000;
+  assert.deepEqual(b.check("c", limits), { ok: true });
+  b.record("c");
+  const streak = b.check("c", limits);
+  assert.equal(!streak.ok && streak.why, "budget exhausted");
+  assert.match(!streak.ok ? streak.detail : "", /3 automatic replies in a row/);
+
+  // A person writing resets the streak but not the rate windows.
+  b.humanSpoke("c");
+  assert.equal(b.usage("c").streak, 0);
+  assert.equal(b.usage("c").lastHour, 3);
+  b.record("c");
+  now += 61_000;
+  const hour = b.check("c", limits);
+  assert.equal(!hour.ok && hour.why, "budget exhausted");
+  assert.match(!hour.ok ? hour.detail : "", /in the last hour/);
+
+  // Persistent: a new instance on the same database sees the same budget (a restart does not refill it).
+  b = new TurnBudget(db, () => now);
+  b.init();
+  assert.equal(b.usage("c").lastHour, 4);
+  assert.equal(b.check("c", limits).ok, false);
+
+  // The owner refills everything.
+  now += 1;
+  b.ownerReset("c");
+  assert.deepEqual(b.usage("c"), { streak: 0, lastMinute: 0, lastHour: 0, lastDay: 0 });
+  assert.deepEqual(b.check("c", limits), { ok: true });
+
+  // The daily window.
+  for (let i = 0; i < 5; i++) {
+    now += 20 * 60_000;
+    b.humanSpoke("c");
+    b.record("c");
+  }
+  now += HOUR_PLUS;
+  const day = b.check("c", limits);
+  assert.match(!day.ok ? day.detail : "", /today/);
+  db.close();
 });
+
+const HOUR_PLUS = 3_600_001;

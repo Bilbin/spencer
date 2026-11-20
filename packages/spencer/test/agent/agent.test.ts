@@ -89,7 +89,7 @@ test("hop cap, auto-reply off, and rate limit → notes, no reply", async () => 
   await withAgent(
     async ({ core, agent }) => {
       const ch = core.getChannel("chDirect")!;
-      assert.deepEqual(await agent.onPeerChat(peerChat(ch, "deep", { hop: 8 })), { note: "hop cap" });
+      assert.deepEqual(await agent.onPeerChat(peerChat(ch, "deep", { hop: 40 })), { note: "hop cap" });
       assert.deepEqual(await agent.onPeerChat(peerChat(ch, "one")), {});
       assert.deepEqual(await agent.onPeerChat(peerChat(ch, "two")), {});
       assert.deepEqual(await agent.onPeerChat(peerChat(ch, "three")), { note: "rate limited" });
@@ -404,15 +404,15 @@ test("loop guard: full trust has no hop cap by default; standard stops at maxHop
   const core = makeCore({ channels: [channel("chFull", "direct", "Bob full", { trust: "full" }), channel("chStd", "direct", "Bob std")] });
   await withAgent(
     async ({ agent }) => {
-      assert.deepEqual(await agent.onPeerChat(peerChat(core.getChannel("chFull")!, "deep", { hop: 40, by: "agent" })), {});
-      assert.deepEqual(await agent.onPeerChat(peerChat(core.getChannel("chStd")!, "deep", { hop: 8, by: "agent" })), { note: "hop cap" });
-      assert.deepEqual(await agent.onPeerChat(peerChat(core.getChannel("chStd")!, "shallow", { hop: 7, by: "agent" })), {});
+      assert.deepEqual(await agent.onPeerChat(peerChat(core.getChannel("chFull")!, "deep", { hop: 400, by: "agent" })), {});
+      assert.deepEqual(await agent.onPeerChat(peerChat(core.getChannel("chStd")!, "deep", { hop: 40, by: "agent" })), { note: "hop cap" });
+      assert.deepEqual(await agent.onPeerChat(peerChat(core.getChannel("chStd")!, "shallow", { hop: 39, by: "agent" })), {});
       await agent.idle();
       assert.deepEqual(
         core.sent.map((s) => [s.ch, s.hop]),
         [
-          ["chFull", 41],
-          ["chStd", 8],
+          ["chFull", 401],
+          ["chStd", 40],
         ],
       );
     },
@@ -442,23 +442,95 @@ test("loop guard: a peer message marked final gets no run; a model answer with [
   });
 });
 
-test("loop guard: the turn budget refills when my side speaks in the channel", async () => {
+test("loop guard: the budget refills when my owner types in the channel, not when my owner's Spencer sends", async () => {
   await withAgent(
     async ({ core, agent }) => {
       const ch = core.getChannel("chDirect")!;
       assert.deepEqual(await agent.onPeerChat(peerChat(ch, "one", { by: "agent", hop: 1 })), {});
       assert.deepEqual(await agent.onPeerChat(peerChat(ch, "two", { by: "agent", hop: 3 })), { note: "rate limited" });
-      // My owner types in the channel (or my owner's Spencer sends there): the budget refills.
-      await agent.onOutgoingChat({ id: "out-x", ch: ch.id, text: "keep going, you two", origin: "human", ts: Date.now() });
-      assert.deepEqual(await agent.onPeerChat(peerChat(ch, "three", { by: "agent", hop: 1 })), {});
-      // A peer cannot refill it: a peer message claiming to be human still counts against the budget.
+      // My owner's Spencer sending there is an agent turn too: no refill.
+      await agent.onOutgoingChat({ id: "out-a", ch: ch.id, text: "status?", origin: "owner-agent", ts: Date.now() });
+      assert.deepEqual(await agent.onPeerChat(peerChat(ch, "three", { by: "agent", hop: 1 })), { note: "rate limited" });
+      // A peer cannot refill the rate window either, even claiming to be human.
       assert.deepEqual(await agent.onPeerChat(peerChat(ch, "four", { by: "human", hop: 0 })), { note: "rate limited" });
+      // My owner types in the channel: refilled.
+      await agent.onOutgoingChat({ id: "out-h", ch: ch.id, text: "keep going, you two", origin: "human", ts: Date.now() });
+      assert.deepEqual(await agent.onPeerChat(peerChat(ch, "five", { by: "agent", hop: 1 })), {});
       await agent.idle();
       assert.deepEqual(
         core.sent.map((s) => s.text),
-        [`Echo from ${ME.name}: one`, `Echo from ${ME.name}: three`],
+        [`Echo from ${ME.name}: one`, `Echo from ${ME.name}: five`],
       );
     },
     { config: { policy: { repliesPerMinute: 1 } as never } },
   );
+});
+
+test("loop guard: when the streak budget runs out the channel pauses and asks the owner; Continue answers, Stop tells the peer", async () => {
+  const core = makeCore({ config: { policy: { maxAgentTurns: 2 } as never } });
+  try {
+    const ch = core.getChannel("chDirect")!;
+    let cardId = "";
+    await withAgent(
+      async ({ agent }) => {
+        assert.deepEqual(await agent.onPeerChat(peerChat(ch, "a1", { by: "agent", hop: 1 })), {});
+        assert.deepEqual(await agent.onPeerChat(peerChat(ch, "a2", { by: "agent", hop: 3 })), {});
+        const third = peerChat(ch, "a3", { by: "agent", hop: 5 });
+        assert.deepEqual(await agent.onPeerChat(third), { note: "budget exhausted" });
+        assert.deepEqual(await agent.onPeerChat(peerChat(ch, "a4", { by: "agent", hop: 5 })), { note: "budget exhausted" });
+        await agent.idle();
+        assert.equal(core.sent.length, 2);
+        const cards = agent.listRequests().filter((r) => r.kind === "continue");
+        assert.equal(cards.length, 1, "one card per paused channel");
+        assert.equal(cards[0]!.state, "pending");
+        assert.match(cards[0]!.text, /2 automatic replies in a row without a person writing with Bob's Spencer/);
+        assert.ok((await agent.ownerTranscript(20)).some((i) => i.request === cards[0]!.id), "card in the owner chat");
+        cardId = cards[0]!.id;
+      },
+      { core },
+    );
+    // A restart does not refill the budget.
+    await withAgent(
+      async ({ agent }) => {
+        assert.deepEqual(await agent.onPeerChat(peerChat(ch, "after restart", { by: "agent", hop: 7 })), { note: "budget exhausted" });
+        // A peer's human message resets the streak.
+        assert.deepEqual(await agent.onPeerChat(peerChat(ch, "human here", { by: "human", hop: 0 })), {});
+        await agent.idle();
+        assert.equal(core.sent.at(-1)!.text, `Echo from ${ME.name}: human here`);
+        assert.deepEqual(await agent.onPeerChat(peerChat(ch, "b1", { by: "agent", hop: 2 })), {}, "that answer was turn 1 of 2");
+        assert.deepEqual(await agent.onPeerChat(peerChat(ch, "b2", { by: "agent", hop: 4 })), { note: "budget exhausted" });
+        await agent.idle();
+
+        // Continue: the newest waiting message gets its answer.
+        const before = core.sent.length;
+        const approved = await agent.decideRequest(cardId, true);
+        assert.equal(approved.state, "approved");
+        await agent.idle();
+        assert.deepEqual(core.sent.slice(before).map((m) => m.replyTo !== undefined), [true]);
+        assert.equal(core.sent.at(-1)!.hop, 5, "answers b2 (hop 4), the newest waiting message");
+
+        // Exhaust again, and Stop this time.
+        assert.deepEqual(await agent.onPeerChat(peerChat(ch, "c1", { by: "agent", hop: 4 })), {});
+        assert.deepEqual(await agent.onPeerChat(peerChat(ch, "c2", { by: "agent", hop: 6 })), { note: "budget exhausted" });
+        await agent.idle();
+        const second = agent.listRequests().find((r) => r.kind === "continue" && r.state === "pending")!;
+        assert.ok(second && second.id !== cardId);
+        await agent.decideRequest(second.id, false);
+        const stop = core.sent.at(-1)!;
+        assert.equal(stop.text, "My owner paused this conversation for now.");
+        assert.equal(stop.final, true);
+
+        // My owner typing in the channel settles an open card and refills the budget.
+        assert.deepEqual(await agent.onPeerChat(peerChat(ch, "d1", { by: "agent", hop: 8 })), { note: "budget exhausted" });
+        const third = agent.listRequests().find((r) => r.kind === "continue" && r.state === "pending")!;
+        await agent.onOutgoingChat({ id: "own-1", ch: ch.id, text: "hi both", origin: "human", ts: Date.now() });
+        assert.equal(agent.listRequests().find((r) => r.id === third.id)!.state, "approved");
+        assert.deepEqual(await agent.onPeerChat(peerChat(ch, "d2", { by: "agent", hop: 1 })), {});
+        await agent.idle();
+      },
+      { core },
+    );
+  } finally {
+    core.cleanup();
+  }
 });

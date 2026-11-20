@@ -16,7 +16,14 @@
  *   the asker explicitly, so a reply to someone else that merely quotes my name does not wake me.
  */
 
-export type ReplyNote = "auto-reply off" | "conversation ended" | "hop cap" | "not addressed" | "rate limited";
+export type ReplyNote =
+  | "auto-reply off"
+  | "conversation ended"
+  | "hop cap"
+  | "not addressed"
+  | "rate limited"
+  | "budget exhausted"
+  | "repeated";
 
 export interface ReplyInput {
   channelKind: "direct" | "group";
@@ -34,7 +41,7 @@ export interface ReplyInput {
   by?: "human" | "agent";
 }
 
-export type ReplyDecision = { reply: true } | { reply: false; note: Exclude<ReplyNote, "rate limited"> };
+export type ReplyDecision = { reply: true } | { reply: false; note: "auto-reply off" | "conversation ended" | "hop cap" | "not addressed" };
 
 export function decideReply(input: ReplyInput): ReplyDecision {
   if (!input.autoReply) return { reply: false, note: "auto-reply off" };
@@ -110,31 +117,49 @@ function matchesAt(text: string, start: number, handle: string): boolean {
  *
  *  1. End signal: an agent message with `final: true` ("[END]" from the model) gets no automatic answer, and
  *     NO_REPLY sends nothing at all. Well-behaved agents stop on their own instead of trading acknowledgements.
- *  2. Hop cap (cooperative): every automatic reply carries `incoming.hop + 1`, and a human message starts again at 0,
- *     so the cap bounds a run of agent-only messages since a human last spoke. Standard trust: `maxHops`; full trust:
- *     `maxHopsFullTrust` (0 = no cap). Peers report the hop themselves, so this only stops honest Spencers.
- *  3. Turn budget (local, does not trust peers): automatic replies per channel per minute and per hour. It refills when
- *     my side speaks in the channel (my owner typing there, or my owner's Spencer sending there).
+ *  2. Turn budget (local and persistent, see agent/budget.ts): automatic replies since a person last wrote in the
+ *     channel, plus per-minute / hour / day windows. When it runs out the channel pauses and the owner is asked
+ *     whether to continue, instead of the conversation silently stopping.
+ *  3. Hop cap (cooperative backstop): every automatic reply carries `incoming.hop + 1`, and a human message starts
+ *     again at 0. Peers report the hop themselves, so it only stops honest Spencers (old ones stop at 4).
  */
 export interface LoopLimits {
   maxHops: number;
+  maxTurns: number;
   perMinute: number;
   perHour: number;
+  perDay: number;
 }
 
 export interface LoopPolicy {
   maxHops: number;
   maxHopsFullTrust: number;
+  maxAgentTurns: number;
+  maxAgentTurnsFullTrust: number;
   repliesPerMinute: number;
   repliesPerHour: number;
+  repliesPerDay: number;
   repliesPerMinuteFullTrust: number;
   repliesPerHourFullTrust: number;
+  repliesPerDayFullTrust: number;
 }
 
 export function loopLimits(policy: LoopPolicy, trust: "standard" | "full" | undefined): LoopLimits {
   return trust === "full"
-    ? { maxHops: policy.maxHopsFullTrust, perMinute: policy.repliesPerMinuteFullTrust, perHour: policy.repliesPerHourFullTrust }
-    : { maxHops: policy.maxHops, perMinute: policy.repliesPerMinute, perHour: policy.repliesPerHour };
+    ? {
+        maxHops: policy.maxHopsFullTrust,
+        maxTurns: policy.maxAgentTurnsFullTrust,
+        perMinute: policy.repliesPerMinuteFullTrust,
+        perHour: policy.repliesPerHourFullTrust,
+        perDay: policy.repliesPerDayFullTrust,
+      }
+    : {
+        maxHops: policy.maxHops,
+        maxTurns: policy.maxAgentTurns,
+        perMinute: policy.repliesPerMinute,
+        perHour: policy.repliesPerHour,
+        perDay: policy.repliesPerDay,
+      };
 }
 
 /** The marker a channel model appends to say "this ends the exchange, no answer needed". */
@@ -155,69 +180,4 @@ export function parseAgentAnswer(raw: string): { send: false } | { send: true; t
   }
   if (!text || text === "NO_REPLY") return { send: false };
   return { send: true, text, final };
-}
-
-// ------------------------------------------------------------------ rate limiting
-
-export interface RateLimits {
-  perMinute: number;
-  perHour: number;
-}
-
-/**
- * Per-channel sliding windows (one minute, one hour). `tryAcquire` records a hit only when both windows
- * have room. In memory: a restart starts with empty windows. `limits` may depend on the channel (trust level).
- */
-export class RateLimiter {
-  private hits = new Map<string, number[]>();
-  private limits: (ch: string) => RateLimits;
-  private now: () => number;
-
-  constructor(limits: RateLimits | ((ch: string) => RateLimits), now: () => number = Date.now) {
-    this.limits = typeof limits === "function" ? limits : () => limits;
-    this.now = now;
-  }
-
-  /** Forget the hits in `ch` (the budget refills). */
-  reset(ch: string): void {
-    this.hits.delete(ch);
-  }
-
-  /** Replies recorded in `ch` in the last minute and the last hour. */
-  usage(ch: string): { lastMinute: number; lastHour: number } {
-    const t = this.now();
-    const list = this.prune(ch, t);
-    return { lastMinute: list.filter((x) => x > t - 60_000).length, lastHour: list.length };
-  }
-
-  /** Whether a reply in `ch` is allowed now (does not record). */
-  check(ch: string): boolean {
-    const { perMinute, perHour } = this.limits(ch);
-    const t = this.now();
-    const list = this.prune(ch, t);
-    const lastMinute = list.filter((x) => x > t - 60_000).length;
-    return lastMinute < perMinute && list.length < perHour;
-  }
-
-  /** Record a reply in `ch` unconditionally. */
-  record(ch: string): void {
-    const t = this.now();
-    const list = this.prune(ch, t);
-    list.push(t);
-    this.hits.set(ch, list);
-  }
-
-  /** Check and, when allowed, record. */
-  tryAcquire(ch: string): boolean {
-    if (!this.check(ch)) return false;
-    this.record(ch);
-    return true;
-  }
-
-  private prune(ch: string, t: number): number[] {
-    const list = (this.hits.get(ch) ?? []).filter((x) => x > t - 3_600_000);
-    if (list.length) this.hits.set(ch, list);
-    else this.hits.delete(ch);
-    return list;
-  }
 }

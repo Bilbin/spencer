@@ -247,7 +247,7 @@ Terminal: `completed | declined | failed | expired | cancelled`
   and `propose_file_send`, plus MCP tools depending on the channel's **trust** level. It never gets a shell or file reads.
   - `standard` (default): peer messages are *untrusted data* (`<peer_message untrusted="true">`). Only the MCP tools
     in `allowedMcpTools`. Anything else goes through `ask_owner`: a request card in the owner chat with
-    Approve / Deny. Approve submits an owner message ("I approve this request …") to the owner conversation, which does
+    Approve / Deny (an `OwnerRequest` of kind `"peer"`). Approve submits an owner message ("I approve this request …") to the owner conversation, which does
     the task with its full tools and reports back with `send_message`. Deny sends "My owner declined …" with
     `final: true` and `hop = 4` (the cap of Spencers that predate `final`), so the peer's agent doesn't answer it.
   - `full`: every MCP tool; peer messages are wrapped as `<peer_message trust="full">`; outgoing files in the
@@ -260,12 +260,12 @@ It triggers a model run (`submit input`, `requestId = msg.id`) only if **all** o
 (the first that fails becomes the message's `note`):
 1. `channel.autoReply` is on (default on). Else `"auto-reply off"`.
 2. Not an agent message marked `final`. Else `"conversation ended"`.
-3. The hop cap for the channel's trust level allows it: `hop < cap`, where the cap is `policy.maxHops` (default 8) in
+3. The hop cap for the channel's trust level allows it: `hop < cap`, where the cap is `policy.maxHops` (default 40) in
    standard trust and `policy.maxHopsFullTrust` (default 0) in full trust. A cap of 0 means no cap. Else `"hop cap"`.
 4. Direct channel, **or** a group where `mentions` contains my id or the text contains `@<my name>` (case-insensitive).
    Else `"not addressed"`.
-5. The channel's turn budget allows it. Standard trust: `policy.repliesPerMinute` (6) and `policy.repliesPerHour` (60);
-   full trust: `policy.repliesPerMinuteFullTrust` (20) and `policy.repliesPerHourFullTrust` (200). Else `"rate limited"`.
+5. The channel's turn budget allows it (below). Else `"rate limited"` (per-minute burst: the message is skipped) or
+   `"budget exhausted"` (the channel pauses and the owner is asked).
 
 The answer becomes `chat {hop: in.hop+1, by:"agent", replyTo: in.id, mentions:[in.from]}`, unless the
 trimmed answer is `NO_REPLY` (nothing is sent). If the answer ends with the marker `[END]` (on its own line or at the
@@ -273,18 +273,39 @@ end of the last line), the marker is removed and the chat carries `final: true`;
 nothing. A crash between the answer and the enqueue is covered by the `pending_replies` table plus a deterministic
 reply key, so the reply is enqueued exactly once.
 
-**Why three layers.** Two agents working on a task should be able to go back and forth for as long as the work takes,
+**Turn budget** (`agent/budget.ts`, persisted in core.db, so a restart does not refill it). It is counted by this
+Spencer alone; peers can neither spend nor refill it. Every automatic turn in a channel (a reply, and later a
+follow-up) spends one unit of both parts:
+
+| | Standard trust | Full trust | When it runs out |
+|---|---|---|---|
+| Streak: automatic replies since a person last wrote in the channel | `maxAgentTurns` 20 | `maxAgentTurnsFullTrust` 50 | pause and ask |
+| Per day (sliding 24 h) | `repliesPerDay` 300 | `repliesPerDayFullTrust` 1000 | pause and ask |
+| Per hour | `repliesPerHour` 60 | `repliesPerHourFullTrust` 200 | pause and ask |
+| Per minute | `repliesPerMinute` 6 | `repliesPerMinuteFullTrust` 20 | skip this message |
+
+A limit of 0 for the streak means no limit. Resets:
+- My owner types in the channel: streak and windows start over, and an open "continue?" card for the channel is
+  settled as approved.
+- A peer message with `by: "human"`: the streak starts over (the windows do not, since a peer can claim to be human).
+- Messages my owner's Spencer sends (`send_message`, origin `owner-agent`) reset **nothing**. They are agent turns
+  too; letting them reset the budget would let an owner agent that is woken by replies loop forever.
+
+*Pause and ask.* When the streak, hourly or daily budget is used up, the message is kept as context, gets the note
+`"budget exhausted"`, and an `OwnerRequest` of kind `"continue"` appears in the owner chat (one open card per channel;
+later messages only move its `msgId` to the newest one). **Approve** refills the channel's budget and answers that
+message (a run with `requestId = "resume:" + msgId`). **Deny** sends "My owner paused this conversation for now." with
+`final: true`, so the peer stops waiting.
+
+**Why these layers.** Two agents working on a task should be able to go back and forth for as long as the work takes,
 without trading acknowledgements forever and without a peer being able to run up your model bill.
 - *End signal* (cooperative): NO_REPLY and `[END]`/`final` let well-behaved agents stop politely. The channel
   instructions tell the model when to use them.
-- *Hop cap* (cooperative): `hop` counts the agent-only messages since a human last spoke, because every human message
-  (and every message the owner's Spencer sends on its owner's behalf) starts again at 0. So the cap resets whenever a
-  person on either side speaks. Peers report their own hop, so this only bounds honest Spencers (including old ones,
-  whose cap is 4). Full-trust channels have no hop cap by default.
-- *Turn budget* (local): a sliding per-channel window of automatic replies, counted by this Spencer and not by peers.
-  This is the protection that holds against a misbehaving or malicious peer. It refills when *my* side speaks in the
-  channel (my owner types there, or my owner's Spencer sends there with `send_message`); a peer cannot refill it, even
-  by claiming `by: "human"`. The window lives in memory, so a restart starts with a full budget.
+- *Turn budget* (local, persistent): the protection that holds against a misbehaving or malicious peer, and it never
+  stops a conversation silently: the owner decides.
+- *Hop cap* (cooperative backstop): `hop` counts the agent-only messages since a human last spoke (a human message, and
+  a message the owner's Spencer sends, start at 0). Peers report their own hop, so it only bounds honest Spencers;
+  Spencers that predate this version stop at their own cap of 4.
 
 ### 7.3 Owner notification
 When a peer message replies to a message the owner conversation sent, it is appended to the owner
@@ -326,15 +347,19 @@ sees the answer there, and the owner's model has it as context the next time the
 interface Channel { id: string; kind: "direct"|"group"; name: string; relayUrl: string;
   members: { id: string; name?: string; fingerprint: string; me: boolean }[];
   autoReply: boolean; allowedMcpTools: string[]; trust: "standard"|"full"; unread: number; lastSeq: number; createdAt: number }
-interface OwnerRequest { id: string; ch: string; channelName: string; from: string; fromName?: string;
-  text: string; state: "pending"|"approved"|"denied"; createdAt: number; decidedAt?: number }
+interface OwnerRequest { id: string;
+  kind: "peer" | "continue";   // peer: ask_owner (§7.1); continue: the channel's turn budget ran out (§7.2)
+  ch: string; channelName: string; from: string; fromName?: string;
+  text: string;
+  msgId?: string;              // continue: the incoming message that will be answered on approve
+  state: "pending"|"approved"|"denied"; createdAt: number; decidedAt?: number }
 interface ChannelMessage { id: string; ch: string; from: string; fromName?: string; mine: boolean;
   ts: number; seq?: number; type: string; text?: string; hop?: number; by?: "human"|"agent";
   replyTo?: string; mentions?: string[];   // mentions: identity ids
   status: "pending"|"sent"|"received"|"failed";   // failed: the relay permanently rejected our message (see note); not retried
   final?: boolean; // the sender closed the exchange (§3.1)
   note?: string;   // why an incoming chat got no reply: "not addressed", "hop cap", "rate limited", "auto-reply off",
-                   // "conversation ended"
+                   // "conversation ended", "budget exhausted" (paused, see OwnerRequest kind "continue")
   origin?: "human"|"owner-agent"|"agent-reply"|"peer" }
 interface Transfer { tid: string; ch: string; direction: "out"|"in"; peer: string; peerName?: string;
   name: string; size: number; sha256: string; state: string; attempt: number; initiatedBy: "owner"|"peer-agent"|"owner-agent"|"peer";
@@ -364,8 +389,9 @@ interface McpServer { name: string; transport: "stdio"|"http"; status: "connecti
     "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] },
     "remote": { "url": "https://example.com/mcp", "headers": {} }
   },
-  "policy": { "maxHops": 8, "maxHopsFullTrust": 0, "repliesPerMinute": 6, "repliesPerHour": 60,
-    "repliesPerMinuteFullTrust": 20, "repliesPerHourFullTrust": 200,
+  "policy": { "maxHops": 40, "maxHopsFullTrust": 0, "maxAgentTurns": 20, "maxAgentTurnsFullTrust": 50,
+    "repliesPerMinute": 6, "repliesPerHour": 60, "repliesPerDay": 300,
+    "repliesPerMinuteFullTrust": 20, "repliesPerHourFullTrust": 200, "repliesPerDayFullTrust": 1000,
     "autoAcceptIncomingFiles": true, "maxIncomingFileBytes": 536870912,
     "requireApprovalForOutgoingFiles": true, "ownerCodingTools": true, "transferTtlHours": 24,
     "maxTransferAttempts": 5 }

@@ -131,16 +131,24 @@ export interface OwnerItem {
   request?: string;
 }
 
-/** Something a peer asked for that needs the owner's go-ahead (channel tool `ask_owner`). */
+/**
+ * Something that needs the owner's go-ahead. kind "peer": a peer asked for something the channel agent cannot do
+ * (channel tool `ask_owner`); approving hands it to the owner conversation. kind "continue": the channel's turn budget
+ * ran out (§7.2) and the channel is paused; approving refills the budget and answers the message that was waiting
+ * (`msgId`), denying tells the peer the conversation is paused.
+ */
 export interface OwnerRequest {
   id: string;
+  kind: "peer" | "continue";
   ch: string;
   channelName: string;
   /** Who asked (identity id) and their self-chosen name. */
   from: string;
   fromName?: string;
-  /** What the channel agent says the peer wants (written from untrusted peer input). */
+  /** What the channel agent says the peer wants (written from untrusted peer input), or why the channel paused. */
   text: string;
+  /** kind "continue": the incoming message that is waiting for an answer. */
+  msgId?: string;
   state: "pending" | "approved" | "denied";
   createdAt: number;
   decidedAt?: number;

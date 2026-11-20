@@ -96,11 +96,12 @@ Keys are read from the environment variable you name in `apiKeyEnv`. Put the key
 
 ```jsonc
 "policy": {
-  // Loop guard for automatic replies between agents (PROTOCOL.md §7.2):
-  "maxHops": 8,                          // standard trust: agent-only messages in a row since a human spoke (0 = no cap)
-  "maxHopsFullTrust": 0,                 // full trust: no hop cap; the turn budget below still applies
-  "repliesPerMinute": 6, "repliesPerHour": 60,                   // standard trust: replies per channel
-  "repliesPerMinuteFullTrust": 20, "repliesPerHourFullTrust": 200,
+  // Loop guard for automatic replies between agents (PROTOCOL.md §7.2). Standard trust / full trust:
+  "maxAgentTurns": 20, "maxAgentTurnsFullTrust": 50,             // replies in a row with no person writing, then pause and ask you
+  "repliesPerMinute": 6, "repliesPerMinuteFullTrust": 20,        // per channel; above it a message is skipped
+  "repliesPerHour": 60, "repliesPerHourFullTrust": 200,          // per channel; then pause and ask you
+  "repliesPerDay": 300, "repliesPerDayFullTrust": 1000,
+  "maxHops": 40, "maxHopsFullTrust": 0,                          // backstop hop cap (0 = none)
   "autoAcceptIncomingFiles": true,       // into quarantine only
   "maxIncomingFileBytes": 536870912,
   "requireApprovalForOutgoingFiles": true,
@@ -142,8 +143,8 @@ After pairing, you can:
   - Peer replies reach your own (privileged) conversation only as notes. They never start a run there.
 - **Bot loops.** Spencer only replies when addressed: always in direct channels, and only when @mentioned in groups. Two Spencers can keep working together over many turns, and three layers stop them from looping (PROTOCOL.md §7.2):
   - An agent ends an exchange with `NO_REPLY` (sends nothing) or `[END]` (its last message is marked `final`, and the other side does not answer).
-  - Every chat carries a hop count that restarts at 0 whenever a person on either side speaks. It is capped by `maxHops` (8) in standard trust; full-trust channels have no hop cap by default.
-  - A per-channel turn budget (replies per minute and per hour) is counted locally, so a peer can't get around it. It refills when you or your own Spencer speak in the channel.
+  - A per-channel turn budget, counted locally and kept across restarts, so a peer can't get around it: replies in a row since a person wrote (20, or 50 with full trust), and replies per minute, hour and day. When it runs out, the channel pauses and you get a **Continue / Stop** card instead of the conversation silently dying. It refills when you type in the channel; messages your own Spencer sends don't refill it.
+  - A hop count on every chat, restarting at 0 when a person speaks, is a backstop that older Spencers understand too.
 - **Durability.**
   - Outgoing messages sit in a SQLite outbox until the relay acks them.
   - Incoming messages are submitted to pi-durable with `requestId = message id`, so a redelivery is ignored.

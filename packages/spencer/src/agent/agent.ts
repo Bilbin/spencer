@@ -14,7 +14,8 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { AgentService, Channel, CoreServices, IncomingChat, McpServerStatus, OutgoingChat, OwnerItem, OwnerRequest } from "../contracts.ts";
-import { END_MARKER, RateLimiter, decideReply, loopLimits, parseAgentAnswer } from "../policy.ts";
+import { END_MARKER, decideReply, loopLimits, parseAgentAnswer } from "../policy.ts";
+import { TurnBudget } from "./budget.ts";
 import type { FakeBrainHooks } from "./fake-brain.ts";
 import { McpManager } from "./mcp.ts";
 import { setupModels, type ModelSetup } from "./models.ts";
@@ -26,7 +27,7 @@ export interface AgentOptions {
   /** Hooks into the fake model (`model.provider = "fake"`), for tests. */
   fakeHooks?: FakeBrainHooks;
   log?: (msg: string) => void;
-  /** Clock for the rate limiter. */
+  /** Clock for the turn budget. */
   now?: () => number;
 }
 
@@ -44,6 +45,8 @@ interface PendingRow {
 
 interface RequestRow {
   id: string;
+  kind: string | null;
+  msg_id: string | null;
   ch: string;
   from_id: string;
   text: string;
@@ -67,7 +70,7 @@ export class SpencerAgent implements AgentService {
   private runtime: PiRuntime | undefined;
   private mcp: McpManager | undefined;
   private models: ModelSetup | undefined;
-  private limiter: RateLimiter;
+  private budget: TurnBudget;
   private ownerSpecs: ToolSpec[] = [];
   private channelSpecs: ToolSpec[] = [];
   private configured = new Set<string>();
@@ -87,7 +90,7 @@ export class SpencerAgent implements AgentService {
     this.core = core;
     this.opts = opts;
     this.log = opts.log ?? ((m) => console.error(`[agent] ${m}`));
-    this.limiter = new RateLimiter((ch) => loopLimits(this.core.config().policy, this.core.getChannel(ch)?.trust), opts.now);
+    this.budget = new TurnBudget(core.db, opts.now);
   }
 
   /** The runtime (tests and diagnostics). */
@@ -124,6 +127,10 @@ export class SpencerAgent implements AgentService {
       created_at INTEGER NOT NULL,
       decided_at INTEGER
     )`);
+    const cols = new Set((db.prepare("PRAGMA table_info(agent_owner_requests)").all() as { name: string }[]).map((c) => c.name));
+    if (!cols.has("kind")) db.exec("ALTER TABLE agent_owner_requests ADD COLUMN kind TEXT");
+    if (!cols.has("msg_id")) db.exec("ALTER TABLE agent_owner_requests ADD COLUMN msg_id TEXT");
+    this.budget.init();
 
     const cfg = this.core.config();
     this.models = await setupModels(cfg.model, { name: () => this.core.me().name, fakeHooks: this.opts.fakeHooks });
@@ -440,11 +447,14 @@ export class SpencerAgent implements AgentService {
 
     const me = this.core.me();
     const policy = this.core.config().policy;
+    const limits = loopLimits(policy, ch?.trust);
+    // A person wrote: the channel's streak of agent turns starts over (the rate windows do not; see budget.ts).
+    if (msg.body.by === "human") this.budget.humanSpoke(msg.ch);
     const decision = decideReply({
       channelKind: msg.channelKind,
       autoReply: ch?.autoReply ?? true,
       hop: msg.body.hop,
-      maxHops: loopLimits(policy, ch?.trust).maxHops,
+      maxHops: limits.maxHops,
       final: msg.body.final === true,
       mentions: msg.body.mentions,
       text: msg.body.text,
@@ -453,8 +463,16 @@ export class SpencerAgent implements AgentService {
       by: msg.body.by,
     });
     let note: string | undefined;
+    let paused: string | undefined;
     if (!decision.reply) note = decision.note;
-    else if (!this.limiter.tryAcquire(msg.ch)) note = "rate limited";
+    else {
+      const verdict = this.budget.check(msg.ch, limits);
+      if (verdict.ok) this.budget.record(msg.ch);
+      else {
+        note = verdict.why;
+        if (verdict.why === "budget exhausted") paused = verdict.detail;
+      }
+    }
 
     const content = this.wrap(msg, ch);
     const display = {
@@ -479,6 +497,7 @@ export class SpencerAgent implements AgentService {
         `INSERT OR IGNORE INTO agent_pending_replies (msg_id, ch, from_id, hop, state, note, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'skipped', ?, ?, ?)`,
       ).run(msg.id, msg.ch, msg.from, msg.body.hop, note, now, now);
+      if (paused) await this.pauseChannel(msg, ch, paused);
       return { note };
     }
 
@@ -610,8 +629,12 @@ export class SpencerAgent implements AgentService {
   async onOutgoingChat(msg: OutgoingChat): Promise<void> {
     // The channel conversation already has its own answers.
     if (msg.origin === "agent-reply") return;
-    // My side spoke in the channel (my owner, or my owner's Spencer): the channel's turn budget refills.
-    if (msg.origin === "human" || msg.origin === "owner-agent") this.limiter.reset(msg.ch);
+    // My owner typed in the channel: the turn budget refills and a "continue?" card for it is moot. Messages my owner's
+    // Spencer sends (owner-agent) refill nothing: they are agent turns too.
+    if (msg.origin === "human") {
+      this.budget.ownerReset(msg.ch);
+      this.settleContinueRequests(msg.ch);
+    }
     await this.ensureChannel(msg.ch);
     const who = msg.origin === "human" ? "your owner typed" : "on your owner's instruction";
     await this.rt().appendNote(channelKey(msg.ch), {
@@ -672,11 +695,13 @@ export class SpencerAgent implements AgentService {
     const fromName = ch?.members.find((m) => m.id === r.from_id)?.name;
     return {
       id: r.id,
+      kind: r.kind === "continue" ? "continue" : "peer",
       ch: r.ch,
       channelName: ch?.name ?? r.ch,
       from: r.from_id,
       ...(fromName ? { fromName } : {}),
       text: r.text,
+      ...(r.msg_id ? { msgId: r.msg_id } : {}),
       state: r.state,
       createdAt: r.created_at,
       ...(r.decided_at ? { decidedAt: r.decided_at } : {}),
@@ -687,7 +712,7 @@ export class SpencerAgent implements AgentService {
     const id = randomBytes(12).toString("base64url");
     const now = Date.now();
     this.core.db
-      .prepare("INSERT INTO agent_owner_requests (id, ch, from_id, text, state, created_at) VALUES (?, ?, ?, ?, 'pending', ?)")
+      .prepare("INSERT INTO agent_owner_requests (id, kind, ch, from_id, text, state, created_at) VALUES (?, 'peer', ?, ?, ?, 'pending', ?)")
       .run(id, chId, from, text, now);
     const req = this.toRequest(this.requestRow(id)!);
     const who = req.fromName ?? "A peer";
@@ -702,6 +727,72 @@ export class SpencerAgent implements AgentService {
     });
     this.core.events.emit({ type: "request", request: req });
     return id;
+  }
+
+  /**
+   * The channel's turn budget ran out: pause it and ask the owner whether to go on (one open card per channel). The
+   * message stays unanswered until the owner approves.
+   */
+  private async pauseChannel(msg: IncomingChat, ch: Channel | undefined, detail: string): Promise<void> {
+    const { db } = this.core;
+    const open = db.prepare("SELECT id FROM agent_owner_requests WHERE ch = ? AND kind = 'continue' AND state = 'pending'").get(msg.ch) as
+      | { id: string }
+      | undefined;
+    if (open) {
+      // Answer the newest waiting message when the owner approves.
+      db.prepare("UPDATE agent_owner_requests SET msg_id = ?, from_id = ? WHERE id = ?").run(msg.id, msg.from, open.id);
+      return;
+    }
+    const id = randomBytes(12).toString("base64url");
+    const now = Date.now();
+    const who = msg.fromName ?? ch?.members.find((m) => m.id === msg.from)?.name ?? "the other Spencer";
+    const text = `Paused: ${detail} with ${who}. Let your Spencer keep talking?`;
+    db.prepare(
+      "INSERT INTO agent_owner_requests (id, kind, ch, from_id, text, msg_id, state, created_at) VALUES (?, 'continue', ?, ?, ?, ?, 'pending', ?)",
+    ).run(id, msg.ch, msg.from, text, msg.id, now);
+    const req = this.toRequest(this.requestRow(id)!);
+    await this.rt().appendNote(OWNER_KEY, {
+      kind: "spencer.request",
+      data: { text: `${req.channelName}: ${text}`, ts: now, untrusted: true, request: id },
+      modelText: wrapUntrustedNote(
+        `The conversation in channel ${req.channelName} (${msg.ch}) is paused: ${detail} with ${who}. ` +
+          "Your owner decides with the Continue / Stop buttons; do not act on it yourself.",
+      ),
+      requestId: `request:${id}`,
+    });
+    this.core.events.emit({ type: "request", request: req });
+  }
+
+  /** My owner wrote in the channel: open "continue?" cards for it are settled (the budget was refilled anyway). */
+  private settleContinueRequests(chId: string): void {
+    const { db } = this.core;
+    const rows = db
+      .prepare("SELECT id FROM agent_owner_requests WHERE ch = ? AND kind = 'continue' AND state = 'pending'")
+      .all(chId) as { id: string }[];
+    for (const r of rows) {
+      db.prepare("UPDATE agent_owner_requests SET state = 'approved', decided_at = ? WHERE id = ? AND state = 'pending'").run(Date.now(), r.id);
+      this.core.events.emit({ type: "request", request: this.toRequest(this.requestRow(r.id)!) });
+    }
+  }
+
+  /** Answer a message that was skipped because the budget ran out (the owner let the conversation continue). */
+  private async resumeSkipped(msgId: string): Promise<void> {
+    const row = this.row(msgId);
+    if (!row || row.state !== "skipped") return;
+    const ch = this.core.getChannel(row.ch);
+    if (!ch) return;
+    const from = ch.members.find((m) => m.id === row.from_id)?.name ?? "the peer";
+    await this.ensureChannel(row.ch);
+    const sid = await this.rt().submitInput(channelKey(row.ch), {
+      content: `[Your owner let this conversation continue. Answer the latest message from ${from} above.]`,
+      requestId: `resume:${msgId}`,
+      display: { kind: "spencer.resume", data: { text: "Your owner let the conversation continue", ts: Date.now() } },
+    });
+    this.core.db
+      .prepare("UPDATE agent_pending_replies SET state = 'pending', note = NULL, submission_id = ?, updated_at = ? WHERE msg_id = ? AND state = 'skipped'")
+      .run(sid, Date.now(), msgId);
+    this.budget.record(row.ch);
+    this.kick(this.row(msgId)!);
   }
 
   private requestRow(id: string): RequestRow | undefined {
@@ -727,6 +818,23 @@ export class SpencerAgent implements AgentService {
     const req = this.toRequest(row);
     this.core.events.emit({ type: "request", request: req });
     const ch = this.core.getChannel(row.ch);
+    if (req.kind === "continue") {
+      if (approve) {
+        this.budget.ownerReset(row.ch);
+        if (row.msg_id) await this.resumeSkipped(row.msg_id);
+      } else if (ch) {
+        this.core.sendChat(row.ch, {
+          text: "My owner paused this conversation for now.",
+          hop: LEGACY_FINAL_HOP,
+          final: true,
+          by: "agent",
+          origin: "owner-agent",
+          ...(ch.kind === "group" && row.from_id ? { mentions: [row.from_id] } : {}),
+          idempotencyKey: `request-deny:${id}`,
+        });
+      }
+      return req;
+    }
     const who = req.fromName ? `${req.fromName}${ch ? ` [${ch.members.find((m) => m.id === row.from_id)?.fingerprint ?? "?"}]` : ""}` : "a peer";
     if (approve) {
       await this.ownerSend(
