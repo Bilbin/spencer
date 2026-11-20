@@ -90,13 +90,19 @@ type Body =
   | { type: "file_retry";  tid: string; to: string; attempt: number }
   | { type: "file_ack";    tid: string; to: string; ok: boolean; sha256?: string; reason?: string }
   | { type: "file_cancel"; tid: string; to: string; reason: string }
-  | { type: "status"; replyTo: string; state: "working" | "done"; activity?: string };  // activity ≤ 200 chars
+  | { type: "status"; replyTo: string;                                  // activity ≤ 200 chars
+      state: "working" | "done" | "input_required" | "completed" | "failed"; activity?: string };
 ```
 
 - `status`: an ephemeral "working on it" indicator while a Spencer's channel agent prepares a reply to `replyTo`:
   "Thinking…" when the run starts, one update per tool call (`Using t3code · t3 thread read`), and `done` when the
   run ends. Receivers show it live, drop it when it is older than 2 minutes (a catch-up after being offline),
   and never store it. Spencers older than this field drop it as an unknown body.
+  Task states (shaped like A2A's, with `replyTo` as the task id): `input_required` replaces `done` when the run asked
+  its owner about this message (`ask_owner`; activity "Waiting for its owner's approval"). When the owner approves,
+  `working` ("Its owner approved; working on it") and then `completed` once the owner's Spencer finished its turn, or
+  `failed` if it could not; a denial sends `failed` ("Declined by its owner"). Spencers that only know `working`/`done`
+  drop the new states as an invalid body. The durable result is still a chat (the report, or the decline).
   It is sent **ephemeral** (§4.7): not through the durable outbox, and only while connected. A relay with the
   "ephemeral" feature pushes it to online members without storing it; an older relay stores it like any message, and
   receivers drop it once stale.
@@ -441,7 +447,7 @@ that, `schedule_followup` fails and tells the model to report what it has (or as
 | POST | `/api/transfers` | `{ch, path, to?}` → `Transfer` (owner-initiated; `to` is required in groups) |
 | POST | `/api/transfers/:tid/approve` · `/deny` · `/accept` · `/decline` · `/cancel` | → `Transfer` |
 | GET | `/api/mcp` | → `{servers: McpServer[]}` |
-| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", ...RelayStatus}` (any change of a relay connection's state), `{type:"presence", ch, id, presence, lastSeen?}` (a member's Spencer came online or went offline in channel `ch`; when *our* connection to a relay goes up or down, each of its channels is re-sent as a `channel` event instead, since every member's presence changes), `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"followup", followup: Followup}` (created or changed), `{type:"status", ch, from, replyTo, state, activity?, ts}` (a Spencer, possibly mine, is working on a reply) |
+| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", ...RelayStatus}` (any change of a relay connection's state), `{type:"presence", ch, id, presence, lastSeen?}` (a member's Spencer came online or went offline in channel `ch`; when *our* connection to a relay goes up or down, each of its channels is re-sent as a `channel` event instead, since every member's presence changes), `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"followup", followup: Followup}` (created or changed), `{type:"status", ch, from, replyTo, state, activity?, ts}` (progress of a Spencer, possibly mine, on message `replyTo`; `state` as in §3.1, including the task states) |
 
 ```ts
 interface Channel { id: string; kind: "direct"|"group"; name: string; relayUrl: string;

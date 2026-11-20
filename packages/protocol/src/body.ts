@@ -43,10 +43,17 @@ export type FileBody =
   | FileCancelBody;
 
 /**
- * Ephemeral "working" indicator for a reply in progress (receivers drop stale ones). Older Spencers that don't
- * know it drop the envelope as an unknown body, which is harmless.
+ * Ephemeral progress of the work on message `replyTo` (receivers drop stale ones). Older Spencers that don't know it
+ * drop the envelope as an unknown body, which is harmless.
+ *
+ * States, shaped like A2A task states with `replyTo` as the task id: "working" (a run is under way; `activity` says
+ * what it does), "done" (the run ended; its answer, if any, is the reply), "input_required" (waiting for the owner to
+ * approve), "completed" / "failed" (the owner approved and the task finished, or failed or was declined). Spencers
+ * that only know working/done drop the newer states as an invalid body.
  */
-export type StatusBody = { type: "status"; replyTo: string; state: "working" | "done"; activity?: string };
+export const STATUS_STATES = ["working", "done", "input_required", "completed", "failed"] as const;
+export type StatusState = (typeof STATUS_STATES)[number];
+export type StatusBody = { type: "status"; replyTo: string; state: StatusState; activity?: string };
 
 export type Body = HelloBody | ChatBody | FileBody | StatusBody;
 
@@ -91,9 +98,9 @@ export function parseBody(raw: unknown): Body | null {
       return out;
     }
     case "status": {
-      if (!isB64uId(b.replyTo) || (b.state !== "working" && b.state !== "done")) return null;
+      if (!isB64uId(b.replyTo) || !(STATUS_STATES as readonly unknown[]).includes(b.state)) return null;
       if (b.activity !== undefined && !isStr(b.activity, 200)) return null;
-      return { type: "status", replyTo: b.replyTo, state: b.state, ...(b.activity !== undefined ? { activity: b.activity as string } : {}) };
+      return { type: "status", replyTo: b.replyTo, state: b.state as StatusState, ...(b.activity !== undefined ? { activity: b.activity as string } : {}) };
     }
   }
   if (!FILE_BODY_TYPES.has(b.type as string)) return null;

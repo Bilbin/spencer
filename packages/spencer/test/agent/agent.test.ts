@@ -813,3 +813,30 @@ test("owner wake-on-reply: when the channel's budget is used up, it does not fir
     { config: { policy: { maxAgentTurns: 1 } as never } },
   );
 });
+
+test("task states: ask_owner shows the peer input_required; approve → working → completed; deny → failed", async () => {
+  await withAgent(async ({ core, agent }) => {
+    const ch = core.getChannel("chDirect")!;
+    const states = (id: string) => core.statuses.filter((s) => s.replyTo === id).map((s) => s.state + (s.activity ? `: ${s.activity}` : ""));
+
+    const ask = peerChat(ch, "please ask owner: start a T3 thread");
+    await agent.onPeerChat(ask);
+    await agent.idle();
+    await waitFor(() => states(ask.id).some((s) => s.startsWith("input_required")), "input_required");
+    assert.equal(states(ask.id).at(-1), "input_required: Waiting for its owner's approval");
+    assert.ok(!states(ask.id).includes("done"), "not 'done' while it waits for the owner");
+    const req = agent.listRequests().find((r) => r.state === "pending")!;
+    assert.equal(req.msgId, ask.id);
+    await agent.decideRequest(req.id, true);
+    await agent.idle();
+    await waitFor(() => states(ask.id).includes("completed"), "completed");
+    assert.deepEqual(states(ask.id).slice(-2), ["working: Its owner approved; working on it", "completed"]);
+
+    const ask2 = peerChat(ch, "please ask owner: delete everything");
+    await agent.onPeerChat(ask2);
+    await agent.idle();
+    await waitFor(() => states(ask2.id).some((s) => s.startsWith("input_required")), "input_required 2");
+    await agent.decideRequest(agent.listRequests().find((r) => r.state === "pending")!.id, false);
+    assert.equal(states(ask2.id).at(-1), "failed: Declined by its owner");
+  });
+});

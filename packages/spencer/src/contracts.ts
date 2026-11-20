@@ -10,7 +10,7 @@
  * JSON the local HTTP API returns; see docs/PROTOCOL.md §8.
  */
 import type { DatabaseSync } from "node:sqlite";
-import type { ChatBody, CrocInfo, FileBody, Identity } from "@spencer/protocol";
+import type { ChatBody, CrocInfo, FileBody, Identity, StatusState } from "@spencer/protocol";
 import type { SpencerConfig, Policy } from "./config.ts";
 
 // ---------------------------------------------------------------- API shapes
@@ -210,7 +210,7 @@ export type DaemonEvent =
   | { type: "request"; request: OwnerRequest }
   | { type: "followup"; followup: Followup }
   /** A member's Spencer is working on a reply (`from` may be me). Ephemeral: not stored for the UI. */
-  | { type: "status"; ch: string; from: string; replyTo: string; state: "working" | "done"; activity?: string; ts: number }
+  | { type: "status"; ch: string; from: string; replyTo: string; state: StatusState; activity?: string; ts: number }
   /** A relay connection changed: `RelayStatus` (net/relay-client.ts) plus `type`. */
   | {
       type: "relay";
@@ -346,7 +346,7 @@ export interface CoreServices {
   ): { id: string };
   requestFileSend(ch: string, req: TransferRequest): Promise<Transfer>;
   /** Tell the channel (and the local UI) that my agent is working on a reply to `replyTo`. Best effort. */
-  sendStatus?(ch: string, s: { replyTo: string; state: "working" | "done"; activity?: string }): void;
+  sendStatus?(ch: string, s: { replyTo: string; state: StatusState; activity?: string }): void;
   listTransfers(ch?: string): Transfer[];
   createInvite(kind: "direct" | "group", name: string): Promise<{ link: string; channel: Channel }>;
   events: EventSink;

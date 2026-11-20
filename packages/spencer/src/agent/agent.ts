@@ -338,7 +338,16 @@ export class SpencerAgent implements AgentService {
     }
     const w = this.working.get(chId);
     this.working.delete(chId);
-    for (const id of w?.ids ?? []) this.core.sendStatus?.(chId, { replyTo: id, state: "done" });
+    for (const id of w?.ids ?? []) {
+      // The run asked the owner (ask_owner) about this message: the peer sees that it waits for approval.
+      const waiting = this.core.db
+        .prepare("SELECT 1 FROM agent_owner_requests WHERE ch = ? AND msg_id = ? AND kind = 'peer' AND state = 'pending'")
+        .get(chId, id);
+      this.core.sendStatus?.(
+        chId,
+        waiting ? { replyTo: id, state: "input_required", activity: "Waiting for its owner's approval" } : { replyTo: id, state: "done" },
+      );
+    }
   }
 
   private onChannelItems(chId: string, items: OwnerItem[]): void {
@@ -1018,9 +1027,11 @@ export class SpencerAgent implements AgentService {
   private async askOwner(chId: string, from: string, text: string): Promise<string> {
     const id = randomBytes(12).toString("base64url");
     const now = Date.now();
+    // The message this run answers: the task the peer sees as input_required / completed / failed (status body).
+    const msgId = (await this.answering(chId).catch(() => [] as string[]))[0] ?? null;
     this.core.db
-      .prepare("INSERT INTO agent_owner_requests (id, kind, ch, from_id, text, state, created_at) VALUES (?, 'peer', ?, ?, ?, 'pending', ?)")
-      .run(id, chId, from, text, now);
+      .prepare("INSERT INTO agent_owner_requests (id, kind, ch, from_id, text, msg_id, state, created_at) VALUES (?, 'peer', ?, ?, ?, ?, 'pending', ?)")
+      .run(id, chId, from, text, msgId, now);
     const req = this.toRequest(this.requestRow(id)!);
     const who = req.fromName ?? "A peer";
     await this.rt().appendNote(OWNER_KEY, {
@@ -1143,12 +1154,27 @@ export class SpencerAgent implements AgentService {
       return req;
     }
     const who = req.fromName ? `${req.fromName}${ch ? ` [${ch.members.find((m) => m.id === row.from_id)?.fingerprint ?? "?"}]` : ""}` : "a peer";
+    const task = row.msg_id;
     if (approve) {
-      await this.ownerSend(
+      if (task) this.core.sendStatus?.(row.ch, { replyTo: task, state: "working", activity: "Its owner approved; working on it" });
+      const { submissionId } = await this.ownerSend(
         `I approve this request from ${who} in channel "${req.channelName}" (id ${row.ch}):\n\n${row.text}\n\n` +
           `Do it now with your own tools. When it is done (or if it fails), report the result to that channel with send_message (channel ${row.ch}).`,
       );
+      if (task) {
+        // When the owner conversation's turn ends, the task is completed (or failed) from the peer's point of view.
+        const p: Promise<void> = this.rt()
+          .waitAnswer(submissionId)
+          .then((a) => {
+            if (this.stopping) return;
+            this.core.sendStatus?.(row.ch, a.status === "done" ? { replyTo: task, state: "completed" } : { replyTo: task, state: "failed", activity: "It could not be done" });
+          })
+          .catch(() => {})
+          .finally(() => this.ownerWaits.delete(p));
+        this.ownerWaits.add(p);
+      }
     } else if (ch) {
+      if (task) this.core.sendStatus?.(row.ch, { replyTo: task, state: "failed", activity: "Declined by its owner" });
       const short = row.text.length > 200 ? row.text.slice(0, 199) + "…" : row.text;
       // Final, so the peer's agent does not auto-reply to a refusal. Spencers older than `final` stop on the hop
       // instead: their cap was 4.
