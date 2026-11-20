@@ -33,6 +33,18 @@ export interface RelayTuning {
   maxBackoffMs: number;
   /** Client-side liveness probe interval (relay also pings us at the WS level). */
   pingIntervalMs: number;
+  /**
+   * How often to compare the wall clock with the monotonic timer clock (0 = never). Node timers stop while the machine
+   * sleeps, so after a resume a socket that died during the suspend would only be found by the next ping (up to
+   * `pingIntervalMs` + `requestTimeoutMs` later). A wall-clock jump of more than `wakeJumpMs` beyond the check interval
+   * means we were suspended: probe every connection right away.
+   */
+  wakeCheckMs: number;
+  wakeJumpMs: number;
+  /** Timeout of that probe ping. */
+  probeTimeoutMs: number;
+  /** Wall clock (tests). */
+  now?: () => number;
 }
 
 export const DEFAULT_RELAY_TUNING: RelayTuning = {
@@ -41,6 +53,9 @@ export const DEFAULT_RELAY_TUNING: RelayTuning = {
   minBackoffMs: 500,
   maxBackoffMs: 30_000,
   pingIntervalMs: 30_000,
+  wakeCheckMs: 5_000,
+  wakeJumpMs: 10_000,
+  probeTimeoutMs: 5_000,
 };
 
 export interface ConnectionHandlers {
@@ -208,6 +223,24 @@ export class RelayConnection {
     this.reconnectTimer = setTimeout(() => this.connect(), delay);
   }
 
+  /**
+   * Check the connection now (after a suspected suspend): ping with a short timeout and replace the socket if it does
+   * not answer; reconnect right away if waiting in backoff.
+   */
+  probe(): void {
+    if (this.state === "ready") {
+      const ws = this.ws;
+      this.request({ t: "ping" }, this.tuning.probeTimeoutMs).catch((e: RelayError) => {
+        if (ws && this.ws === ws && e.code === "timeout") {
+          this.log(`relay ${this.url}: no answer after resume, reconnecting`);
+          ws.terminate();
+        }
+      });
+    } else {
+      this.nudge();
+    }
+  }
+
   /** Reconnect now if waiting in backoff (e.g. a user action needs this relay). */
   nudge(): void {
     if (this.state === "connecting" && !this.ws && this.reconnectTimer) {
@@ -334,12 +367,28 @@ export class RelayPool {
   private log: (m: string) => void;
   private tuning: RelayTuning;
   private stopped = false;
+  private wakeTimer: NodeJS.Timeout | undefined;
+  private lastTick = 0;
 
   constructor(identity: Identity, handlers: PoolHandlers, log: (m: string) => void, tuning: Partial<RelayTuning> = {}) {
     this.identity = identity;
     this.handlers = handlers;
     this.log = log;
     this.tuning = { ...DEFAULT_RELAY_TUNING, ...tuning };
+    if (this.tuning.wakeCheckMs > 0) {
+      const now = this.tuning.now ?? Date.now;
+      this.lastTick = now();
+      this.wakeTimer = setInterval(() => {
+        const t = now();
+        const gap = t - this.lastTick;
+        this.lastTick = t;
+        if (gap > this.tuning.wakeCheckMs + this.tuning.wakeJumpMs) {
+          this.log(`clock jumped ${Math.round(gap / 1000)} s (resumed from sleep?); checking relay connections`);
+          for (const c of this.conns.values()) c.probe();
+        }
+      }, this.tuning.wakeCheckMs);
+      this.wakeTimer.unref?.();
+    }
   }
 
   /** Returns (and lazily starts) the connection for `url`. */
@@ -380,6 +429,7 @@ export class RelayPool {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    clearInterval(this.wakeTimer);
     const all = [...this.conns.values()];
     this.conns.clear();
     await Promise.all(all.map((c) => c.close()));

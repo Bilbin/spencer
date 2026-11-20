@@ -353,8 +353,7 @@ export class Daemon {
     this.events.emit({ type: "relay", url: conn.url, connected: true });
     const chs = channels.channelsOnRelay(conn.url);
     void Promise.allSettled(chs.map((ch) => channels.subscribe(conn, ch))).then(() => {
-      const outbox = this.s.outbox;
-      if (outbox) for (const ch of chs) outbox.kick(ch);
+      this.s.outbox?.connectionReady(chs);
     });
   }
 

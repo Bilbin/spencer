@@ -169,6 +169,9 @@ Error codes: `unauthenticated`, `bad_request`, `not_member`, `no_channel`, `full
   `sent`, then move to the next. On disconnect or error, back off exponentially (1 s → 60 s cap) and retry.
   Rows survive restarts.
 - A reply whose `ok` was lost causes a resend. The relay dedupes on `env.id`, so this is safe.
+- When a relay connection (re)authenticates, the backoff of every pending row of its channels is cleared and the
+  pumps restart. A failure on the previous connection (typically a timeout on a socket that had silently died) says
+  nothing about the new one, so messages go out right after the reconnect instead of waiting out up to a minute.
 
 ### 5.2 Inbox (durable receive)
 1. `msg {seq, env}` arrives. Verify and decrypt. In **one** transaction, insert into `messages`
@@ -178,6 +181,17 @@ Error codes: `unauthenticated`, `bad_request`, `not_member`, `no_channel`, `full
 - On startup, rows with `routed = 0` are routed again. Routing is idempotent: pi-durable dedupes on
   `requestId = msg.id`, and the transfer state machine ignores stale events.
 - On (re)connect: `sub {ch, since: last_seq}` for every channel.
+
+### 5.3 Connection liveness
+- Reconnect with jittered exponential backoff (0.5 s → 30 s), reset once a connection authenticates.
+- The client pings (`{t:"ping"}`) every 30 s; no answer within 15 s → the socket is dropped and replaced. The relay
+  also pings at the WebSocket level every 30 s and drops connections that don't answer.
+- **Resume after suspend.** Node timers run on a monotonic clock that stops while the machine sleeps, so after a
+  resume the next ping may be up to 30 s away while the socket died during the sleep (the relay dropped us, or a NAT
+  forgot the flow) and still looks open. Every 5 s the client compares the wall clock with the time it expected; a jump
+  of more than 10 s means it was suspended, and every connection is probed at once: a ping with a 5 s timeout (no
+  answer → replace the socket) or, if it is waiting in backoff, an immediate reconnect. The reconnect then catches up
+  through `sub` (§5.2) and flushes the outbox (§5.1). Follow-ups (§7.4) use the wall clock for the same reason.
 
 ## 6. File transfers (croc)
 

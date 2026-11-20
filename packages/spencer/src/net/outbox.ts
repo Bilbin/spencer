@@ -127,6 +127,18 @@ export class Outbox {
     }
   }
 
+  /**
+   * A relay connection (re)authenticated: retry these channels' pending rows now. A send that failed on the previous
+   * connection (typically a timeout on a socket that had silently died, e.g. over a laptop suspend) left its row in
+   * backoff of up to a minute; the new connection says nothing about that error, so waiting it out only adds delay.
+   */
+  connectionReady(chs: string[]): void {
+    for (const ch of chs) {
+      this.d.sql.run("UPDATE outbox SET next_attempt_at = 0 WHERE ch = ? AND state = 'pending' AND next_attempt_at > 0", ch);
+      this.kick(ch);
+    }
+  }
+
   private flushEmits(): void {
     const ids = this.emitQueue;
     this.emitQueue = [];

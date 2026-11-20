@@ -269,3 +269,64 @@ export function http(
     req.end();
   });
 }
+
+// ---------------------------------------------------------------- a TCP proxy that can break connections
+
+export interface TcpProxy {
+  port: number;
+  /** ws URL of the relay behind the proxy. */
+  url: string;
+  /**
+   * Every connection open now silently drops all data from here on, in both directions, without closing: what a
+   * socket looks like after a laptop slept or a NAT forgot it. New connections work normally.
+   */
+  freeze(): void;
+  /** Close every connection open now. */
+  killAll(): void;
+  close(): Promise<void>;
+}
+
+export async function tcpProxy(targetPort: number): Promise<TcpProxy> {
+  const { createServer, connect } = await import("node:net");
+  const pairs = new Set<{ a: import("node:net").Socket; b: import("node:net").Socket; frozen: boolean }>();
+  const server = createServer((a) => {
+    const b = connect(targetPort, "127.0.0.1");
+    const pair = { a, b, frozen: false };
+    pairs.add(pair);
+    a.on("data", (d) => {
+      if (!pair.frozen) b.write(d);
+    });
+    b.on("data", (d) => {
+      if (!pair.frozen) a.write(d);
+    });
+    const end = () => {
+      pairs.delete(pair);
+      a.destroy();
+      b.destroy();
+    };
+    a.on("close", end);
+    b.on("close", end);
+    a.on("error", end);
+    b.on("error", end);
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as { port: number }).port;
+  const killAll = () => {
+    for (const p of [...pairs]) {
+      p.a.destroy();
+      p.b.destroy();
+    }
+  };
+  return {
+    port,
+    url: `ws://127.0.0.1:${port}/ws`,
+    freeze() {
+      for (const p of pairs) p.frozen = true;
+    },
+    killAll,
+    async close() {
+      killAll();
+      await new Promise<void>((r) => server.close(() => r()));
+    },
+  };
+}
