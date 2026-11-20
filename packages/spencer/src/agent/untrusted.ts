@@ -1,0 +1,40 @@
+/**
+ * Wrapping of peer-controlled text before any model sees it. Everything inside `<peer_message>` comes from other
+ * people's agents and is untrusted data; the wrapper's attributes are escaped and any `<peer_message` /
+ * `</peer_message` (or the transcript wrapper's tag) inside the text is neutralized, so a peer cannot close the
+ * block early and pose as us.
+ */
+
+const TAGS = /<(\/?)\s*(peer_message|channel_transcript)/gi;
+
+export function escapeAttr(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/[\r\n]+/g, " ");
+}
+
+/** Neutralize our tags inside untrusted text (the text stays readable). */
+export function escapeBody(s: string): string {
+  return s.replace(TAGS, (_m, slash: string, tag: string) => `&lt;${slash}${tag}`);
+}
+
+export interface PeerMessageInfo {
+  channel: string;
+  from: string;
+  fingerprint?: string;
+  hop: number;
+  text: string;
+  /** Extra attributes (already plain strings). */
+  attrs?: Record<string, string>;
+}
+
+export function wrapPeerMessage(m: PeerMessageInfo): string {
+  const attrs: [string, string][] = [
+    ["channel", m.channel],
+    ["from", m.from],
+  ];
+  if (m.fingerprint) attrs.push(["fingerprint", m.fingerprint]);
+  attrs.push(["hop", String(m.hop)]);
+  for (const [k, v] of Object.entries(m.attrs ?? {})) attrs.push([k, v]);
+  attrs.push(["untrusted", "true"]);
+  const a = attrs.map(([k, v]) => `${k}="${escapeAttr(v)}"`).join(" ");
+  return `<peer_message ${a}>\n${escapeBody(m.text)}\n</peer_message>`;
+}
