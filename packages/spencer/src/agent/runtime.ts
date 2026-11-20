@@ -470,7 +470,7 @@ function short(s: string, n = 500): string {
   return s.length > n ? s.slice(0, n) + "…" : s;
 }
 
-/** Transcript entry → owner UI items. Our notes carry `{ text, ts, isError?, role? }` in `data`. */
+/** Transcript entry → owner UI items. Our notes carry `{ text, ts, isError?, untrusted?, role? }` in `data`. */
 function entryItems(e: EntryRecord): OwnerItem[] {
   const id = String(e.id);
   const msg = e.model?.[0];
@@ -506,12 +506,13 @@ function entryItems(e: EntryRecord): OwnerItem[] {
       return [{ id, role: "note", text: "(earlier conversation summarized)", ts }];
     default: {
       // Our own kinds: notes, peer messages, errors.
-      const d = (e.data ?? {}) as { text?: string; ts?: number; isError?: boolean; role?: OwnerItem["role"] };
+      const d = (e.data ?? {}) as { text?: string; ts?: number; isError?: boolean; untrusted?: boolean; role?: OwnerItem["role"] };
       const text = d.text ?? contentText(msg?.content);
       if (!text) return [];
       const role = d.role ?? "note";
       const item: OwnerItem = { id, role, text, ts: d.ts ?? ts };
       if (d.isError) item.isError = true;
+      if (d.untrusted) item.untrusted = true;
       return [item];
     }
   }

@@ -7,10 +7,6 @@ import { scrollKeeper } from "./scroll.js";
 
 const EXAMPLES = ["List my peers", "Ask Bob's Spencer for the logs", "What transfers are waiting for me?", "Create an invite for Carol"];
 
-function isUntrustedNote(text) {
-  return /^\s*reply from/i.test(text) || /untrusted/i.test(text);
-}
-
 function ownerItem(item) {
   const time = h("time", { datetime: new Date(item.ts).toISOString(), title: timeFull(item.ts) }, timeShort(item.ts));
   switch (item.role) {
@@ -40,7 +36,7 @@ function ownerItem(item) {
       return h("div.tool-wrap", null, details);
     }
     case "note": {
-      const untrusted = isUntrustedNote(item.text);
+      const untrusted = item.untrusted === true;
       return h(
         `div.note${untrusted ? ".untrusted" : ""}`,
         { role: "note" },

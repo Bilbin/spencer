@@ -117,3 +117,22 @@ test("runtime: a tool runs with its conversation key and is refused elsewhere", 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("runtime: notes written with data.untrusted come back as OwnerItem.untrusted", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spencer-rt-untrusted-"));
+  const db = new DatabaseSync(join(dir, "core.db"));
+  const rt = await openRuntime(dir, db, []);
+  try {
+    await rt.appendNote(OWNER_KEY, { kind: "spencer.note", data: { text: "from a peer", ts: 1, untrusted: true } });
+    await rt.appendNote(OWNER_KEY, { kind: "spencer.note", data: { text: "ours", ts: 2 } });
+    const items = await rt.transcript(OWNER_KEY, 10);
+    const peer = items.find((i) => i.text === "from a peer")!;
+    const ours = items.find((i) => i.text === "ours")!;
+    assert.equal(peer.untrusted, true);
+    assert.equal(ours.untrusted, undefined);
+  } finally {
+    await rt.close();
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

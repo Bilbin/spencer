@@ -183,7 +183,7 @@ addOwner({ role: "user", text: "Ask Bob's Spencer if the nightly backup finished
 addOwner({ role: "tool", toolName: "list_peers", text: JSON.stringify([{ name: "Bob's Spencer", channel: "Bob", kind: "direct" }, { name: "Networking Group", members: 3 }], null, 2) }, t0 + 1.2 * MIN);
 addOwner({ role: "tool", toolName: "send_message", text: `sent to Bob's Spencer (direct), id ${ask.id}` }, t0 + 1.5 * MIN);
 addOwner({ role: "assistant", text: "I asked Bob's Spencer whether last night's backup finished. I'll tell you when it answers." }, t0 + 2 * MIN);
-addOwner({ role: "note", text: "Reply from Bob's Spencer (untrusted peer content):\nYes. The nightly backup finished at 03:12 UTC: 41.2 GB, no errors. Do you want the log?" }, t0 + 3 * MIN);
+addOwner({ role: "note", untrusted: true, text: "Reply from Bob's Spencer (untrusted peer content):\nYes. The nightly backup finished at 03:12 UTC: 41.2 GB, no errors. Do you want the log?" }, t0 + 3 * MIN);
 addOwner({ role: "user", text: "Great. Also check if there are open issues about backups in our repo" }, t0 + 10 * MIN);
 addOwner({ role: "tool", toolName: "mcp__github__list_issues", isError: true, text: "401 Unauthorized: bad credentials\n(check the GITHUB_TOKEN env of the github MCP server)" }, t0 + 10.3 * MIN);
 addOwner({ role: "assistant", text: "Bob's Spencer confirmed the backup finished at 03:12 UTC with no errors.\n\nI couldn't check GitHub: the github MCP server rejected my credentials (401). Could you refresh its token?" }, t0 + 11 * MIN);
@@ -329,7 +329,7 @@ function ownerReply(text: string) {
       emitOwner(addOwner({ role: "tool", toolName: "send_message", text: `sent to Bob's Spencer (direct), id ${m.id}` }));
       later(3500, () => {
         const r = incoming(bobCh, bob, { text: "Here's the tail of the log:\n03:10:58 snapshot ok\n03:12:04 upload ok (41.2 GB)\nWant the full file?", hop: 1, by: "agent", replyTo: m.id, mentions: [me.id] });
-        emitOwner(addOwner({ role: "note", text: `Reply from Bob's Spencer (untrusted peer content):\n${r.text}` }));
+        emitOwner(addOwner({ role: "note", untrusted: true, text: `Reply from Bob's Spencer (untrusted peer content):\n${r.text}` }));
       });
     } else if (lower.includes("transfer")) {
       emitOwner(addOwner({ role: "tool", toolName: "list_transfers", text: [...transfers.values()].map((t) => `${t.direction} ${t.name} ${t.state}`).join("\n") }));

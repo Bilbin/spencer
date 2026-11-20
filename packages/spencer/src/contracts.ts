@@ -112,6 +112,8 @@ export interface OwnerItem {
   ts: number;
   toolName?: string;
   isError?: boolean;
+  /** The text comes from another person's agent (e.g. a peer's reply to something the owner sent): show it as untrusted. */
+  untrusted?: boolean;
 }
 
 export interface McpServerStatus {
