@@ -69,7 +69,9 @@ sigInput = utf8("spencer/v1/env\n" + v + "\n" + id + "\n" + ch + "\n" + from + "
   connection identity and a member of `ch`. It can never decrypt `ct`.
 - Recipients check `sig`, then decrypt. A failure in either means the message is dropped and logged.
   They ignore their own messages and dedupe by `id`.
-- Max envelope size: 64 KiB serialized. Max `chat.text`: 16,000 chars.
+- Max envelope size: 64 KiB (`MAX_ENVELOPE_BYTES`), measured as the UTF-8 length of `JSON.stringify(env)`.
+  Max WebSocket frame: 128 KiB (`MAX_FRAME_BYTES`), enforced by both ends (`maxPayload`), so a `msg` frame that
+  carries a maximal envelope plus its `seq` always fits. Max `chat.text`: 16,000 chars.
 
 ### 3.1 Bodies (plaintext, inside `ct`)
 
@@ -123,7 +125,7 @@ authenticated within 10 s is closed.
 | `{t:"leave", rid, ch}` | Removes membership. Members get `{t:"member", ch, id, event:"left"}`. |
 | `{t:"members", rid, ch}` | `ok {members:[{id, joinedAt}]}` (members only). |
 | `{t:"send", rid, env}` | Member only, and `env.from` must equal the connection id. Verifies the signature and size. Assigns the next `seq`. **Idempotent on `env.id`**: a duplicate returns the original seq. Reply `ok {id, seq}`. This is the "relay ack" the outbox waits for. Pushes `{t:"msg", seq, env}` to every *other* subscribed member connection. |
-| `{t:"sub", rid, ch, since}` | Member only. First streams `{t:"msg", seq, env}` for every stored message with `seq > since` that the caller didn't send, in order. Then replies `ok {head, first, members}` and the subscription goes live. `first` is the lowest stored seq. If `first > since + 1`, messages were lost to expiry and the client records a gap. |
+| `{t:"sub", rid, ch, since}` | Member only. First streams `{t:"msg", seq, env}` for every stored message with `seq > since` that the caller didn't send, in order. Then replies `ok {head, first, members}` and the subscription goes live. `first` is *not* the lowest stored seq: it is `expiredThrough + 1` when TTL expiry deleted messages after this member joined (`expiredThrough` = highest seq ever deleted by TTL), and `1` otherwise. Messages deleted because every member acked them, or that predate the member's join, never count as lost. If `head > since` and `first > since + 1`, messages `since+1 .. first-1` were lost to expiry and the client records a gap. |
 | `{t:"ack", ch, seq}` | Cumulative ack (no reply). Sets the member cursor to `max(cursor, seq)`. |
 | `{t:"ping", rid}` | `ok {}` |
 
@@ -133,7 +135,7 @@ Error codes: `unauthenticated`, `bad_request`, `not_member`, `no_channel`, `full
 ### 4.3 Retention
 - A message is deleted once every current member's cursor is `>= seq`. The sender counts as having acked its own messages.
 - Messages older than `TTL` (default 14 days) are deleted regardless.
-- Limits: 64 KiB per frame, 10,000 stored messages per channel (`limit`), 200 channel memberships
+- Limits: 128 KiB per WebSocket frame, 64 KiB per envelope (`too_large`), 10,000 stored messages per channel (`limit`), 200 channel memberships
   per identity, and a token bucket of 30 sends/s burst, 10/s sustained per connection.
 - The relay pings every 30 s and drops connections that don't answer.
 
@@ -182,11 +184,13 @@ Terminal: `completed | denied | declined | failed | expired | cancelled`
 3. On `file_accept`: unseal the code → `sending`, with `attempt = 1`. Spawn
    `croc --yes --overwrite --disable-clipboard --relay R --pass P send --no-local <staged file>` with env
    `CROC_SECRET=CODE`. croc v10 refuses `--code` on Linux, so **both sides pass the code only through
-   `CROC_SECRET`**, and it never appears in argv or `ps`. When croc prints the receive instructions (its
-   stdout/stderr contains `CROC_SECRET=`), or about 1.5 s after spawn, enqueue `file_ready {attempt}`.
-   The sender's croc exits 0 after a successful transfer.
+   `CROC_SECRET`**, and it never appears in argv or `ps`. croc prints the receive instructions (its
+   stdout/stderr contains `CROC_SECRET=`) just *before* it joins the relay room, so the sender waits **500 ms after
+   that line** and then enqueues `file_ready {attempt}`. If the line never shows up, it signals ready anyway
+   10 s after spawn. The sender's croc exits 0 after a successful transfer. With `croc.throttleUpload` set
+   (e.g. `"500k"`), senders also get `--throttleUpload <value>`.
 4. On `file_retry {attempt}` matching the current attempt, or croc exiting with an error before the ack:
-   kill croc, `attempt++`, back off, and spawn again with `file_ready {attempt}`. At most 5 attempts → `failed` (+ `file_cancel`).
+   kill croc, `attempt++`, back off, and spawn again with `file_ready {attempt}`. At most `policy.maxTransferAttempts` (default 5) attempts → `failed` (+ `file_cancel`).
 5. On `file_ack ok:true` → `completed`, delete the staged copy. On `ok:false` → `failed`.
 
 ### 6.2 Recipient states
@@ -197,7 +201,8 @@ Terminal: `completed | declined | failed | expired | cancelled`
    `size <= maxIncomingFileBytes`, accept right away. Otherwise wait for the owner in the UI.
 2. **Accept**: generate `CODE = dddd-<32 hex>` (4 random digits, a dash, 16 random bytes in hex).
    Enqueue `file_accept {sealed: seal(K_pair, tid, {code})}` → `accepted`. **Decline** → `file_decline`.
-3. On `file_ready {attempt}` with `attempt >= current`: kill any running receive and spawn
+3. On `file_ready {attempt}` with `attempt > current` (strictly greater: a duplicate or stale `file_ready` for the
+   attempt already running is ignored; the first one, attempt 1, is greater than the initial 0): kill any running receive and spawn
    `croc --yes --overwrite --disable-clipboard --relay R --pass P --out <data>/incoming/<tid>/`
    with env `CROC_SECRET=CODE` → `receiving`.
 4. When croc exits 0: hash the received file. If it matches the offer, move it to
@@ -206,9 +211,13 @@ Terminal: `completed | declined | failed | expired | cancelled`
    If croc exits non-zero, enqueue `file_retry {attempt}` and wait.
 
 ### 6.3 Crash recovery and expiry
-- On startup, the sender in `sending` re-spawns croc with `attempt+1` and enqueues `file_ready`.
+- On startup, before anything resumes, the daemon kills croc processes left over from a previous run that died
+  without stopping them (SIGKILL, crash). The croc runner records the pids of its live children in
+  `<data>/croc.pids`. A pid is killed only if `/proc/<pid>/cmdline` shows a `croc` binary whose cwd or arguments
+  are inside the data dir, so a recycled pid is never hit. Without `/proc`, nothing is killed.
+- Then the sender in `sending` re-spawns croc with `attempt+1` and enqueues `file_ready`.
   The recipient in `receiving` first checks for a completed file with the right hash
-  (→ verify → ack). Otherwise it enqueues `file_retry`.
+  (→ verify → ack). Otherwise it enqueues `file_retry {attempt}` and waits for the sender's next `file_ready`.
 - A sweeper runs every 30 s. Any non-terminal transfer past `expiresAt` → `expired`: kill croc, delete
   staged and partial files, and enqueue `file_cancel` if the peer already knows about the transfer.
 - `file_cancel` from the peer → `cancelled`, with the same cleanup.
@@ -240,8 +249,9 @@ trimmed answer is `NO_REPLY`. A crash between the answer and the enqueue is cove
 
 ### 7.3 Owner notification
 When a peer message replies to a message the owner conversation sent, it is appended to the owner
-conversation as a **write** (it never starts a run), clearly marked as untrusted. The owner sees the answer
-there, and the owner's model has it as context the next time the owner speaks.
+conversation as a **write** (it never starts a run), clearly marked as untrusted: the model sees it wrapped in
+`<peer_message>`, and the transcript item has `untrusted: true` (§8), which the UI uses to style it. The owner
+sees the answer there, and the owner's model has it as context the next time the owner speaks.
 
 ## 8. Local daemon API (127.0.0.1 only)
 
@@ -253,20 +263,23 @@ there, and the owner's model has it as context the next time the owner speaks.
 
 | Method | Path | Body → Response |
 |---|---|---|
-| GET | `/api/state` | → `{me:{id, name, fingerprint}, relay:{url, connected}, channels: Channel[], transfers: Transfer[], mcp: McpServer[], policy}` |
-| GET | `/api/owner/messages?limit=` | → `{items: OwnerItem[]}` (owner conversation transcript, oldest first) |
+| GET | `/api/state` | → `{me:{id, name, fingerprint}, relay:{url, connected}, relays:{url, connected}[], channels: Channel[], transfers: Transfer[], mcp: McpServer[], policy, ownerBusy: boolean}`. `relay` is the default relay from config; `connected` is true when every relay in use is connected. `relays` lists each relay in use (one per distinct channel relay, plus the default). |
+| GET | `/api/owner/messages?limit=` | → `{items: OwnerItem[]}` (owner conversation transcript, oldest first; default 200, max 2000) |
 | POST | `/api/owner/messages` | `{text}` → `{submissionId}` |
-| GET | `/api/channels/:ch/messages?limit=&before=` | → `{items: ChannelMessage[]}` |
+| GET | `/api/channels` | → `{items: Channel[]}` |
+| GET | `/api/channels/:ch` | → `Channel` |
+| GET | `/api/channels/:ch/messages?limit=&before=` | → `{items: ChannelMessage[]}`: chat and hello messages, oldest first, default 100, max 1000. `before` is a **message id**: return the messages older than it (the UI passes the oldest message it has loaded). An unknown id → 404. Without `before`, the channel is marked read. |
 | POST | `/api/channels/:ch/messages` | `{text, mentions?}` → `{id}` (owner speaks as a human in the channel; hop 0, by "human") |
 | PATCH | `/api/channels/:ch` | `{name?, autoReply?, allowedMcpTools?: string[]}` → `Channel` |
 | DELETE | `/api/channels/:ch` | leave the channel → `{}` |
 | POST | `/api/invites` | `{kind:"direct"\|"group", name}` → `{link, channel: Channel}` |
 | POST | `/api/invites/accept` | `{link}` → `{channel: Channel}` |
-| GET | `/api/transfers` | → `{items: Transfer[]}` |
+| GET | `/api/transfers?ch=` | → `{items: Transfer[]}` (optionally only one channel's) |
+| GET | `/api/transfers/:tid` | → `Transfer` |
 | POST | `/api/transfers` | `{ch, path, to?}` → `Transfer` (owner-initiated; `to` is required in groups) |
 | POST | `/api/transfers/:tid/approve` · `/deny` · `/accept` · `/decline` · `/cancel` | → `Transfer` |
 | GET | `/api/mcp` | → `{servers: McpServer[]}` |
-| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", connected}`, `{type:"owner_busy", busy}` |
+| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", url, connected}`, `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}` |
 
 ```ts
 interface Channel { id: string; kind: "direct"|"group"; name: string; relayUrl: string;
@@ -274,13 +287,19 @@ interface Channel { id: string; kind: "direct"|"group"; name: string; relayUrl: 
   autoReply: boolean; allowedMcpTools: string[]; unread: number; lastSeq: number; createdAt: number }
 interface ChannelMessage { id: string; ch: string; from: string; fromName?: string; mine: boolean;
   ts: number; seq?: number; type: string; text?: string; hop?: number; by?: "human"|"agent";
-  replyTo?: string; status: "pending"|"sent"|"received"; note?: string }   // note: e.g. "not addressed", "hop cap", "rate limited"
+  replyTo?: string; mentions?: string[];   // mentions: identity ids
+  status: "pending"|"sent"|"received"|"failed";   // failed: the relay permanently rejected our message (see note); not retried
+  note?: string;   // why an incoming chat got no reply: "not addressed", "hop cap", "rate limited", "auto-reply off"
+  origin?: "human"|"owner-agent"|"agent-reply"|"peer" }
 interface Transfer { tid: string; ch: string; direction: "out"|"in"; peer: string; peerName?: string;
   name: string; size: number; sha256: string; state: string; attempt: number; initiatedBy: "owner"|"peer-agent"|"owner-agent"|"peer";
-  progress?: number; error?: string; path?: string; createdAt: number; updatedAt: number; expiresAt: number }
+  reason?: string;     // free text from whoever initiated it, e.g. the peer agent's justification
+  progress?: number;   // fraction 0–1 while sending/receiving, 1 once completed; absent before croc reports any
+  error?: string; path?: string; createdAt: number; updatedAt: number; expiresAt: number }
 interface OwnerItem { id: string; role: "user"|"assistant"|"tool"|"note"; text: string; ts: number;
-  toolName?: string; isError?: boolean }
-interface McpServer { name: string; transport: "stdio"|"http"; status: "connected"|"error"|"disabled"; error?: string;
+  toolName?: string; isError?: boolean;
+  untrusted?: boolean }   // text written by another person's agent (e.g. a reply to something the owner sent)
+interface McpServer { name: string; transport: "stdio"|"http"; status: "connecting"|"connected"|"error"|"disabled"; error?: string;
   tools: { name: string; description?: string }[] }   // tool name as exposed: mcp__<server>__<tool>
 ```
 
@@ -294,14 +313,18 @@ interface McpServer { name: string; transport: "stdio"|"http"; status: "connecte
   "model": { "provider": "anthropic", "modelId": "claude-sonnet-5-5", "apiKeyEnv": "ANTHROPIC_API_KEY" },
   // or: { "provider": "openai-compatible", "baseUrl": "http://localhost:11434/v1", "modelId": "llama3.1", "apiKeyEnv": "OLLAMA_KEY" }
   // or: { "provider": "fake" }   (deterministic, tests)
-  "croc": { "path": "croc", "relay": null, "pass": null },
+  "croc": { "path": "croc", "relay": null, "pass": null, "throttleUpload": null },   // throttleUpload: e.g. "500k"
   "mcpServers": {
     "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] },
     "remote": { "url": "https://example.com/mcp", "headers": {} }
   },
   "policy": { "maxHops": 4, "repliesPerMinute": 6, "repliesPerHour": 60,
     "autoAcceptIncomingFiles": true, "maxIncomingFileBytes": 536870912,
-    "requireApprovalForOutgoingFiles": true, "ownerCodingTools": true, "transferTtlHours": 24 }
+    "requireApprovalForOutgoingFiles": true, "ownerCodingTools": true, "transferTtlHours": 24,
+    "maxTransferAttempts": 5 }
 }
 ```
 Environment variable overrides: `SPENCER_DATA_DIR`, `SPENCER_PORT`.
+
+The data dir is mode 0700. Secrets and databases in it (`identity.json`, `api-token`, `config.json`,
+`spencer.sqlite`, `pi.sqlite` and their `-wal`/`-shm` files) are mode 0600.
