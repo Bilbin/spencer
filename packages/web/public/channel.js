@@ -1,7 +1,8 @@
 // A channel (direct or group): the bot-to-bot transcript, composer, files and settings.
 import { h, icon, iconButton, richText, shortFp, timeShort, timeFull, autoGrow, avatar, clear, append } from "./dom.js";
 import { api, attempt, toast } from "./api.js";
-import { S, on, setMessages, upsertTransfer, upsertChannel, removeChannel, markRead, peers, channelTitle, allMcpTools } from "./state.js";
+import { S, on, setMessages, upsertTransfer, upsertChannel, removeChannel, markRead, peers, channelTitle, allMcpTools, workingIn } from "./state.js";
+import { markdown } from "./md.js";
 import { viewHeader } from "./common.js";
 import { transferCard } from "./transfers.js";
 import { openModal, field } from "./modal.js";
@@ -93,7 +94,7 @@ function messageRow(c, m, byId, names, myNames) {
       "div.msg-col",
       null,
       head,
-      h(`div.bubble.chat${m.mine ? ".mine" : ""}${by === "agent" ? ".agent" : ""}`, null, quoteFor(c, m, byId), h("div.bubble-text", null, richText(m.text ?? "", names, myNames))),
+      h(`div.bubble.chat${m.mine ? ".mine" : ""}${by === "agent" ? ".agent" : ""}`, null, quoteFor(c, m, byId), h("div.bubble-text.md", null, markdown(m.text ?? "", (s) => richText(s, names, myNames)))),
       note,
     ),
   );
@@ -429,7 +430,8 @@ export function channelView(main, chId) {
   const header = h("div.header-slot");
   const timeline = h("div.transcript", { role: "log", "aria-live": "polite", "aria-label": "Channel messages" });
   const olderBtn = h("button.btn.sm.load-older", { type: "button", hidden: true }, "Load older messages");
-  const scroller = h("div.scroller", null, olderBtn, timeline);
+  const workingBox = h("div.working-list", { role: "status", "aria-live": "polite" });
+  const scroller = h("div.scroller", null, olderBtn, timeline, workingBox);
   const input = h("textarea.composer-input", { rows: "1", placeholder: "Message as yourself (human)…", "aria-label": "Message as yourself", "aria-autocomplete": "list" });
   const completer = mentionCompleter(input, getC);
   const fileBtn = h("button.icon-btn.attach", { type: "button", "aria-label": "Send file", title: "Send file", on: { click: () => getC() && sendFileModal(getC()) } }, icon("paperclip", 18));
@@ -593,9 +595,42 @@ export function channelView(main, chId) {
     if (existing) existing.replaceWith(transferCard(t));
     else renderTimeline();
   };
-  const offs = [on(`channel:${chId}`, onChannel), on(`messages:${chId}`, onMessages), on("transfers", onTransfer)];
+  // "PJalv's Spencer · Using t3code · thread read…" while a Spencer works on a reply (Grok-style).
+  const renderWorking = () => {
+    const c = getC();
+    if (!c) return;
+    keeper.before();
+    const rows = workingIn(chId).map((w) => {
+      const mine = w.from === S.me?.id;
+      const mem = c.members.find((m) => m.id === w.from);
+      const name = mine ? (S.me?.name ?? "Your Spencer") : (mem?.name ?? "A Spencer");
+      return h(
+        `div.working-row${mine ? ".mine" : ""}`,
+        null,
+        mine ? null : avatar(name, w.from, "xs"),
+        h(
+          "div.working-pill",
+          null,
+          h("span.dots", { "aria-hidden": "true" }, h("i"), h("i"), h("i")),
+          h("strong", null, name),
+          h("span.working-activity", null, w.activity),
+        ),
+      );
+    });
+    workingBox.replaceChildren(...rows);
+    keeper.after();
+  };
+  renderWorking();
+  const staleTimer = setInterval(() => workingIn(chId).length && renderWorking(), 15_000);
+  const offs = [
+    on(`channel:${chId}`, onChannel),
+    on(`messages:${chId}`, onMessages),
+    on("transfers", onTransfer),
+    on(`working:${chId}`, renderWorking),
+  ];
   return {
     destroy: () => {
+      clearInterval(staleTimer);
       offs.forEach((f) => f());
       document.removeEventListener("visibilitychange", onVisible);
     },

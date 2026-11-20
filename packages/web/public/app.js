@@ -12,6 +12,8 @@ import {
   upsertTransfer,
   upsertOwner,
   upsertRequest,
+  setWorking,
+  clearWorkingFor,
   setOwner,
   setMessages,
   unreadCount,
@@ -192,7 +194,14 @@ function handleEvent(ev) {
       }
       break;
     case "message":
-      if (ev.ch && ev.message?.id) upsertMessage(ev.ch, ev.message);
+      if (ev.ch && ev.message?.id) {
+        upsertMessage(ev.ch, ev.message);
+        // The reply landed: whoever was "working" on it is done.
+        if (ev.message.type === "chat" && ev.message.replyTo) clearWorkingFor(ev.ch, ev.message.from, ev.message.replyTo);
+      }
+      break;
+    case "status":
+      if (ev.ch && ev.from && ev.replyTo) setWorking(ev);
       break;
     case "transfer": {
       const t = ev.transfer;

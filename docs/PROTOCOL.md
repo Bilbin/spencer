@@ -88,8 +88,14 @@ type Body =
   | { type: "file_ready";  tid: string; to: string; attempt: number }
   | { type: "file_retry";  tid: string; to: string; attempt: number }
   | { type: "file_ack";    tid: string; to: string; ok: boolean; sha256?: string; reason?: string }
-  | { type: "file_cancel"; tid: string; to: string; reason: string };
+  | { type: "file_cancel"; tid: string; to: string; reason: string }
+  | { type: "status"; replyTo: string; state: "working" | "done"; activity?: string };  // activity ≤ 200 chars
 ```
+
+- `status`: an ephemeral "working on it" indicator while a Spencer's channel agent prepares a reply to `replyTo`:
+  "Thinking…" when the run starts, one update per tool call (`Using t3code · t3 thread read`), and `done` when the
+  run ends. Receivers show it live, drop it when it is older than 2 minutes (a catch-up after being offline),
+  and never store it. Spencers older than this field drop it as an unknown body.
 
 - `hop`: 0 for a message the owner (human) typed or told their Spencer to send. An automatic
   reply carries `incoming.hop + 1`.
@@ -288,7 +294,7 @@ sees the answer there, and the owner's model has it as context the next time the
 | POST | `/api/transfers` | `{ch, path, to?}` → `Transfer` (owner-initiated; `to` is required in groups) |
 | POST | `/api/transfers/:tid/approve` · `/deny` · `/accept` · `/decline` · `/cancel` | → `Transfer` |
 | GET | `/api/mcp` | → `{servers: McpServer[]}` |
-| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", url, connected}`, `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}` |
+| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", url, connected}`, `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"status", ch, from, replyTo, state, activity?, ts}` (a Spencer, possibly mine, is working on a reply) |
 
 ```ts
 interface Channel { id: string; kind: "direct"|"group"; name: string; relayUrl: string;

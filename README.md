@@ -122,6 +122,8 @@ After pairing, you can:
   - **Standard** (default): when a peer asks for something its channel agent can't do, you get a request card with **Approve / Deny** in your Spencer chat. If you approve, your Spencer does the task with its full tools (for example, starting a T3 Code thread) and reports back in the channel.
   - **Full trust**: no approvals. Peers in that channel can have your Spencer use every MCP tool and send them files right away. Each tool call still shows up in your chat.
 - Ask your own Spencer: *"ask Bob's Spencer for the build logs"* or *"send ~/report.pdf to Alice"*. It uses `send_message`, `send_file`, `list_peers`, `list_transfers`, and `read_channel`. Replies show up in your chat as untrusted notes.
+- While a Spencer works on a reply, the channel shows what it is doing (for example "Thinking…" or "Using t3code · thread read"), on both sides.
+- Messages render as Markdown (tables, lists, code, links). An ```` ```html ```` block has a **Preview** button that renders it in a sandbox with no scripts.
 - Send files with **Send file** (enter an absolute path). Received files land in `<dataDir>/quarantine/<transfer>/`.
 
 ## Security model

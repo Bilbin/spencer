@@ -3,6 +3,7 @@ import { h, icon, linkify, timeShort, timeFull, autoGrow, selfAvatar } from "./d
 import { api, attempt, toast } from "./api.js";
 import { S, on, setOwner } from "./state.js";
 import { viewHeader } from "./common.js";
+import { markdown } from "./md.js";
 import { scrollKeeper } from "./scroll.js";
 
 const EXAMPLES = ["List my peers", "Ask Bob's Spencer for the logs", "What transfers are waiting for me?", "Create an invite for Carol"];
@@ -17,7 +18,7 @@ function ownerItem(item) {
         "div.msg-row",
         null,
         selfAvatar(),
-        h("div.bubble.assistant", null, h("div.bubble-text", null, linkify(item.text)), h("div.bubble-meta", null, time)),
+        h("div.bubble.assistant", null, h("div.bubble-text.md", null, markdown(item.text, linkify)), h("div.bubble-meta", null, time)),
       );
     case "tool": {
       const details = h(
@@ -54,6 +55,11 @@ function ownerItem(item) {
     default:
       return h("div.system-line", null, item.text);
   }
+}
+
+function toolActivity(tool) {
+  const m = /^mcp__(.+?)__(.+)$/.exec(tool);
+  return m ? `Using ${m[1]} · ${m[2].replace(/_/g, " ")}` : `Using ${tool.replace(/_/g, " ")}`;
 }
 
 // An ask_owner request: the peer's ask (untrusted text) with Approve / Deny.
@@ -153,9 +159,13 @@ export function ownerView(main) {
     }
     keeper.after();
   };
+  const busyText = busy.lastChild;
   const renderBusy = () => {
     keeper.before();
     busy.hidden = !S.ownerBusy;
+    const last = S.owner?.at(-1);
+    busyText.textContent =
+      last?.role === "tool" && last.text.startsWith("call ") ? ` ${toolActivity(last.toolName ?? "a tool")}…` : " Spencer is thinking…";
     keeper.after();
   };
 
@@ -167,7 +177,7 @@ export function ownerView(main) {
     input.focus();
   });
 
-  const offs = [on("owner", render), on("busy", renderBusy)];
+  const offs = [on("owner", () => (render(), renderBusy())), on("busy", renderBusy)];
   return { destroy: () => offs.forEach((f) => f()) };
 }
 

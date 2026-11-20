@@ -175,7 +175,7 @@ export class ApiServer {
   private securityHeaders(): Record<string, string> {
     const p = this._port;
     return {
-      "Content-Security-Policy": `default-src 'self'; connect-src 'self' ws://127.0.0.1:${p} ws://localhost:${p}; img-src 'self' data:; frame-ancestors 'none'`,
+      "Content-Security-Policy": `default-src 'self'; connect-src 'self' ws://127.0.0.1:${p} ws://localhost:${p}; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-src 'self'; frame-ancestors 'none'`,
       "X-Content-Type-Options": "nosniff",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY",

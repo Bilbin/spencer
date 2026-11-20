@@ -39,6 +39,7 @@ export interface StubCore extends CoreServices {
   /** Every sendChat call, duplicates included. */
   sendCalls: number;
   fileRequests: { ch: string; req: TransferRequest }[];
+  statuses: { ch: string; replyTo: string; state: string; activity?: string }[];
   emitted: DaemonEvent[];
   channels: Map<string, Channel>;
   messages: ChannelMessage[];
@@ -79,6 +80,7 @@ export function makeCore(opts: { dir?: string; channels?: Channel[]; config?: Pa
     sent: [],
     sendCalls: 0,
     fileRequests: [],
+    statuses: [],
     emitted: [],
     channels,
     messages: [],
@@ -95,6 +97,9 @@ export function makeCore(opts: { dir?: string; channels?: Channel[]; config?: Pa
       core.sent.push({ ch, id, ...msg });
       core.messages.push({ id, ch, from: ME.id, mine: true, ts: Date.now(), type: "chat", text: msg.text, hop: msg.hop, by: msg.by, status: "pending" });
       return { id };
+    },
+    sendStatus(ch, s) {
+      core.statuses.push({ ch, ...s });
     },
     async requestFileSend(ch, req) {
       core.fileRequests.push({ ch, req });

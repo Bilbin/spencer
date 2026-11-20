@@ -10,6 +10,7 @@ export const S = {
   transfers: new Map(), // tid -> Transfer
   mcp: [], // McpServerStatus[]
   requests: new Map(), // id -> OwnerRequest (ask_owner approvals)
+  working: new Map(), // ch -> Map(memberId -> {replyTo, activity, ts}): a Spencer is working on a reply
   messages: new Map(), // ch -> ChannelMessage[] (only for channels that were opened)
   owner: null, // OwnerItem[] once loaded
   ownerBusy: false,
@@ -225,4 +226,35 @@ export function allMcpTools() {
   const out = [];
   for (const s of S.mcp) for (const t of s.tools ?? []) out.push({ server: s.name, ...t });
   return out;
+}
+
+// ---------------------------------------------------------------- working status
+
+const WORKING_STALE_MS = 150_000;
+
+/** A status event (from a peer's Spencer or mine). "done" or a reply to the same message clears it. */
+export function setWorking(ev) {
+  let m = S.working.get(ev.ch);
+  if (!m) S.working.set(ev.ch, (m = new Map()));
+  if (ev.state === "done") m.delete(ev.from);
+  else m.set(ev.from, { replyTo: ev.replyTo, activity: ev.activity || "Working…", ts: Date.now() });
+  emit(`working:${ev.ch}`);
+}
+
+export function clearWorkingFor(ch, from, replyTo) {
+  const m = S.working.get(ch);
+  const w = m?.get(from);
+  if (w && (!replyTo || w.replyTo === replyTo)) {
+    m.delete(from);
+    emit(`working:${ch}`);
+  }
+}
+
+/** Live working entries of a channel (stale ones dropped: a Spencer that went offline mid-run). */
+export function workingIn(ch) {
+  const m = S.working.get(ch);
+  if (!m) return [];
+  const now = Date.now();
+  for (const [k, v] of m) if (now - v.ts > WORKING_STALE_MS) m.delete(k);
+  return [...m].map(([from, v]) => ({ from, ...v }));
 }

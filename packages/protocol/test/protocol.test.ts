@@ -158,6 +158,20 @@ test("parseBody validates every type", () => {
   // extra fields are stripped
   assert.deepEqual(parseBody({ type: "hello", name: "B", agent: "a", evil: 1 }), { type: "hello", name: "B", agent: "a" });
 });
+test("parseBody: status bodies", () => {
+  const id = "A".repeat(22);
+  assert.deepEqual(parseBody({ type: "status", replyTo: id, state: "working", activity: "Thinking…" }), {
+    type: "status",
+    replyTo: id,
+    state: "working",
+    activity: "Thinking…",
+  });
+  assert.deepEqual(parseBody({ type: "status", replyTo: id, state: "done" }), { type: "status", replyTo: id, state: "done" });
+  assert.equal(parseBody({ type: "status", replyTo: id, state: "sleeping" }), null);
+  assert.equal(parseBody({ type: "status", replyTo: "bad id!", state: "done" }), null);
+  assert.equal(parseBody({ type: "status", replyTo: id, state: "working", activity: "x".repeat(201) }), null);
+});
+
 
 test("sanitizeFileName", () => {
   assert.equal(sanitizeFileName("../../etc/passwd"), "__.._etc_passwd");

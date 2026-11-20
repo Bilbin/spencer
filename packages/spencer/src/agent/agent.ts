@@ -72,6 +72,9 @@ export class SpencerAgent implements AgentService {
   private channelSpecs: ToolSpec[] = [];
   private configured = new Set<string>();
   private audited = new Map<string, { inner: ToolSpec; spec: ToolSpec }>();
+  /** Per channel: the stop function of its conversation watch, and the messages a run is answering now. */
+  private chWatches = new Map<string, Promise<() => Promise<void>>>();
+  private working = new Map<string, { ids: string[]; activity: string }>();
   private inflight = new Map<string, Promise<void>>();
   private routing = new Map<string, Promise<{ note?: string }>>();
   private ownerWaits = new Set<Promise<void>>();
@@ -169,6 +172,7 @@ export class SpencerAgent implements AgentService {
     if (!this.started || this.stopping) return;
     this.stopping = true;
     await this.stopWatch?.().catch(() => {});
+    for (const w of this.chWatches.values()) await w.then((stop) => stop()).catch(() => {});
     // Closing the runtime cancels every pending wait, so the background tasks below settle.
     await this.runtime?.close().catch((e) => this.log(`runtime close failed: ${(e as Error).message}`));
     await Promise.allSettled([...this.inflight.values(), ...this.ownerWaits]);
@@ -243,12 +247,70 @@ export class SpencerAgent implements AgentService {
     const mcpTools = this.mcpTools().filter((t) => ch.trust === "full" || allowed.has(t.name));
     const key = channelKey(ch.id);
     await this.rt().ensureConversation(key);
+    this.watchChannel(ch.id);
     await this.rt().configure(key, {
       tools: [...this.channelSpecs, ...mcpTools],
       instructions: this.channelInstructions(ch, mcpTools.map((t) => t.name)),
       ...this.thinking(),
     });
     this.configured.add(key);
+  }
+
+  // ---------------------------------------------------------------- working status (Thinking… / Using …)
+
+  private watchChannel(chId: string): void {
+    if (this.chWatches.has(chId) || this.stopping || !this.core.sendStatus) return;
+    const w = this.rt().watch(channelKey(chId), {
+      onBusy: (busy) => void this.onChannelBusy(chId, busy).catch((e) => this.log(`status ${chId}: ${(e as Error).message}`)),
+      onItems: (items) => this.onChannelItems(chId, items),
+    });
+    w.catch((e) => this.log(`watch ${chId}: ${(e as Error).message}`));
+    this.chWatches.set(chId, w);
+  }
+
+  /** The peer messages the channel's current run answers (falls back to its pending replies). */
+  private async answering(chId: string): Promise<string[]> {
+    const { db } = this.core;
+    const sids = await this.rt().runningInputs(channelKey(chId)).catch(() => [] as string[]);
+    const ids: string[] = [];
+    for (const sid of sids) {
+      const row = db.prepare("SELECT msg_id FROM agent_pending_replies WHERE ch = ? AND submission_id = ?").get(chId, sid) as
+        | { msg_id: string }
+        | undefined;
+      if (row) ids.push(row.msg_id);
+    }
+    if (ids.length) return ids;
+    const rows = db.prepare("SELECT msg_id FROM agent_pending_replies WHERE ch = ? AND state = 'pending' ORDER BY created_at").all(chId) as {
+      msg_id: string;
+    }[];
+    return rows.map((r) => r.msg_id);
+  }
+
+  private async onChannelBusy(chId: string, busy: boolean): Promise<void> {
+    if (this.stopping) return;
+    if (busy) {
+      const ids = await this.answering(chId);
+      if (!ids.length || this.stopping) return;
+      this.working.set(chId, { ids, activity: "Thinking…" });
+      for (const id of ids) this.core.sendStatus?.(chId, { replyTo: id, state: "working", activity: "Thinking…" });
+      return;
+    }
+    const w = this.working.get(chId);
+    this.working.delete(chId);
+    for (const id of w?.ids ?? []) this.core.sendStatus?.(chId, { replyTo: id, state: "done" });
+  }
+
+  private onChannelItems(chId: string, items: OwnerItem[]): void {
+    const w = this.working.get(chId);
+    if (!w || this.stopping) return;
+    let activity: string | undefined;
+    for (const item of items) {
+      if (item.role !== "tool" || !item.toolName) continue;
+      activity = item.text.startsWith("call ") ? activityFor(item.toolName) : "Thinking…";
+    }
+    if (!activity || activity === w.activity) return;
+    w.activity = activity;
+    for (const id of w.ids) this.core.sendStatus?.(chId, { replyTo: id, state: "working", activity });
   }
 
   private thinking(): { thinkingLevel?: string } {
@@ -699,4 +761,19 @@ export class SpencerAgent implements AgentService {
   async idle(): Promise<void> {
     while (this.inflight.size || this.ownerWaits.size) await Promise.allSettled([...this.inflight.values(), ...this.ownerWaits]);
   }
+}
+
+/** What a peer sees while my channel agent runs a tool. */
+export function activityFor(tool: string): string {
+  switch (tool) {
+    case "notify_owner":
+      return "Leaving a note for its owner";
+    case "ask_owner":
+      return "Asking its owner for approval";
+    case "propose_file_send":
+      return "Preparing a file";
+  }
+  const m = /^mcp__(.+?)__(.+)$/.exec(tool);
+  if (m) return `Using ${m[1]} · ${m[2]!.replace(/_/g, " ")}`;
+  return `Using ${tool.replace(/_/g, " ")}`;
 }

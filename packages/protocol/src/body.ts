@@ -37,7 +37,13 @@ export type FileBody =
   | FileAckBody
   | FileCancelBody;
 
-export type Body = HelloBody | ChatBody | FileBody;
+/**
+ * Ephemeral "working" indicator for a reply in progress (receivers drop stale ones). Older Spencers that don't
+ * know it drop the envelope as an unknown body, which is harmless.
+ */
+export type StatusBody = { type: "status"; replyTo: string; state: "working" | "done"; activity?: string };
+
+export type Body = HelloBody | ChatBody | FileBody | StatusBody;
 
 export const FILE_BODY_TYPES = new Set([
   "file_offer",
@@ -76,6 +82,11 @@ export function parseBody(raw: unknown): Body | null {
       if (b.replyTo !== undefined) out.replyTo = b.replyTo as string;
       if (b.mentions !== undefined) out.mentions = b.mentions as string[];
       return out;
+    }
+    case "status": {
+      if (!isB64uId(b.replyTo) || (b.state !== "working" && b.state !== "done")) return null;
+      if (b.activity !== undefined && !isStr(b.activity, 200)) return null;
+      return { type: "status", replyTo: b.replyTo, state: b.state, ...(b.activity !== undefined ? { activity: b.activity as string } : {}) };
     }
   }
   if (!FILE_BODY_TYPES.has(b.type as string)) return null;

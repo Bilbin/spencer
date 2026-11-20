@@ -8,6 +8,7 @@ import {
   pairKey,
   type Body,
   type ChatBody,
+  type StatusBody,
   type CrocInfo,
   type Identity,
   type ServerFrame,
@@ -31,6 +32,9 @@ import { Outbox } from "./net/outbox.ts";
 import { Inbox, type StoredMessage } from "./net/inbox.ts";
 import { ChannelManager, UserError } from "./channels.ts";
 import { ApiServer } from "./api/http.ts";
+
+/** Incoming working-status updates older than this are a catch-up after being offline: dropped. */
+const STATUS_MAX_AGE_MS = 120_000;
 
 export interface DaemonTuning {
   relay?: Partial<RelayTuning>;
@@ -382,6 +386,21 @@ export class Daemon {
       case "chat":
         await this.routeChat(msg, body);
         return;
+      case "status":
+        // Ephemeral: show it if it is fresh (not a catch-up after being offline), then forget it.
+        if (Date.now() - msg.ts < STATUS_MAX_AGE_MS) {
+          this.events.emit({
+            type: "status",
+            ch: msg.ch,
+            from: msg.from_id,
+            replyTo: body.replyTo,
+            state: body.state,
+            ...(body.activity ? { activity: body.activity } : {}),
+            ts: msg.ts,
+          });
+        }
+        this.need("sql").run("DELETE FROM messages WHERE id = ?", msg.id);
+        return;
       default:
         if (body.to === this.need("me").id) await this.need("transfers").onBody(msg.ch, msg.from_id, body);
     }
@@ -470,6 +489,17 @@ export class Daemon {
         return { id: res.id };
       },
       requestFileSend: (ch, req) => this.need("transfers").request(ch, req),
+      sendStatus(ch, s) {
+        try {
+          if (!channels.row(ch) || !isB64uId(s.replyTo)) return;
+          const activity = s.activity?.slice(0, 200);
+          const body: StatusBody = { type: "status", replyTo: s.replyTo, state: s.state, ...(activity ? { activity } : {}) };
+          outbox.enqueue(ch, body);
+          daemon.events.emit({ type: "status", ch, from: daemon.identity.id, replyTo: s.replyTo, state: s.state, ...(activity ? { activity } : {}), ts: Date.now() });
+        } catch (e) {
+          log(`status for ${ch}: ${(e as Error).message}`);
+        }
+      },
       listTransfers: (ch) => this.need("transfers").list(ch),
       createInvite: (kind, name) => channels.createInvite(kind, name),
       events: this.events,

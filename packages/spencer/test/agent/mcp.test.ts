@@ -135,3 +135,26 @@ test("agent: a full-trust channel gets every MCP tool; calls leave an audit note
     core.cleanup();
   }
 });
+
+test("agent: working status while answering a peer (Thinking… → Using <tool> → done)", async () => {
+  const { activityFor } = await import("../../src/agent/agent.ts");
+  assert.equal(activityFor("mcp__t3code__t3_thread_read"), "Using t3code · t3 thread read");
+  assert.equal(activityFor("ask_owner"), "Asking its owner for approval");
+  const core = makeCore({ channels: [channel("chFull", "direct", "Trusted", { trust: "full" })], config: { mcpServers: { echo: ECHO } } });
+  const agent = new SpencerAgent(core, { log: () => {} });
+  await agent.start();
+  try {
+    await agent.mcpSettled();
+    const msg = peerChat(core.getChannel("chFull")!, 'please call mcp__echo__echo {"text":"x"}');
+    await agent.onPeerChat(msg);
+    await agent.idle();
+    await waitFor(() => core.statuses.some((s) => s.state === "done"), "done status");
+    const seen = core.statuses.filter((s) => s.replyTo === msg.id).map((s) => (s.state === "done" ? "done" : s.activity));
+    assert.equal(seen[0], "Thinking…");
+    assert.ok(seen.includes("Using echo · echo"), JSON.stringify(seen));
+    assert.equal(seen.at(-1), "done");
+  } finally {
+    await agent.stop();
+    core.cleanup();
+  }
+});

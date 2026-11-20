@@ -159,6 +159,8 @@ export type DaemonEvent =
   | { type: "owner"; item: OwnerItem }
   | { type: "owner_busy"; busy: boolean }
   | { type: "request"; request: OwnerRequest }
+  /** A member's Spencer is working on a reply (`from` may be me). Ephemeral: not stored for the UI. */
+  | { type: "status"; ch: string; from: string; replyTo: string; state: "working" | "done"; activity?: string; ts: number }
   | { type: "relay"; url: string; connected: boolean }
   | { type: "mcp"; servers: McpServerStatus[] };
 
@@ -278,6 +280,8 @@ export interface CoreServices {
     },
   ): { id: string };
   requestFileSend(ch: string, req: TransferRequest): Promise<Transfer>;
+  /** Tell the channel (and the local UI) that my agent is working on a reply to `replyTo`. Best effort. */
+  sendStatus?(ch: string, s: { replyTo: string; state: "working" | "done"; activity?: string }): void;
   listTransfers(ch?: string): Transfer[];
   createInvite(kind: "direct" | "group", name: string): Promise<{ link: string; channel: Channel }>;
   events: EventSink;

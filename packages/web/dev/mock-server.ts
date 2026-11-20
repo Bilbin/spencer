@@ -538,7 +538,7 @@ function send(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
-const CSP = `default-src 'self'; connect-src 'self' ws://127.0.0.1:${PORT} ws://localhost:${PORT}; img-src 'self' data:`;
+const CSP = `default-src 'self'; connect-src 'self' ws://127.0.0.1:${PORT} ws://localhost:${PORT}; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-src 'self'`;
 
 const server = createServer(async (req, res) => {
   if (!hostOk(req)) {
