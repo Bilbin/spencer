@@ -58,7 +58,7 @@ export function channel(id: string, kind: "direct" | "group", name: string, extr
     kind,
     name,
     relayUrl: "ws://127.0.0.1:1/ws",
-    members: [{ ...ME, me: true }, ...peers.map((p) => ({ ...p, me: false }))],
+    members: [{ ...ME, me: true, presence: "online" as const }, ...peers.map((p) => ({ ...p, me: false, presence: "online" as const }))],
     autoReply: true,
     allowedMcpTools: [],
     trust: "standard",

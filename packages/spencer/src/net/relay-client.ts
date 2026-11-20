@@ -58,9 +58,26 @@ export const DEFAULT_RELAY_TUNING: RelayTuning = {
   probeTimeoutMs: 5_000,
 };
 
+/** What the API shows about one relay connection (PROTOCOL §8, `RelayStatus`). */
+export interface RelayStatus {
+  url: string;
+  connected: boolean;
+  /** connected: authenticated; connecting: a connection attempt is under way; waiting: in backoff until `retryAt`. */
+  state: "connected" | "connecting" | "waiting";
+  /** When `state` last changed (ms). */
+  since: number;
+  lastConnectedAt?: number;
+  retryAt?: number;
+  lastError?: string;
+  /** Optional relay features from `welcome` (e.g. "presence", "ephemeral"); [] for older relays. */
+  features: string[];
+}
+
 export interface ConnectionHandlers {
   /** Authenticated (welcome received). */
   onReady(conn: RelayConnection): void;
+  /** `status()` changed (optional). */
+  onState?(conn: RelayConnection): void;
   /** Was ready, now disconnected. */
   onDown(conn: RelayConnection): void;
   /** Unsolicited frames: msg, member, err without rid. */
@@ -81,8 +98,15 @@ export class RelayConnection {
   /** Challenge nonce of the current connection (needed for join/create proofs). */
   nonce: string | undefined;
   croc: CrocInfo | undefined;
+  /** Features the relay announced in its last `welcome`. */
+  features: string[] = [];
 
   private state: ConnState = "idle";
+  private phase: RelayStatus["state"] = "connecting";
+  private since = Date.now();
+  private lastConnectedAt: number | undefined;
+  private retryAt: number | undefined;
+  private lastError: string | undefined;
   private ws: WebSocket | undefined;
   private identity: Identity;
   private handlers: ConnectionHandlers;
@@ -109,6 +133,27 @@ export class RelayConnection {
     return this.state === "ready";
   }
 
+  status(): RelayStatus {
+    return {
+      url: this.url,
+      connected: this.state === "ready",
+      state: this.phase,
+      since: this.since,
+      ...(this.lastConnectedAt !== undefined ? { lastConnectedAt: this.lastConnectedAt } : {}),
+      ...(this.phase === "waiting" && this.retryAt !== undefined ? { retryAt: this.retryAt } : {}),
+      ...(this.lastError ? { lastError: this.lastError } : {}),
+      features: [...this.features],
+    };
+  }
+
+  private setPhase(phase: RelayStatus["state"]): void {
+    if (this.state === "closed") return;
+    const changed = phase !== this.phase;
+    this.phase = phase;
+    if (changed) this.since = Date.now();
+    this.handlers.onState?.(this);
+  }
+
   start(): void {
     if (this.state !== "idle") return;
     this.connect();
@@ -118,6 +163,7 @@ export class RelayConnection {
     if (this.state === "closed") return;
     this.state = "connecting";
     this.nonce = undefined;
+    this.setPhase("connecting");
     let ws: WebSocket;
     try {
       ws = new WebSocket(this.url, { maxPayload: MAX_FRAME_BYTES, handshakeTimeout: this.tuning.handshakeTimeoutMs });
@@ -144,6 +190,7 @@ export class RelayConnection {
       this.onFrame(ws, frame);
     });
     ws.on("error", (e) => {
+      if (this.ws === ws) this.lastError = e.message;
       // Log the first failure of a streak and then every 10th, not every backoff cycle.
       if (this.ws === ws && this.failures % 10 === 0) this.log(`relay ${this.url}: ${e.message}`);
     });
@@ -169,8 +216,12 @@ export class RelayConnection {
         }
         clearTimeout(this.handshakeTimer);
         if (f.croc) this.croc = f.croc;
+        this.features = Array.isArray(f.features) ? f.features.filter((x): x is string => typeof x === "string").slice(0, 32) : [];
         this.state = "ready";
         this.failures = 0;
+        this.lastConnectedAt = Date.now();
+        this.lastError = undefined;
+        this.setPhase("connected");
         this.startPing();
         for (const w of this.readyWaiters) {
           clearTimeout(w.timer);
@@ -220,7 +271,9 @@ export class RelayConnection {
     const base = Math.min(this.tuning.maxBackoffMs, this.tuning.minBackoffMs * 2 ** this.failures);
     this.failures++;
     const delay = Math.round(base / 2 + (Math.random() * base) / 2);
+    this.retryAt = Date.now() + delay;
     this.reconnectTimer = setTimeout(() => this.connect(), delay);
+    this.setPhase("waiting");
   }
 
   /**
@@ -355,6 +408,7 @@ export class RelayConnection {
 
 export interface PoolHandlers {
   onReady(conn: RelayConnection): void;
+  onState?(conn: RelayConnection): void;
   onDown(conn: RelayConnection): void;
   onFrame(conn: RelayConnection, frame: ServerFrame): void;
 }
@@ -401,6 +455,10 @@ export class RelayPool {
       c.start();
     }
     return c;
+  }
+
+  status(url: string): RelayStatus | undefined {
+    return this.conns.get(url)?.status();
   }
 
   peek(url: string): RelayConnection | undefined {

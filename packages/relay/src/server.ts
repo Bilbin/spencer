@@ -31,6 +31,8 @@ export interface RelayOptions {
   crocPass?: string;
   now?: () => number;
   log?: (msg: string) => void;
+  /** Optional protocol features, all on by default (tests turn them off to act like an older relay). */
+  features?: { presence?: boolean; ephemeral?: boolean };
 }
 
 export interface RelayHandle {
@@ -116,6 +118,9 @@ export async function startRelay(opts: RelayOptions): Promise<RelayHandle> {
   const now = opts.now ?? Date.now;
   const log = opts.log ?? (() => {});
   const croc: CrocInfo | undefined = opts.crocRelay ? { relay: opts.crocRelay, pass: opts.crocPass ?? "" } : undefined;
+  const presenceOn = opts.features?.presence !== false;
+  const ephemeralOn = opts.features?.ephemeral !== false;
+  const features = [...(presenceOn ? ["presence"] : []), ...(ephemeralOn ? ["ephemeral"] : [])];
 
   const db = new RelayDb(opts.dbPath);
   const conns = new Set<Conn>();
@@ -158,6 +163,26 @@ export async function startRelay(opts: RelayOptions): Promise<RelayHandle> {
       if (m.id === exceptId) continue;
       for (const c of byId.get(m.id) ?? []) sendRaw(c, data);
     }
+  };
+
+  // ---------- presence (PROTOCOL §4.6) ----------
+
+  const isOnline = (id: string) => (byId.get(id)?.size ?? 0) > 0;
+
+  /** The member list, with `online` and `lastSeen` when presence is on (older clients ignore the extra fields). */
+  const memberList = (ch: string) => {
+    const list = db.members(ch);
+    if (!presenceOn) return list;
+    return list.map((m) => {
+      const lastSeen = db.lastSeen(m.id);
+      return { ...m, online: isOnline(m.id), ...(lastSeen !== undefined ? { lastSeen } : {}) };
+    });
+  };
+
+  /** Tell `id`'s co-members in every channel that it came online or went offline. */
+  const announcePresence = (id: string, online: boolean, at: number) => {
+    if (!presenceOn) return;
+    for (const ch of db.channelsOf(id)) pushToMembers(ch, id, JSON.stringify({ t: "presence", ch, id, online, lastSeen: at }));
   };
 
   const expireNow = () => {
@@ -208,7 +233,7 @@ export async function startRelay(opts: RelayOptions): Promise<RelayHandle> {
       log(`create ch=${short(ch)} kind=${kind} id=${short(id)}`);
     }
     const chan = db.getChannel(ch)!;
-    ok(c, rid, { head: chan.head, members: db.members(ch), ...(croc ? { croc } : {}) });
+    ok(c, rid, { head: chan.head, members: memberList(ch), ...(croc ? { croc } : {}) });
   }
 
   function handleJoin(c: Conn, id: string, rid: string, f: Record<string, unknown>) {
@@ -226,7 +251,7 @@ export async function startRelay(opts: RelayOptions): Promise<RelayHandle> {
       joined = true;
       log(`join ch=${short(ch)} id=${short(id)}`);
     }
-    const members = db.members(ch);
+    const members = memberList(ch);
     ok(c, rid, {
       kind: chan.kind,
       maxMembers: chan.maxMembers,
@@ -251,7 +276,7 @@ export async function startRelay(opts: RelayOptions): Promise<RelayHandle> {
   function handleMembers(c: Conn, id: string, rid: string, f: Record<string, unknown>) {
     const ch = chId(f.ch);
     requireMember(ch, id);
-    ok(c, rid, { members: db.members(ch) });
+    ok(c, rid, { members: memberList(ch) });
   }
 
   function handleSend(c: Conn, id: string, rid: string, f: Record<string, unknown>) {
@@ -265,6 +290,14 @@ export async function startRelay(opts: RelayOptions): Promise<RelayHandle> {
     requireMember(env.ch, id);
     if (envelopeSize(env) > MAX_ENVELOPE_BYTES) fail("too_large", "envelope exceeds 64 KiB");
     if (!verifyEnvelope(env)) fail("bad_sig", "bad envelope signature");
+
+    if (f.ephemeral === true && ephemeralOn) {
+      // Not stored, no seq, no dedupe: pushed once to the members subscribed right now (PROTOCOL §4.7).
+      ok(c, rid, { id: env.id });
+      const frame = `{"t":"eph","ch":${JSON.stringify(env.ch)},"env":${JSON.stringify(env)}}`;
+      for (const s of subsByCh.get(env.ch) ?? []) if (s.id !== id) sendRaw(s, frame);
+      return;
+    }
 
     const dup = db.getSeen(env.ch, env.id);
     if (dup) {
@@ -329,7 +362,7 @@ export async function startRelay(opts: RelayOptions): Promise<RelayHandle> {
     // Messages removed because everyone acked them, or that predate this member's join, never
     // count as lost (see the report / PROTOCOL note on `first`).
     const first = chan.expiredThrough > member.joinSeq ? chan.expiredThrough + 1 : 1;
-    ok(c, rid, { head: chan.head, first, members: db.members(ch) });
+    ok(c, rid, { head: chan.head, first, members: memberList(ch) });
     subscribe(c, ch);
   }
 
@@ -360,10 +393,16 @@ export async function startRelay(opts: RelayOptions): Promise<RelayHandle> {
     c.authTimer = null;
     let set = byId.get(id);
     if (!set) byId.set(id, (set = new Set()));
+    const cameOnline = set.size === 0;
     set.add(c);
-    const welcome: Record<string, unknown> = { t: "welcome", id };
+    const welcome: Record<string, unknown> = { t: "welcome", id, features };
     if (croc && db.hasAnyMembership(id)) welcome.croc = croc;
     sendFrame(c, welcome);
+    if (presenceOn) {
+      const t = now();
+      db.setLastSeen(id, t);
+      if (cameOnline) announcePresence(id, true, t);
+    }
     log(`auth id=${short(id)} conns=${conns.size}`);
   }
 
@@ -457,7 +496,18 @@ export async function startRelay(opts: RelayOptions): Promise<RelayHandle> {
       if (c.id) {
         const set = byId.get(c.id);
         set?.delete(c);
-        if (set && set.size === 0) byId.delete(c.id);
+        if (set && set.size === 0) {
+          byId.delete(c.id);
+          if (presenceOn && !closing) {
+            const t = now();
+            try {
+              db.setLastSeen(c.id, t);
+              announcePresence(c.id, false, t);
+            } catch (e) {
+              log(`presence: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+        }
       }
     });
     sendFrame(c, { t: "challenge", nonce: c.nonce, server: RELAY_SERVER_NAME });

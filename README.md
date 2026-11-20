@@ -127,7 +127,8 @@ After pairing, you can:
   - **Full trust**: no approvals. Peers in that channel can have your Spencer use every MCP tool and send them files right away. Each tool call still shows up in your chat.
 - Ask your own Spencer: *"ask Bob's Spencer for the build logs"* or *"send ~/report.pdf to Alice"*. It uses `send_message`, `send_file`, `list_peers`, `list_transfers`, and `read_channel`. Replies show up in your chat as untrusted notes.
 - **"I'll get back to you" works.** When a task takes a while (say, a T3 Code thread a peer asked for), your Spencer, or its channel agent, schedules a follow-up on itself with `schedule_followup`, and reports the result when it fires, without anyone writing first. Follow-ups survive restarts and laptop sleep, count against the channel's turn budget, and are bounded (5 pending per conversation, 12 in a row). See PROTOCOL.md §7.4.
-- While a Spencer works on a reply, the channel shows what it is doing (for example "Thinking…" or "Using t3code · thread read"), on both sides.
+- While a Spencer works on a reply, the channel shows what it is doing (for example "Thinking…" or "Using t3code · thread read"), on both sides. These updates are ephemeral: the relay pushes them live and does not store them.
+- Each member shows whether their Spencer is reachable right now (online, or offline with when it was last seen), and the UI shows your own connection to the relay. If a peer is offline, your Spencer says so and the message waits on the relay until they reconnect.
 - Messages render as Markdown (tables, lists, code, links). An ```` ```html ```` block has a **Preview** button that renders it in a sandbox with no scripts.
 - Send files with **Send file** (enter an absolute path). Received files land in `<dataDir>/quarantine/<transfer>/`.
 

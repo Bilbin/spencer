@@ -522,3 +522,72 @@ test("sub: large backlog streams across pages in order (backpressure path)", asy
   );
   for (const s of senders) s.close();
 });
+
+test("presence: welcome lists features; members carry online/lastSeen; co-members get presence frames", async () => {
+  let t = 1_000_000;
+  const r = await relay({ now: () => t });
+  const a = await Client.connect(r.url);
+  assert.deepEqual(a.welcome!.features, ["presence", "ephemeral"]);
+  const { chan } = await create(a);
+  const b = await Client.connect(r.url);
+  const joined = await join_(b, chan);
+  const byId = (list: Frame[]) => Object.fromEntries(list.map((m) => [m.id, m]));
+  assert.equal(byId(joined.members)[a.id].online, true);
+  assert.equal(byId(joined.members)[a.id].lastSeen, 1_000_000);
+  await sync(a);
+  a.take(() => true);
+
+  // b disconnects: a hears it, with the time.
+  t = 2_000_000;
+  b.close();
+  const off = await a.next((f) => f.t === "presence");
+  assert.deepEqual(off, { t: "presence", ch: chan.ch, id: b.id, online: false, lastSeen: 2_000_000 });
+  const sub = await a.req({ t: "sub", ch: chan.ch, since: 0 });
+  assert.equal(byId(sub.members)[b.id].online, false);
+  assert.equal(byId(sub.members)[b.id].lastSeen, 2_000_000);
+  const members = await a.req({ t: "members", ch: chan.ch });
+  assert.equal(byId(members.members)[a.id].online, true);
+
+  // b comes back; a second connection of b's does not announce again, and closing one of two does not go offline.
+  t = 3_000_000;
+  const b2 = await Client.connect(r.url, b.identity);
+  assert.deepEqual(await a.next((f) => f.t === "presence"), { t: "presence", ch: chan.ch, id: b.id, online: true, lastSeen: 3_000_000 });
+  const b3 = await Client.connect(r.url, b.identity);
+  b3.close();
+  await b3.closed;
+  await sync(a);
+  await sync(b2);
+  assert.deepEqual(a.take((f) => f.t === "presence"), []);
+});
+
+test("ephemeral sends: pushed live as `eph`, never stored or redelivered; an older relay (feature off) just stores them", async () => {
+  const r = await relay();
+  const a = await Client.connect(r.url);
+  const { chan } = await create(a);
+  const b = await Client.connect(r.url);
+  await join_(b, chan);
+  assert.equal((await b.req({ t: "sub", ch: chan.ch, since: 0 })).t, "ok");
+  const e = env(a, chan, "working…");
+  const ok = await a.req({ t: "send", env: e, ephemeral: true });
+  assert.equal(ok.t, "ok");
+  assert.equal(ok.id, e.id);
+  assert.equal(ok.seq, undefined);
+  const got = await b.next((f) => f.t === "eph");
+  assert.deepEqual(got, { t: "eph", ch: chan.ch, env: e });
+  assert.equal(countMessages(r.dbPath, chan.ch), 0, "not stored");
+  // Same checks as a normal send: a forged sender is refused.
+  const forged = { ...env(b, chan), from: a.id };
+  assert.equal((await b.req({ t: "send", env: forged, ephemeral: true })).code, "bad_sig");
+
+  const old = await relay({ features: { presence: false, ephemeral: false } });
+  const oa = await Client.connect(old.url);
+  assert.deepEqual(oa.welcome!.features, []);
+  const { chan: oc } = await create(oa);
+  const ob = await Client.connect(old.url);
+  const oj = await join_(ob, oc);
+  assert.equal(oj.members[0].online, undefined, "no presence fields");
+  const oe = env(oa, oc, "working…");
+  const stored = await oa.req({ t: "send", env: oe, ephemeral: true });
+  assert.equal(stored.seq, 1, "stored like any message");
+  assert.equal(countMessages(old.dbPath, oc.ch), 1);
+});

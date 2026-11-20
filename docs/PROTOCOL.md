@@ -97,6 +97,9 @@ type Body =
   "Thinking…" when the run starts, one update per tool call (`Using t3code · t3 thread read`), and `done` when the
   run ends. Receivers show it live, drop it when it is older than 2 minutes (a catch-up after being offline),
   and never store it. Spencers older than this field drop it as an unknown body.
+  It is sent **ephemeral** (§4.7): not through the durable outbox, and only while connected. A relay with the
+  "ephemeral" feature pushes it to online members without storing it; an older relay stores it like any message, and
+  receivers drop it once stale.
 
 - `hop`: 0 for a message the owner (human) typed or told their Spencer to send. An automatic
   reply carries `incoming.hop + 1`.
@@ -121,9 +124,10 @@ All frames are JSON text. Requests carry `rid` (a client-chosen string). Replies
 ### 4.1 Handshake
 1. Relay → `{t:"challenge", nonce, server:"spencer-relay/1"}` (nonce: 32 random bytes b64u)
 2. Client → `{t:"auth", id, sig}`, where `sig = Ed25519(I, utf8("spencer/v1/relay-auth:" + nonce))`
-3. Relay → `{t:"welcome", id, croc?: {relay:"host:port", pass}}`. `croc` is present only if
+3. Relay → `{t:"welcome", id, croc?: {relay:"host:port", pass}, features?: string[]}`. `croc` is present only if
    `id` is a member of at least one channel. This keeps the croc relay password away from
-   people without an invite.
+   people without an invite. `features` lists optional protocol features the relay supports: `"presence"` (§4.6)
+   and `"ephemeral"` (§4.7). Older relays omit it (treat as `[]`); older clients ignore it.
 
 Before `welcome`, every other frame gets `err code:"unauthenticated"`. A connection that hasn't
 authenticated within 10 s is closed.
@@ -135,8 +139,8 @@ authenticated within 10 s is closed.
 | `{t:"create", rid, ch, kind:"direct"\|"group", maxMembers, capPub, meta, proof}` | Creates the channel and adds the caller as a member. `proof = Ed25519(K_cap, utf8("spencer/v1/join:" + ch + ":" + id + ":" + nonce))`, where `nonce` is the connection's challenge nonce. Idempotent if the channel exists with the same `capPub` and the caller is already a member. Reply `ok {head, members, croc}`. |
 | `{t:"join", rid, ch, proof}` | Verifies `proof` against the stored `capPub`. Adds the caller unless the channel is full (`err code:"full"`). If the caller is already a member, it just replies. Reply `ok {kind, maxMembers, meta, head, members, croc}`. A new member's ack cursor starts at `head`. Online members get `{t:"member", ch, id, event:"joined"}`. |
 | `{t:"leave", rid, ch}` | Removes membership. Members get `{t:"member", ch, id, event:"left"}`. |
-| `{t:"members", rid, ch}` | `ok {members:[{id, joinedAt}]}` (members only). |
-| `{t:"send", rid, env}` | Member only, and `env.from` must equal the connection id. Verifies the signature and size. Assigns the next `seq`. **Idempotent on `env.id`**: a duplicate returns the original seq. Reply `ok {id, seq}`. This is the "relay ack" the outbox waits for. Pushes `{t:"msg", seq, env}` to every *other* subscribed member connection. |
+| `{t:"members", rid, ch}` | `ok {members:[{id, joinedAt, online?, lastSeen?}]}` (members only). `online`/`lastSeen`: §4.6, in every member list (`create`, `join`, `members`, `sub`). |
+| `{t:"send", rid, env, ephemeral?}` | Member only, and `env.from` must equal the connection id. Verifies the signature and size. Assigns the next `seq`. **Idempotent on `env.id`**: a duplicate returns the original seq. Reply `ok {id, seq}`. This is the "relay ack" the outbox waits for. Pushes `{t:"msg", seq, env}` to every *other* subscribed member connection. With `ephemeral: true` on a relay with that feature: §4.7. |
 | `{t:"sub", rid, ch, since}` | Member only. First streams `{t:"msg", seq, env}` for every stored message with `seq > since` that the caller didn't send, in order. Then replies `ok {head, first, members}` and the subscription goes live. `first` is *not* the lowest stored seq: it is `expiredThrough + 1` when TTL expiry deleted messages after this member joined (`expiredThrough` = highest seq ever deleted by TTL), and `1` otherwise. Messages deleted because every member acked them, or that predate the member's join, never count as lost. If `head > since` and `first > since + 1`, messages `since+1 .. first-1` were lost to expiry and the client records a gap. |
 | `{t:"ack", ch, seq}` | Cumulative ack (no reply). Sets the member cursor to `max(cursor, seq)`. |
 | `{t:"ping", rid}` | `ok {}` |
@@ -159,6 +163,28 @@ Error codes: `unauthenticated`, `bad_request`, `not_member`, `no_channel`, `full
 ### 4.5 Relay config (env)
 `SPENCER_RELAY_HOST` (127.0.0.1), `SPENCER_RELAY_PORT` (8820), `SPENCER_RELAY_DB`,
 `SPENCER_RELAY_TTL_DAYS` (14), `SPENCER_CROC_RELAY` (`spencer.pjalv.com:9009`), `SPENCER_CROC_PASS`.
+
+### 4.6 Presence (feature `"presence"`)
+The relay already knows which identities have an authenticated connection; it shares that with co-members only.
+- Every member list (`create`, `join`, `members` and `sub` replies) carries, per member, `online: boolean` (the member
+  has at least one authenticated connection now) and `lastSeen: number` (ms; the last time it authenticated or its
+  last connection closed; absent if never seen since the relay started tracking it).
+- When an identity's first connection authenticates, or its last connection closes, every *other* member of each of
+  its channels who is online gets `{t:"presence", ch, id, online, lastSeen}` (one frame per channel).
+- `lastSeen` is kept in the relay DB (`presence` table), so it survives a relay restart.
+- A member who just joined a channel is online by definition; clients treat `{t:"member", event:"joined"}` from a
+  presence relay as online (the relay announced it before it was a member there).
+- Backward compatible: older Spencers ignore the unknown `presence` frame and the extra member fields. Against an
+  older relay, a Spencer shows peers' presence as `"unknown"`.
+
+### 4.7 Ephemeral messages (feature `"ephemeral"`)
+`{t:"send", rid, env, ephemeral: true}` gets the same checks as a normal send (membership, `from`, signature,
+size, rate limit) but the relay does not store it, assigns no `seq`, keeps no dedupe record, and replies
+`ok {id}`. It pushes `{t:"eph", ch, env}` once to the other members' *subscribed* connections; members who are
+offline never get it. Spencers send only `status` bodies this way and accept only `status` bodies from `eph` frames
+(after the same relay, envelope, signature and membership checks as the inbox; nothing is stored or acked).
+Backward compatible both ways: an older relay ignores the `ephemeral` flag and stores the message (receivers drop a
+stale status), and an older Spencer ignores the unknown `eph` frame (it just doesn't see live status).
 
 ## 5. Daemon message flow
 
@@ -395,7 +421,7 @@ that, `schedule_followup` fails and tells the model to report what it has (or as
 
 | Method | Path | Body → Response |
 |---|---|---|
-| GET | `/api/state` | → `{me:{id, name, fingerprint}, relay:{url, connected}, relays:{url, connected}[], channels: Channel[], transfers: Transfer[], mcp: McpServer[], policy, ownerBusy: boolean, requests: OwnerRequest[], followups: Followup[]}`. `relay` is the default relay from config; `connected` is true when every relay in use is connected. `relays` lists each relay in use (one per distinct channel relay, plus the default). |
+| GET | `/api/state` | → `{me:{id, name, fingerprint}, relay:{url, connected}, relays: RelayStatus[], channels: Channel[], transfers: Transfer[], mcp: McpServer[], policy, ownerBusy: boolean, requests: OwnerRequest[], followups: Followup[]}`. `relay` is the default relay from config; `connected` is true when every relay in use is connected. `relays` lists each relay in use (one per distinct channel relay, plus the default). |
 | GET | `/api/owner/messages?limit=` | → `{items: OwnerItem[]}` (owner conversation transcript, oldest first; default 200, max 2000) |
 | POST | `/api/owner/messages` | `{text}` → `{submissionId}` |
 | GET | `/api/channels` | → `{items: Channel[]}` |
@@ -415,11 +441,11 @@ that, `schedule_followup` fails and tells the model to report what it has (or as
 | POST | `/api/transfers` | `{ch, path, to?}` → `Transfer` (owner-initiated; `to` is required in groups) |
 | POST | `/api/transfers/:tid/approve` · `/deny` · `/accept` · `/decline` · `/cancel` | → `Transfer` |
 | GET | `/api/mcp` | → `{servers: McpServer[]}` |
-| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", url, connected}`, `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"followup", followup: Followup}` (created or changed), `{type:"status", ch, from, replyTo, state, activity?, ts}` (a Spencer, possibly mine, is working on a reply) |
+| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", ...RelayStatus}` (any change of a relay connection's state), `{type:"presence", ch, id, presence, lastSeen?}` (a member's Spencer came online or went offline in channel `ch`; when *our* connection to a relay goes up or down, each of its channels is re-sent as a `channel` event instead, since every member's presence changes), `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"followup", followup: Followup}` (created or changed), `{type:"status", ch, from, replyTo, state, activity?, ts}` (a Spencer, possibly mine, is working on a reply) |
 
 ```ts
 interface Channel { id: string; kind: "direct"|"group"; name: string; relayUrl: string;
-  members: { id: string; name?: string; fingerprint: string; me: boolean }[];
+  members: ChannelMember[];
   autoReply: boolean; allowedMcpTools: string[]; trust: "standard"|"full"; unread: number; lastSeq: number; createdAt: number }
 interface OwnerRequest { id: string;
   kind: "peer" | "continue";   // peer: ask_owner (§7.1); continue: the channel's turn budget ran out (§7.2)
@@ -445,6 +471,20 @@ interface OwnerItem { id: string; role: "user"|"assistant"|"tool"|"note"; text: 
   toolName?: string; isError?: boolean;
   untrusted?: boolean;    // text written by another person's agent (e.g. a reply to something the owner sent)
   request?: string }      // an ask_owner request card: the OwnerRequest id
+interface ChannelMember { id: string; name?: string; fingerprint: string; me: boolean;
+  // Is this member's Spencer reachable through the channel's relay right now (§4.6)?
+  //  "online" / "offline": what the relay says. "unknown": we are not connected to that relay, or it is an older relay
+  //  without presence. For `me`: "online" when we are connected to the relay, else "offline".
+  presence: "online"|"offline"|"unknown";
+  lastSeen?: number }   // ms: when the relay last saw it connected (offline: when it disconnected). Absent if unknown.
+// A peer is reachable when its presence is "online"; messages to an offline peer wait on the relay (up to the TTL).
+interface RelayStatus { url: string;
+  connected: boolean;                         // authenticated now
+  state: "connected"|"connecting"|"waiting";  // waiting: in backoff until retryAt
+  since: number;                              // when `state` last changed (ms)
+  lastConnectedAt?: number; retryAt?: number;
+  lastError?: string;                         // the last socket error since the last successful connection
+  features: string[] }                        // relay features from `welcome` ("presence", "ephemeral"); [] for older relays
 interface Followup { id: string;
   conversation: "owner"|"channel"; ch?: string;   // ch: the channel, for channel follow-ups
   note: string;                                   // the agent's own words (may be based on untrusted peer input)

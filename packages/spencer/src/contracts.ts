@@ -15,11 +15,20 @@ import type { SpencerConfig, Policy } from "./config.ts";
 
 // ---------------------------------------------------------------- API shapes
 
+/**
+ * Whether a member's Spencer is reachable through the channel's relay right now. "unknown": we are not connected to
+ * that relay, or it is an older relay without the "presence" feature. For `me`, whether we are connected.
+ */
+export type Presence = "online" | "offline" | "unknown";
+
 export interface ChannelMember {
   id: string;
   name?: string;
   fingerprint: string;
   me: boolean;
+  presence: Presence;
+  /** When the relay last saw this member's Spencer connected (ms; while online, when it connected). Absent if unknown. */
+  lastSeen?: number;
 }
 
 export type ChannelTrust = "standard" | "full";
@@ -202,7 +211,20 @@ export type DaemonEvent =
   | { type: "followup"; followup: Followup }
   /** A member's Spencer is working on a reply (`from` may be me). Ephemeral: not stored for the UI. */
   | { type: "status"; ch: string; from: string; replyTo: string; state: "working" | "done"; activity?: string; ts: number }
-  | { type: "relay"; url: string; connected: boolean }
+  /** A relay connection changed: `RelayStatus` (net/relay-client.ts) plus `type`. */
+  | {
+      type: "relay";
+      url: string;
+      connected: boolean;
+      state: "connected" | "connecting" | "waiting";
+      since: number;
+      lastConnectedAt?: number;
+      retryAt?: number;
+      lastError?: string;
+      features: string[];
+    }
+  /** A member's Spencer came online or went offline (relay "presence" feature). */
+  | { type: "presence"; ch: string; id: string; presence: Presence; lastSeen?: number }
   | { type: "mcp"; servers: McpServerStatus[] };
 
 export interface EventSink {

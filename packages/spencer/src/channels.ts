@@ -18,7 +18,7 @@ import {
 } from "@spencer/protocol";
 import type { Sql } from "./store/db.ts";
 import type { SpencerConfig } from "./config.ts";
-import type { Channel, ChannelMember, ChannelMessage, EventSink } from "./contracts.ts";
+import type { Channel, ChannelMember, ChannelMessage, EventSink, Presence } from "./contracts.ts";
 import type { Outbox, ChannelKeyInfo } from "./net/outbox.ts";
 import { RelayError, type RelayConnection, type RelayPool } from "./net/relay-client.ts";
 
@@ -83,6 +83,8 @@ export class ChannelManager {
   private d: ChannelManagerDeps;
   private keyCache = new Map<string, ChannelKeys>();
   private crocByRelay = new Map<string, CrocInfo>();
+  /** relay URL → identity id → what that relay last said about it (only relays with the "presence" feature). */
+  private presence = new Map<string, Map<string, { online: boolean; lastSeen?: number }>>();
 
   constructor(deps: ChannelManagerDeps) {
     this.d = deps;
@@ -167,6 +169,53 @@ export class ChannelManager {
     return `Spencer ${fingerprint(r.created_by).slice(0, 9)}`;
   }
 
+  // ------------------------------------------------------------- presence
+
+  /** A member's presence as the API shows it (PROTOCOL §8). */
+  presenceOf(relayUrl: string, id: string): { presence: Presence; lastSeen?: number } {
+    const connected = this.d.pool().isConnected(relayUrl);
+    if (id === this.d.me.id) return { presence: connected ? "online" : "offline" };
+    const p = connected ? this.presence.get(relayUrl)?.get(id) : undefined;
+    if (!p) return { presence: "unknown" };
+    return { presence: p.online ? "online" : "offline", ...(p.lastSeen !== undefined ? { lastSeen: p.lastSeen } : {}) };
+  }
+
+  /** Presence fields of a member list from the relay (sub/join/create/members replies). Returns whether any changed. */
+  notePresence(relayUrl: string, members: MemberInfo[] | undefined): boolean {
+    let changed = false;
+    for (const m of Array.isArray(members) ? members : []) {
+      if (!m || typeof m.id !== "string" || typeof m.online !== "boolean") continue;
+      const lastSeen = Number.isSafeInteger(m.lastSeen) ? m.lastSeen : undefined;
+      if (this.setPresence(relayUrl, m.id, m.online, lastSeen)) changed = true;
+    }
+    return changed;
+  }
+
+  private setPresence(relayUrl: string, id: string, online: boolean, lastSeen: number | undefined): boolean {
+    let byId = this.presence.get(relayUrl);
+    if (!byId) this.presence.set(relayUrl, (byId = new Map()));
+    const prev = byId.get(id);
+    if (prev && prev.online === online && prev.lastSeen === lastSeen) return false;
+    byId.set(id, { online, ...(lastSeen !== undefined ? { lastSeen } : {}) });
+    return true;
+  }
+
+  /** A `presence` frame from the relay at `relayUrl`. */
+  onPresence(relayUrl: string, ch: string, id: unknown, online: unknown, lastSeen: unknown): void {
+    if (typeof id !== "string" || typeof online !== "boolean") return;
+    const r = this.row(ch);
+    if (!r || r.relay_url !== relayUrl) return;
+    if (!this.setPresence(relayUrl, id, online, Number.isSafeInteger(lastSeen) ? (lastSeen as number) : undefined)) return;
+    const p = this.presenceOf(relayUrl, id);
+    this.d.events.emit({ type: "presence", ch, id, ...p });
+  }
+
+  /** Our connection to `relayUrl` went up or down: every member's presence there changes (to unknown, or fresh). */
+  relayChanged(relayUrl: string, connected: boolean): void {
+    if (!connected) this.presence.delete(relayUrl);
+    for (const ch of this.channelsOnRelay(relayUrl)) this.emitChannel(ch);
+  }
+
   toApi(r: ChannelRow): Channel {
     const me = this.d.me.id;
     const members: ChannelMember[] = this.memberRows(r.id)
@@ -176,6 +225,7 @@ export class ChannelManager {
         ...(m.id === me ? { name: this.d.config().name } : m.name ? { name: m.name } : {}),
         fingerprint: fingerprint(m.id),
         me: m.id === me,
+        ...this.presenceOf(r.relay_url, m.id),
       }));
     return {
       id: r.id,
@@ -387,7 +437,9 @@ export class ChannelManager {
       this.d.log(`channel ${ch}: messages ${since + 1}..${first - 1} expired on the relay before we got them`);
       this.d.sql.run("UPDATE channels SET gap = 1 WHERE id = ?", ch);
     }
+    const presenceChanged = this.notePresence(conn.url, ok.members as MemberInfo[]);
     this.mergeMembers(ch, ok.members as MemberInfo[], true);
+    if (presenceChanged) this.emitChannel(ch);
     if (since > 0) conn.send({ t: "ack", ch, seq: since });
   }
 
@@ -435,6 +487,7 @@ export class ChannelManager {
       Date.now(),
     );
     this.keyCache.set(ch, keys);
+    this.notePresence(relayUrl, ok.members as MemberInfo[]);
     this.mergeMembers(ch, (ok.members as MemberInfo[]) ?? [{ id: me, joinedAt: Date.now() }], true);
     await this.subscribe(conn, ch);
     this.emitChannel(ch);
@@ -491,6 +544,7 @@ export class ChannelManager {
       Date.now(),
     );
     this.keyCache.set(inv.ch, keys);
+    this.notePresence(inv.relayUrl, ok.members as MemberInfo[]);
     this.mergeMembers(inv.ch, (ok.members as MemberInfo[]) ?? [], true);
     const conn = this.d.pool().peek(inv.relayUrl);
     if (conn?.ready) await this.subscribe(conn, inv.ch);

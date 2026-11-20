@@ -5,7 +5,10 @@ import {
   MAX_CHAT_TEXT,
   fingerprint,
   isB64uId,
+  isEnvelope,
+  openEnvelope,
   pairKey,
+  sealEnvelope,
   type Body,
   type ChatBody,
   type StatusBody,
@@ -234,7 +237,8 @@ export class Daemon {
       me,
       {
         onReady: (conn) => this.onRelayReady(conn),
-        onDown: (conn) => this.events.emit({ type: "relay", url: conn.url, connected: false }),
+        onDown: (conn) => this.s.channels?.relayChanged(conn.url, false),
+        onState: (conn) => this.events.emit({ type: "relay", ...conn.status() }),
         onFrame: (conn, f) => this.onRelayFrame(conn, f),
       },
       log,
@@ -350,7 +354,7 @@ export class Daemon {
   private onRelayReady(conn: RelayConnection): void {
     const channels = this.need("channels");
     channels.setCroc(conn.url, conn.croc);
-    this.events.emit({ type: "relay", url: conn.url, connected: true });
+    channels.relayChanged(conn.url, true);
     const chs = channels.channelsOnRelay(conn.url);
     void Promise.allSettled(chs.map((ch) => channels.subscribe(conn, ch))).then(() => {
       this.s.outbox?.connectionReady(chs);
@@ -365,13 +369,54 @@ export class Daemon {
       case "member": {
         const channels = this.s.channels;
         const row = channels?.row(f.ch);
-        if (channels && row && row.relay_url === conn.url) channels.onMemberEvent(f.ch, f.id, f.event);
+        if (channels && row && row.relay_url === conn.url) {
+          channels.onMemberEvent(f.ch, f.id, f.event);
+          // A member who just joined is connected; a presence relay announced it before it was a member here.
+          if (f.event === "joined" && conn.features.includes("presence")) channels.onPresence(conn.url, f.ch, f.id, true, Date.now());
+        }
         return;
       }
+      case "presence":
+        this.s.channels?.onPresence(conn.url, f.ch, f.id, f.online, f.lastSeen);
+        return;
+      case "eph":
+        this.onEphemeral(conn, f.ch, f.env);
+        return;
       case "err":
         this.log(`relay ${conn.url}: ${f.code}: ${f.msg}`);
         return;
     }
+  }
+
+  /**
+   * An `eph` frame (PROTOCOL §4.7): a message the relay pushed without storing. Only `status` bodies travel this way;
+   * anything else is ignored. Same checks as the inbox (relay, envelope, signature, membership), nothing is stored.
+   */
+  private onEphemeral(conn: RelayConnection, ch: unknown, env: unknown): void {
+    const channels = this.s.channels;
+    if (!channels || typeof ch !== "string") return;
+    const row = channels.row(ch);
+    const keys = channels.keys(ch);
+    if (!row || !keys || row.relay_url !== conn.url) return;
+    if (!isEnvelope(env) || env.ch !== ch || env.from === this.need("me").id) return;
+    if (!channels.memberRows(ch).some((m) => m.id === env.from && m.present)) return;
+    let body: Body;
+    try {
+      body = openEnvelope(env, keys.encKey);
+    } catch (e) {
+      this.log(`relay ${conn.url}: dropped ephemeral ${env.id}: ${(e as Error).message}`);
+      return;
+    }
+    if (body.type !== "status" || Date.now() - env.ts >= STATUS_MAX_AGE_MS) return;
+    this.events.emit({
+      type: "status",
+      ch,
+      from: env.from,
+      replyTo: body.replyTo,
+      state: body.state,
+      ...(body.activity ? { activity: body.activity } : {}),
+      ts: env.ts,
+    });
   }
 
   // ------------------------------------------------------------- routing
@@ -494,7 +539,15 @@ export class Daemon {
           if (!channels.row(ch) || !isB64uId(s.replyTo)) return;
           const activity = s.activity?.slice(0, 200);
           const body: StatusBody = { type: "status", replyTo: s.replyTo, state: s.state, ...(activity ? { activity } : {}) };
-          outbox.enqueue(ch, body);
+          // Ephemeral (PROTOCOL §4.7): not through the durable outbox, and dropped when we are offline. A relay with the
+          // "ephemeral" feature pushes it without storing it; an older relay ignores the flag and stores it, and
+          // receivers drop it there once it is stale.
+          const info = channels.info(ch);
+          const conn = info ? daemon.s.pool?.peek(info.relayUrl) : undefined;
+          if (info && conn?.ready) {
+            const env = sealEnvelope(daemon.need("me"), ch, info.encKey, body);
+            conn.request({ t: "send", env, ephemeral: true }).catch(() => {});
+          }
           daemon.events.emit({ type: "status", ch, from: daemon.identity.id, replyTo: s.replyTo, state: s.state, ...(activity ? { activity } : {}), ts: Date.now() });
         } catch (e) {
           log(`status for ${ch}: ${(e as Error).message}`);
@@ -550,7 +603,9 @@ export class Daemon {
     const channels = this.need("channels");
     const urls = new Set(channels.relayUrls());
     if (pool.peek(cfg.relay)) urls.add(cfg.relay);
-    const relays = [...urls].map((url) => ({ url, connected: pool.isConnected(url) }));
+    const relays = [...urls].map(
+      (url) => pool.status(url) ?? { url, connected: false, state: "connecting" as const, since: Date.now(), features: [] as string[] },
+    );
     const agent = this.s.agent;
     return {
       me: this.identity,

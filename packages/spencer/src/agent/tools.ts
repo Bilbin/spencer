@@ -94,7 +94,22 @@ function channelOfKey(core: CoreServices, ctx: ToolContext): Channel | undefined
 }
 
 function describeMember(m: ChannelMember) {
-  return { id: m.id, name: m.name ?? null, fingerprint: m.fingerprint, me: m.me };
+  return {
+    id: m.id,
+    name: m.name ?? null,
+    fingerprint: m.fingerprint,
+    me: m.me,
+    presence: m.presence,
+    ...(m.lastSeen !== undefined && m.presence !== "online" ? { lastSeen: new Date(m.lastSeen).toISOString() } : {}),
+  };
+}
+
+/** " Bob's Spencer is offline (last seen …); …" when every recipient is offline, else "". */
+function offlineNote(ch: Channel): string {
+  const others = ch.members.filter((m) => !m.me);
+  if (!others.length || !others.every((m) => m.presence === "offline")) return "";
+  const who = others.map((m) => `${m.name ?? m.fingerprint}${m.lastSeen ? ` (last seen ${new Date(m.lastSeen).toISOString()})` : ""}`).join(", ");
+  return ` Note: ${who} ${others.length > 1 ? "are" : "is"} offline right now; the message waits on the relay, so expect a delayed reply.`;
 }
 
 // ------------------------------------------------------------------ owner tools
@@ -105,7 +120,8 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
     {
       name: "list_peers",
       description:
-        "List the channels (direct and group) with their members. Member names are self-asserted by peers; the fingerprint is what identifies them.",
+        "List the channels (direct and group) with their members. Member names are self-asserted by peers; the fingerprint is what identifies them. " +
+        'presence says whether a member\'s Spencer is reachable now ("online", "offline" with lastSeen, or "unknown").',
       parameters: schema({}),
       async execute() {
         const list = core.listChannels().map((c) => ({
@@ -170,7 +186,7 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
           });
           wait = typeof r === "string" ? ` ${r}` : ` (Could not wait for the answer: ${r.text}.)`;
         }
-        return `Sent to ${ch.name} (message ${sent.id}). Replies will show up in this conversation as untrusted notes.${wait}`;
+        return `Sent to ${ch.name} (message ${sent.id}). Replies will show up in this conversation as untrusted notes.${offlineNote(ch)}${wait}`;
       },
     },
     {

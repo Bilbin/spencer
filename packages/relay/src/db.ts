@@ -64,6 +64,10 @@ CREATE TABLE IF NOT EXISTS seen (
   PRIMARY KEY (ch, id)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS seen_at ON seen(at);
+CREATE TABLE IF NOT EXISTS presence (
+  id TEXT PRIMARY KEY,
+  last_seen INTEGER NOT NULL
+) WITHOUT ROWID;
 `;
 
 type Row = Record<string, unknown>;
@@ -118,6 +122,9 @@ export class RelayDb {
         "UPDATE channels SET expired_through = max(expired_through, (SELECT max(seq) FROM messages m WHERE m.ch = channels.ch AND m.at < ?1)) WHERE ch IN (SELECT DISTINCT ch FROM messages WHERE at < ?1)",
       ),
       deleteExpired: p("DELETE FROM messages WHERE at < ?"),
+      channelsOf: p("SELECT ch FROM members WHERE id = ?"),
+      getLastSeen: p("SELECT last_seen AS lastSeen FROM presence WHERE id = ?"),
+      setLastSeen: p("INSERT INTO presence (id, last_seen) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET last_seen = excluded.last_seen"),
     };
   }
 
@@ -235,6 +242,20 @@ export class RelayDb {
       this.s.markExpired.run(cutoff);
       return Number(this.s.deleteExpired.run(cutoff).changes);
     });
+  }
+
+  /** Channels `id` is a member of. */
+  channelsOf(id: string): string[] {
+    return (this.s.channelsOf.all(id) as unknown as { ch: string }[]).map((r) => r.ch);
+  }
+
+  /** When the relay last saw `id` connected (updated on connect and on disconnect). */
+  lastSeen(id: string): number | undefined {
+    return (this.s.getLastSeen.get(id) as { lastSeen: number } | undefined)?.lastSeen;
+  }
+
+  setLastSeen(id: string, at: number): void {
+    this.s.setLastSeen.run(id, at);
   }
 
   pruneSeen(cutoff: number): number {
