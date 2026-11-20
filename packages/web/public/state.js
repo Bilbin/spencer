@@ -9,6 +9,7 @@ export const S = {
   channels: new Map(), // id -> Channel
   transfers: new Map(), // tid -> Transfer
   mcp: [], // McpServerStatus[]
+  requests: new Map(), // id -> OwnerRequest (ask_owner approvals)
   messages: new Map(), // ch -> ChannelMessage[] (only for channels that were opened)
   owner: null, // OwnerItem[] once loaded
   ownerBusy: false,
@@ -91,6 +92,7 @@ export function setState(st) {
   S.channels = new Map((st.channels ?? []).map((c) => [c.id, c]));
   S.transfers = new Map((st.transfers ?? []).map((t) => [t.tid, t]));
   S.mcp = st.mcp ?? [];
+  S.requests = new Map((st.requests ?? []).map((r) => [r.id, r]));
   for (const ch of Object.keys(S.ack)) {
     const c = S.channels.get(ch);
     // The server count dropped (e.g. it marked messages read): don't hide future ones.
@@ -104,6 +106,12 @@ export function setState(st) {
   emit("transfers");
   emit("relay");
   emit("mcp");
+  emit("owner");
+}
+
+export function upsertRequest(r) {
+  S.requests.set(r.id, r);
+  emit("owner");
 }
 
 export function upsertChannel(c) {

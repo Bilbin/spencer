@@ -88,6 +88,7 @@ Other model options:
 - Any built-in `pi-ai` provider id (`openai`, `openrouter`, `google`, `xai`, `groq`, …) with `modelId` and `apiKeyEnv`.
 - `{"provider": "openai-compatible", "baseUrl": "http://localhost:11434/v1", "modelId": "llama3.1"}` for Ollama, vLLM, LM Studio, or a proxy.
 - `{"provider": "fake"}`, a deterministic stub used in tests and offline demos.
+- `"thinking": "off" | "minimal" | "low" | "medium" | "high"` on any model sets the reasoning effort (sent as `reasoning_effort` to OpenAI-compatible endpoints).
 
 Keys are read from the environment variable you name in `apiKeyEnv`. Put the key in the environment, not in the file.
 
@@ -117,6 +118,9 @@ A direct channel closes once the second person joins, so a link that leaks later
 After pairing, you can:
 
 - Type in the channel as yourself. The other Spencer replies automatically.
+- Pick a **trust level** in the channel's settings (gear icon):
+  - **Standard** (default): when a peer asks for something its channel agent can't do, you get a request card with **Approve / Deny** in your Spencer chat. If you approve, your Spencer does the task with its full tools (for example, starting a T3 Code thread) and reports back in the channel.
+  - **Full trust**: no approvals. Peers in that channel can have your Spencer use every MCP tool and send them files right away. Each tool call still shows up in your chat.
 - Ask your own Spencer: *"ask Bob's Spencer for the build logs"* or *"send ~/report.pdf to Alice"*. It uses `send_message`, `send_file`, `list_peers`, `list_transfers`, and `read_channel`. Replies show up in your chat as untrusted notes.
 - Send files with **Send file** (enter an absolute path). Received files land in `<dataDir>/quarantine/<transfer>/`.
 
@@ -127,9 +131,9 @@ After pairing, you can:
 - **Relay access control.** The relay stores only a *capability public key* derived from the invite secret. Joining requires a signature from the matching private key over a per-connection nonce. The croc relay password is given only to identities that are channel members.
 - **Files.** croc is end-to-end encrypted with a code (`CROC_SECRET`, never in argv). The code is sealed to the single recipient with a pairwise X25519 key, so other group members can't race for the file. Spencer verifies size and sha256 and stores files in a quarantine directory (0600) without running them.
 - **Trust boundary.** Messages from other people's Spencers are **untrusted data** and a prompt-injection risk:
-  - A turn triggered by a peer runs in that channel's own conversation with a **restricted tool set**: `notify_owner` and `propose_file_send` only. It has no shell, no file reads, and no MCP unless you allow specific MCP tools for that channel in its settings.
+  - A turn triggered by a peer runs in that channel's own conversation with a **restricted tool set**: `notify_owner`, `ask_owner` and `propose_file_send`. It never gets a shell or file reads. It gets MCP tools only if you allow specific ones for that channel, or all of them if you set the channel to **full trust**.
   - Peer text reaches the model wrapped in `<peer_message untrusted="true">`.
-  - **Outgoing file sends need your approval** in the UI by default. Sends a peer's agent asks for *always* need approval.
+  - **Outgoing file sends need your approval** in the UI by default. Sends a peer's agent asks for *always* need approval, unless the channel has full trust.
   - Peer replies reach your own (privileged) conversation only as notes. They never start a run there.
 - **Bot loops.** Spencer only replies when addressed: always in direct channels, and only when @mentioned in groups. Every chat carries a hop count (capped by `maxHops`), and auto-replies are rate-limited per channel.
 - **Durability.**

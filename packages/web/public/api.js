@@ -56,6 +56,7 @@ export const api = {
   sendFile: (ch, path, to) => request("POST", "/api/transfers", to ? { ch, path, to } : { ch, path }),
   transferAction: (tid, action) => request("POST", `/api/transfers/${enc(tid)}/${action}`),
   mcp: () => request("GET", "/api/mcp"),
+  decideRequest: (id, approve) => request("POST", `/api/requests/${enc(id)}/${approve ? "approve" : "deny"}`),
 };
 
 // ---------------------------------------------------------------- toasts

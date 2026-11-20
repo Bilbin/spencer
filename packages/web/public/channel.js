@@ -257,6 +257,32 @@ function settingsModal(c) {
   const autoReply = h("input", { type: "checkbox", checked: c.autoReply, role: "switch" });
   const toolsBox = h("div.tool-checks", null, h("p.hint", null, "Loading MCP tools…"));
   const selected = new Set(c.allowedMcpTools ?? []);
+  let trust = c.trust === "full" ? "full" : "standard";
+  const trustOption = (value, title, desc) => {
+    const radio = h("input", { type: "radio", name: "trust", value, checked: trust === value });
+    radio.addEventListener("change", () => {
+      if (radio.checked) {
+        trust = value;
+        syncTrust();
+      }
+    });
+    return h("label.trust-option", null, radio, h("span", null, h("strong", null, title), h("span.hint.block", null, desc)));
+  };
+  const toolsField = h("div.field");
+  const syncTrust = () => {
+    toolsField.hidden = trust === "full";
+    fullWarn.hidden = trust !== "full";
+  };
+  const fullWarn = h(
+    "div.callout.warn",
+    null,
+    icon("warn", 16),
+    h(
+      "span",
+      null,
+      "Peers in this channel can make your Spencer use every MCP tool (for T3 Code: start threads, run agents with their access level) and receive files without your approval. You still see every tool call in your Spencer chat. Only pick this for people you trust like yourself.",
+    ),
+  );
 
   const renderTools = () => {
     const tools = allMcpTools();
@@ -342,11 +368,26 @@ function settingsModal(c) {
     h(
       "div.field",
       null,
-      h("div.label", null, "MCP tools this channel's agent may use"),
+      h("div.label", null, "Trust"),
+      h(
+        "div.trust-options",
+        null,
+        trustOption(
+          "standard",
+          "Standard",
+          "Your Spencer chats on its own but asks you (Approve / Deny) before doing tasks for them. File sends need your approval. Only the MCP tools picked below.",
+        ),
+        trustOption("full", "Full trust", "No approvals: your Spencer does what they ask with all its MCP tools and sends files right away."),
+      ),
+      fullWarn,
+    ),
+    append(toolsField, [
+      h("div.label", null, "MCP tools this channel's agent may use without asking"),
       h("div.callout.warn", null, icon("warn", 16), h("span", null, "MCP tools let peers in this channel trigger real actions on your machine through your Spencer. Only allow tools you'd let them run.")),
       toolsBox,
-    ),
+    ]),
   );
+  syncTrust();
   const modal = openModal({
     title: `${channelTitle(c)} settings`,
     wide: true,
@@ -366,6 +407,7 @@ function settingsModal(c) {
     const n = name.value.trim();
     if (n && n !== c.name) patch.name = n;
     if (autoReply.checked !== c.autoReply) patch.autoReply = autoReply.checked;
+    if (trust !== (c.trust ?? "standard")) patch.trust = trust;
     const tools = [...selected].sort();
     if (JSON.stringify(tools) !== JSON.stringify([...(c.allowedMcpTools ?? [])].sort())) patch.allowedMcpTools = tools;
     if (!Object.keys(patch).length) return modal.close();
@@ -424,7 +466,13 @@ export function channelView(main, chId) {
       viewHeader(
         [
           c.kind === "group" ? h("span.avatar.group", { "aria-hidden": "true" }, icon("users", 16)) : avatar(title, peers(c)[0]?.id ?? c.id),
-          h("div.title-stack", null, h("h1", null, title), h("span.subtitle", null, subtitle, c.autoReply ? null : h("span.pill.muted.inline", null, "auto-reply off"))),
+          h("div.title-stack", null, h("h1", null, title), h(
+            "span.subtitle",
+            null,
+            subtitle,
+            c.trust === "full" ? h("span.pill.warn.inline", { title: "Peers here can use your Spencer's MCP tools without approval" }, "full trust") : null,
+            c.autoReply ? null : h("span.pill.muted.inline", null, "auto-reply off"),
+          )),
         ],
         [chips, iconButton("paperclip", "Send file", () => sendFileModal(c), "hide-narrow"), iconButton("gear", "Channel settings", () => settingsModal(c))],
       ),

@@ -1089,6 +1089,44 @@ textarea.input {
   overflow-wrap: anywhere;
 }
 
+.note.request .request-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.request-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.trust-options {
+  display: grid;
+  gap: 8px;
+}
+
+.trust-option {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.trust-option:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.trust-option input {
+  margin-top: 3px;
+}
+
 .busy {
   max-width: 860px;
   margin: 10px auto 0;

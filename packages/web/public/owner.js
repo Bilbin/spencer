@@ -1,6 +1,6 @@
 // The owner's own conversation with their Spencer.
 import { h, icon, linkify, timeShort, timeFull, autoGrow, selfAvatar } from "./dom.js";
-import { api, attempt } from "./api.js";
+import { api, attempt, toast } from "./api.js";
 import { S, on, setOwner } from "./state.js";
 import { viewHeader } from "./common.js";
 import { scrollKeeper } from "./scroll.js";
@@ -36,17 +36,56 @@ function ownerItem(item) {
       return h("div.tool-wrap", null, details);
     }
     case "note": {
+      if (item.request) return requestCard(item, time);
       const untrusted = item.untrusted === true;
       return h(
         `div.note${untrusted ? ".untrusted" : ""}`,
         { role: "note" },
-        h("div.note-label", null, icon(untrusted ? "warn" : "bot", 14), untrusted ? " Untrusted peer content" : " Note", h("span.note-time", null, time)),
+        h(
+          "div.note-label",
+          null,
+          icon(untrusted ? "warn" : "bot", 14),
+          untrusted ? " Note · includes text from peers" : " Note",
+          h("span.note-time", null, time),
+        ),
         h("div.note-text", null, linkify(item.text)),
       );
     }
     default:
       return h("div.system-line", null, item.text);
   }
+}
+
+// An ask_owner request: the peer's ask (untrusted text) with Approve / Deny.
+function requestCard(item, time) {
+  const r = S.requests.get(item.request);
+  const state = r?.state ?? "pending";
+  const decide = async (approve, btns) => {
+    btns.forEach((b) => (b.disabled = true));
+    const res = await attempt(() => api.decideRequest(item.request, approve));
+    if (res?.id) {
+      S.requests.set(res.id, res);
+      toast(approve ? "Approved — your Spencer is on it" : "Declined; the peer was told", "info");
+    } else btns.forEach((b) => (b.disabled = false));
+  };
+  let actions;
+  if (state === "pending") {
+    const approve = h("button.btn.primary.sm", { type: "button" }, "Approve");
+    const deny = h("button.btn.sm", { type: "button" }, "Deny");
+    approve.addEventListener("click", () => decide(true, [approve, deny]));
+    deny.addEventListener("click", () => decide(false, [approve, deny]));
+    actions = h("div.request-actions", null, deny, approve);
+  } else {
+    actions = h("div.request-actions", null, h(`span.pill.${state === "approved" ? "ok" : "muted"}`, null, state));
+  }
+  return h(
+    "div.note.untrusted.request",
+    { role: "note" },
+    h("div.note-label", null, icon("warn", 14), " Request · needs your approval", h("span.note-time", null, time)),
+    h("div.note-text", null, linkify(item.text)),
+    h("p.request-hint", null, "Approving lets your Spencer do this with its full tools (MCP, files, shell) and report back to the channel."),
+    actions,
+  );
 }
 
 export function ownerView(main) {

@@ -11,6 +11,7 @@ import {
   upsertMessage,
   upsertTransfer,
   upsertOwner,
+  upsertRequest,
   setOwner,
   setMessages,
   unreadCount,
@@ -207,6 +208,14 @@ function handleEvent(ev) {
     case "owner":
       if (ev.item?.id) upsertOwner(ev.item);
       break;
+    case "request": {
+      const r = ev.request;
+      if (!r?.id) break;
+      const prev = S.requests.get(r.id);
+      upsertRequest(r);
+      if (!prev && r.state === "pending" && S.view.name !== "owner") toast(`${r.fromName ?? "A peer"} needs your approval — see your Spencer chat`, "info");
+      break;
+    }
     case "owner_busy":
       S.ownerBusy = !!ev.busy;
       emit("busy");
