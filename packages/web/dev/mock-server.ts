@@ -425,7 +425,12 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
         const limit = Math.max(1, Math.min(500, Number(url.searchParams.get("limit") ?? 100)));
         const before = url.searchParams.get("before");
         let list = messages.get(ch.id)!;
-        if (before !== null) list = list.filter((m) => (m.seq ?? 0) < Number(before));
+        if (before !== null) {
+          // `before` is a message id, like the daemon (PROTOCOL §8).
+          const i = list.findIndex((m) => m.id === before);
+          if (i === -1) throw new HttpError(404, "unknown message");
+          list = list.slice(0, i);
+        }
         return { items: list.slice(-limit) };
       }
       if (method === "POST") {

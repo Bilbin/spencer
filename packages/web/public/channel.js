@@ -483,7 +483,7 @@ export function channelView(main, chId) {
     const first = msgs[0];
     if (!first) return;
     olderBtn.disabled = true;
-    const r = await attempt(() => api.channelMessages(chId, 100, first.seq ?? first.ts));
+    const r = await attempt(() => api.channelMessages(chId, 100, first.id));
     olderBtn.disabled = false;
     if (!r) return;
     const older = (r.items ?? []).filter((m) => !msgs.some((x) => x.id === m.id));
