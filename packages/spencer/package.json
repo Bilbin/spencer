@@ -1,0 +1,18 @@
+{
+  "name": "@spencer/spencer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@spencer/protocol": "0.1.0",
+    "@earendil-works/chord": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-durable": "1.5.2",
+    "@earendil-works/pi-schema": "1.5.2",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "ws": "8.21.0"
+  }
+}

@@ -1,0 +1,169 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  b64u,
+  deriveChannelKeys,
+  fingerprint,
+  formatInvite,
+  fromB64u,
+  generateIdentity,
+  identityFromSecret,
+  joinProof,
+  joinProofMessage,
+  newChannelSecret,
+  openEnvelope,
+  openFrom,
+  openMeta,
+  pairKey,
+  parseBody,
+  parseInvite,
+  relayAuthMessage,
+  sanitizeFileName,
+  sealEnvelope,
+  sealFor,
+  sealMeta,
+  signText,
+  verifyEnvelope,
+  verifyText,
+  type Body,
+} from "../src/index.ts";
+
+test("identity: sign/verify, fingerprint, roundtrip", () => {
+  const a = generateIdentity();
+  assert.equal(fromB64u(a.id).length, 32);
+  assert.deepEqual(identityFromSecret(a.secret), a);
+  const sig = signText(a.secret, relayAuthMessage("nonce"));
+  assert.ok(verifyText(a.id, relayAuthMessage("nonce"), sig));
+  assert.ok(!verifyText(a.id, relayAuthMessage("other"), sig));
+  assert.ok(!verifyText(generateIdentity().id, relayAuthMessage("nonce"), sig));
+  assert.match(fingerprint(a.id), /^[0-9a-f]{4}(-[0-9a-f]{4}){4}$/);
+});
+
+test("invite: format/parse roundtrip and relay url derivation", () => {
+  const { ch, secret } = newChannelSecret();
+  const link = formatInvite("wss://spencer.pjalv.com/ws", ch, secret);
+  assert.equal(link, `https://spencer.pjalv.com/i/${ch}#${secret}`);
+  const inv = parseInvite(link);
+  assert.deepEqual(inv, { ch, secret, origin: "https://spencer.pjalv.com", relayUrl: "wss://spencer.pjalv.com/ws" });
+  const local = parseInvite(formatInvite("ws://127.0.0.1:9999/ws", ch, secret));
+  assert.equal(local.relayUrl, "ws://127.0.0.1:9999/ws");
+  assert.throws(() => parseInvite(`https://x/i/${ch}`));
+  assert.throws(() => parseInvite(`https://x/i/short#${secret}`));
+  assert.throws(() => parseInvite("not a url"));
+});
+
+test("channel keys: deterministic, channel-bound; capability proof verifies", () => {
+  const { ch, secret } = newChannelSecret();
+  const k1 = deriveChannelKeys(secret, ch);
+  const k2 = deriveChannelKeys(secret, ch);
+  assert.deepEqual(k1.encKey, k2.encKey);
+  assert.equal(k1.capPub, k2.capPub);
+  const other = deriveChannelKeys(secret, newChannelSecret().ch);
+  assert.notDeepEqual(other.encKey, k1.encKey);
+  const me = generateIdentity();
+  const proof = joinProof(k1, ch, me.id, "n1");
+  assert.ok(verifyText(k1.capPub, joinProofMessage(ch, me.id, "n1"), proof));
+  assert.ok(!verifyText(k1.capPub, joinProofMessage(ch, me.id, "n2"), proof));
+});
+
+test("envelope: seal/open roundtrip; tamper detection", () => {
+  const { ch, secret } = newChannelSecret();
+  const keys = deriveChannelKeys(secret, ch);
+  const alice = generateIdentity();
+  const body: Body = { type: "chat", text: "hi bob", hop: 0, by: "human" };
+  const env = sealEnvelope(alice, ch, keys.encKey, body);
+  assert.ok(verifyEnvelope(env));
+  assert.deepEqual(openEnvelope(env, keys.encKey), body);
+
+  // wrong key
+  assert.throws(() => openEnvelope(env, deriveChannelKeys(newChannelSecret().secret, ch).encKey));
+  // header tamper breaks signature
+  assert.throws(() => openEnvelope({ ...env, ts: env.ts + 1 }, keys.encKey));
+  assert.throws(() => openEnvelope({ ...env, ch: newChannelSecret().ch }, keys.encKey));
+  // impersonation: swap from + re-sign with another identity -> AEAD fails (aad binds from)
+  const mallory = generateIdentity();
+  const forged = sealEnvelope(mallory, ch, keys.encKey, body);
+  assert.ok(verifyEnvelope(forged));
+  assert.equal(forged.from, mallory.id);
+  const swapped = { ...env, from: mallory.id };
+  assert.ok(!verifyEnvelope(swapped));
+  // ciphertext bit-flip
+  const ct = fromB64u(env.ct);
+  ct[0] ^= 1;
+  assert.throws(() => openEnvelope({ ...env, ct: b64u(ct) }, keys.encKey));
+});
+
+test("envelope: rejects oversized and invalid bodies", () => {
+  const { ch, secret } = newChannelSecret();
+  const keys = deriveChannelKeys(secret, ch);
+  const a = generateIdentity();
+  assert.throws(() => sealEnvelope(a, ch, keys.encKey, { type: "chat", text: "x".repeat(70_000), hop: 0, by: "human" }));
+  const bad = sealEnvelope(a, ch, keys.encKey, { type: "chat", text: "x", hop: -1, by: "human" } as Body);
+  assert.throws(() => openEnvelope(bad, keys.encKey), /invalid/);
+});
+
+test("meta sealing roundtrip", () => {
+  const { ch, secret } = newChannelSecret();
+  const keys = deriveChannelKeys(secret, ch);
+  const me = generateIdentity();
+  const sealed = sealMeta(keys, ch, { name: "Friends", kind: "group", createdBy: me.id });
+  assert.deepEqual(openMeta(keys, ch, sealed), { name: "Friends", kind: "group", createdBy: me.id });
+  assert.throws(() => openMeta(keys, newChannelSecret().ch, sealed));
+});
+
+test("pair key: symmetric, third party cannot open", () => {
+  const { ch } = newChannelSecret();
+  const a = generateIdentity();
+  const b = generateIdentity();
+  const c = generateIdentity();
+  const kab = pairKey(a.secret, b.id, a.id, ch);
+  const kba = pairKey(b.secret, a.id, b.id, ch);
+  assert.deepEqual(kab, kba);
+  const sealed = sealFor(kab, "tid", { code: "1234-abc" });
+  assert.deepEqual(openFrom(kba, "tid", sealed), { code: "1234-abc" });
+  assert.throws(() => openFrom(pairKey(c.secret, a.id, c.id, ch), "tid", sealed));
+  assert.throws(() => openFrom(kba, "other-tid", sealed));
+});
+
+test("parseBody validates every type", () => {
+  const id = generateIdentity().id;
+  const tid = newChannelSecret().ch;
+  const sha = "a".repeat(64);
+  const ok: unknown[] = [
+    { type: "hello", name: "Bob", agent: "spencer/0.1" },
+    { type: "chat", text: "hey", hop: 2, by: "agent", replyTo: tid, mentions: [id] },
+    { type: "file_offer", tid, to: id, name: "a.txt", size: 3, sha256: sha, expiresAt: 1 },
+    { type: "file_accept", tid, to: id, sealed: "abc" },
+    { type: "file_decline", tid, to: id },
+    { type: "file_ready", tid, to: id, attempt: 1 },
+    { type: "file_retry", tid, to: id, attempt: 2 },
+    { type: "file_ack", tid, to: id, ok: true, sha256: sha },
+    { type: "file_cancel", tid, to: id, reason: "expired" },
+  ];
+  for (const b of ok) assert.deepEqual(parseBody(b), b, JSON.stringify(b));
+  const bad: unknown[] = [
+    null,
+    [],
+    { type: "nope" },
+    { type: "chat", text: "x", hop: 0, by: "god" },
+    { type: "chat", text: "x", hop: 1.5, by: "agent" },
+    { type: "chat", text: "x", hop: 0, by: "agent", mentions: ["short"] },
+    { type: "file_offer", tid, to: id, name: "", size: 3, sha256: sha, expiresAt: 1 },
+    { type: "file_offer", tid, to: id, name: "a", size: -1, sha256: sha, expiresAt: 1 },
+    { type: "file_ready", tid, to: id, attempt: 0 },
+    { type: "file_ack", tid, to: id, ok: "yes" },
+    { type: "file_ack", tid: "x", to: id, ok: true },
+  ];
+  for (const b of bad) assert.equal(parseBody(b), null, JSON.stringify(b));
+  // extra fields are stripped
+  assert.deepEqual(parseBody({ type: "hello", name: "B", agent: "a", evil: 1 }), { type: "hello", name: "B", agent: "a" });
+});
+
+test("sanitizeFileName", () => {
+  assert.equal(sanitizeFileName("../../etc/passwd"), "__.._etc_passwd");
+  assert.equal(sanitizeFileName(".bashrc"), "_bashrc");
+  assert.equal(sanitizeFileName("a\x00b/c.txt"), "a_b_c.txt");
+  assert.equal(sanitizeFileName(""), "file");
+  assert.equal(sanitizeFileName("ok name.tar.gz"), "ok name.tar.gz");
+  assert.ok(sanitizeFileName("x".repeat(300) + ".txt").endsWith(".txt"));
+});
