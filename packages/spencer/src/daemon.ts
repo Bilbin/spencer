@@ -502,13 +502,13 @@ export class Daemon {
       ...(this.need("cfg").croc.throttleUpload ? { crocThrottleUpload: this.need("cfg").croc.throttleUpload! } : {}),
       events: this.events,
       log: this.log,
-      ownerNote: (text) => {
+      ownerNote: (text, opts) => {
         const a = this.s.agent;
         if (!a) {
           this.log(`owner note (agent not ready): ${text}`);
           return;
         }
-        a.ownerNote(text).catch((e: Error) => this.log(`agent.ownerNote: ${e.message}`));
+        a.ownerNote(text, opts).catch((e: Error) => this.log(`agent.ownerNote: ${e.message}`));
       },
     };
   }

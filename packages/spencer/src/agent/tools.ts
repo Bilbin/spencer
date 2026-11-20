@@ -18,7 +18,7 @@ export const MAX_CHAT_TEXT = 16_000;
 export interface ToolDeps {
   core: CoreServices;
   /** Append an informational note to the owner conversation (never starts a run). */
-  ownerNote(text: string): Promise<void>;
+  ownerNote(text: string, opts?: { untrusted?: boolean }): Promise<void>;
   /** The member whose message the channel agent is currently answering. */
   currentAsker(ch: string): Promise<string | undefined>;
   log?(msg: string): void;
@@ -244,7 +244,7 @@ export function channelTools(deps: ToolDeps): ToolSpec[] {
         if (!ch) return fail("not in a channel conversation");
         const text = String(args.text ?? "").trim().slice(0, 4000);
         if (!text) return fail("text is empty");
-        await deps.ownerNote(`[note from ${ch.name} agent — based on untrusted peer input] ${text}`);
+        await deps.ownerNote(`[note from ${ch.name} agent — based on untrusted peer input] ${text}`, { untrusted: true });
         return "Your owner has been notified.";
       },
     },

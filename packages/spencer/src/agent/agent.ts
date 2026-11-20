@@ -20,7 +20,7 @@ import { McpManager } from "./mcp.ts";
 import { setupModels, type ModelSetup } from "./models.ts";
 import { OWNER_KEY, PiRuntime, channelKey, type AgentRuntime, type ToolSpec } from "./runtime.ts";
 import { MAX_CHAT_TEXT, channelTools, ownerTools } from "./tools.ts";
-import { wrapPeerMessage } from "./untrusted.ts";
+import { wrapPeerMessage, wrapUntrustedNote } from "./untrusted.ts";
 
 export interface AgentOptions {
   /** Hooks into the fake model (`model.provider = "fake"`), for tests. */
@@ -112,7 +112,7 @@ export class SpencerAgent implements AgentService {
 
     const deps = {
       core: this.core,
-      ownerNote: (text: string) => this.ownerNote(text),
+      ownerNote: (text: string, opts?: { untrusted?: boolean }) => this.ownerNote(text, opts),
       currentAsker: (ch: string) => this.currentAsker(ch),
       log: this.log,
     };
@@ -469,9 +469,17 @@ export class SpencerAgent implements AgentService {
     return this.runtime?.isBusy(OWNER_KEY) ?? false;
   }
 
-  async ownerNote(text: string): Promise<void> {
+  async ownerNote(text: string, opts: { untrusted?: boolean } = {}): Promise<void> {
     // The owner watch emits the `owner` event once the write is committed.
-    await this.rt().appendNote(OWNER_KEY, { kind: "spencer.note", data: { text, ts: Date.now() }, modelText: `[note] ${text}` });
+    if (!opts.untrusted) {
+      await this.rt().appendNote(OWNER_KEY, { kind: "spencer.note", data: { text, ts: Date.now() }, modelText: `[note] ${text}` });
+      return;
+    }
+    await this.rt().appendNote(OWNER_KEY, {
+      kind: "spencer.note",
+      data: { text, ts: Date.now(), untrusted: true },
+      modelText: wrapUntrustedNote(text),
+    });
   }
 
   async channelChanged(ch: string): Promise<void> {

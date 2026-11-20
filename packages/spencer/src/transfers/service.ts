@@ -149,7 +149,8 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
 
   function note(text: string): void {
     try {
-      deps.ownerNote(text);
+      // File names, peer display names and transfer reasons come from other people's Spencers.
+      deps.ownerNote(text, { untrusted: true });
     } catch {
       /* informational only */
     }

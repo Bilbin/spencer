@@ -164,8 +164,12 @@ export interface TransferDeps {
   /** croc `--throttleUpload` for sends (config `croc.throttleUpload`), e.g. "500k". */
   crocThrottleUpload?: string;
   events: EventSink;
-  /** Short informational note for the owner conversation (never starts a model run). */
-  ownerNote(text: string): void;
+  /**
+   * Short informational note for the owner conversation (never starts a model run).
+   * `untrusted`: the text contains peer-chosen strings (file names, display names), so the owner's
+   * model sees it wrapped as data, not as instructions.
+   */
+  ownerNote(text: string, opts?: { untrusted?: boolean }): void;
   /** Diagnostic log line (not shown to the owner). */
   log?: (msg: string) => void;
   now?: () => number;
@@ -266,8 +270,8 @@ export interface AgentService {
   ownerSend(text: string): Promise<{ submissionId: string }>;
   ownerTranscript(limit: number): Promise<OwnerItem[]>;
   ownerBusy(): boolean;
-  /** Informational note appended to the owner conversation (never starts a run). */
-  ownerNote(text: string): Promise<void>;
+  /** Informational note appended to the owner conversation (never starts a run). See TransferDeps.ownerNote. */
+  ownerNote(text: string, opts?: { untrusted?: boolean }): Promise<void>;
   /** A channel was created/joined/updated (settings, members): reconfigure its conversation. */
   channelChanged(ch: string): Promise<void>;
   mcpStatus(): McpServerStatus[];
