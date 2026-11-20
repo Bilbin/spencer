@@ -1,7 +1,8 @@
 // Shared bits used by several views: the view header, presence marks, the live working trace,
 // the composer, and loading/empty states.
 import { h, icon, iconButton, ago, elapsed, relTime, autoGrow } from "./dom.js";
-import { S, attentionCount, presenceOf, workingOf } from "./state.js";
+import { S, attentionCount, presenceOf, workingOf, pendingFollowups, upsertFollowup } from "./state.js";
+import { api, attempt, toast } from "./api.js";
 
 export function setSidebarOpen(open) {
   document.getElementById("app")?.classList.toggle("sidebar-open", open);
@@ -49,7 +50,8 @@ export function viewHeader(titleContent, actions = []) {
  */
 export function presenceInfo(member, ch) {
   if (!member || member.me) return null;
-  if (ch && workingOf(ch, member.id)) return { state: "working", text: "working" };
+  const w = ch && workingOf(ch, member.id);
+  if (w) return w.waiting ? { state: "waiting", text: "waiting for its owner" } : { state: "working", text: "working" };
   const p = presenceOf(member);
   if (!p.known) return null;
   if (p.online) return { state: "on", text: "online" };
@@ -243,4 +245,39 @@ export function skeleton(rows = 4) {
 /** emptyState({icon, title, text, actions}) */
 export function emptyState({ icon: name, title, text, actions }) {
   return h("div.empty-state", null, name ? h("span.empty-icon", { "aria-hidden": "true" }, icon(name, 22)) : null, h("h2", null, title), text ? h("p", null, text) : null, actions ? h("div.empty-actions", null, actions) : null);
+}
+
+/**
+ * Follow-ups a Spencer scheduled on itself ("I'll get back to you"), soonest first, each with a Cancel.
+ * where: "owner" or a channel id. Returns null when there are none.
+ * The note is the agent's own words, possibly shaped by peer text, so it is shown as plain text.
+ */
+export function followupList(where, opts = {}) {
+  const items = pendingFollowups(where);
+  if (!items.length) return null;
+  const row = (f) => {
+    const cancel = h("button.btn.ghost.xs", { type: "button", title: "Cancel this follow-up" }, "Cancel");
+    cancel.addEventListener("click", async () => {
+      cancel.disabled = true;
+      const res = await attempt(() => api.cancelFollowup(f.id));
+      if (res?.id) {
+        upsertFollowup(res);
+        toast("Follow-up cancelled.", "info");
+      } else cancel.disabled = false;
+    });
+    const when = f.state === "running" ? "now" : f.wakeOnReplyIn ? `on reply, or ${relTime(f.dueAt)}` : relTime(f.dueAt);
+    return h(
+      `li.followup${f.state === "running" ? ".running" : ""}`,
+      null,
+      icon("clock", 14),
+      h("div.followup-body", null, h("p.followup-note", null, f.note), h("span.followup-when", { title: new Date(f.dueAt).toLocaleString() }, f.state === "running" ? "Running now" : `Due ${when}`)),
+      f.state === "pending" ? cancel : null,
+    );
+  };
+  return h(
+    `section.followups${opts.compact ? ".compact" : ""}`,
+    { "aria-label": "Scheduled follow-ups" },
+    h("h2", null, opts.title ?? "Will get back to you", h("span.count", null, String(items.length))),
+    h("ul", null, items.map(row)),
+  );
 }

@@ -3,7 +3,7 @@ import { h, icon, iconButton, richText, shortFp, timeShort, timeFull, autoGrow, 
 import { api, attempt, toast } from "./api.js";
 import { S, on, setMessages, upsertTransfer, upsertChannel, removeChannel, markRead, peers, channelTitle, allMcpTools, workingIn, workingOf, presenceOf } from "./state.js";
 import { markdown } from "./md.js";
-import { viewHeader, composer, SEND_HINT, stage, skeleton, emptyState, trace, mark, presenceInfo, activityLine } from "./common.js";
+import { viewHeader, composer, SEND_HINT, stage, skeleton, emptyState, trace, mark, presenceInfo, activityLine, followupList } from "./common.js";
 import { transferCard } from "./transfers.js";
 import { openModal, field } from "./modal.js";
 import { scrollKeeper } from "./scroll.js";
@@ -14,6 +14,10 @@ const NOTE_LABEL = {
   "hop cap": "Your Spencer stayed quiet: the automatic reply limit was reached.",
   "rate limited": "Your Spencer stayed quiet: it is rate limited.",
   "auto-reply off": "Your Spencer stayed quiet: auto-reply is off here.",
+  "conversation ended": "Your Spencer stayed quiet: the other side ended the exchange.",
+  repeated: "Your Spencer stayed quiet: this repeats an earlier message.",
+  "budget exhausted": "Your Spencer paused: it used its automatic replies here. Continue or stop it from Needs you.",
+  "handled by owner": "Your Spencer picked this up in your own chat.",
 };
 /** Consecutive turns by the same speaker within this window share one header. */
 const GROUP_MS = 5 * 60_000;
@@ -114,6 +118,7 @@ function messageRow(c, m, byId, names, myNames, cont, hideRef) {
         h("span.who", { title: who.fp ? `Fingerprint ${who.fp}\nid ${who.id}` : undefined }, who.name),
         who.kind === "agent" && who.mine ? h("span.tag", null, "yours") : null,
         who.label ? h("span.tag", null, who.label) : null,
+        m.origin === "agent-followup" ? h("span.tag", { title: "Sent on its own, from a follow-up it scheduled" }, "follow-up") : null,
         m.hop > 0 ? h("span.tag.hop", { title: `Automatic reply, ${m.hop} ${m.hop === 1 ? "step" : "steps"} from a person's message` }, `hop ${m.hop}`) : null,
         time,
         statusMark(m),
@@ -122,7 +127,7 @@ function messageRow(c, m, byId, names, myNames, cont, hideRef) {
     `div.msg.${who.kind}${who.mine ? ".mine" : ""}${cont ? ".cont" : ""}${failed ? ".failed" : ""}`,
     { id: `m-${m.id}` },
     h("div.msg-gutter", null, cont ? [h("span.gutter-time", { "aria-hidden": "true" }, timeShort(m.ts).replace(/\s?[AP]M$/i, "")), statusMark(m)] : who.avatar()),
-    h("div.msg-body", null, head, hideRef ? null : replyRef(c, m, byId), h("div.msg-text.md", null, markdown(m.text ?? "", (s) => richText(s, names, myNames))), note),
+    h("div.msg-body", null, head, hideRef ? null : replyRef(c, m, byId), h("div.msg-text.md", null, markdown(m.text ?? "", (s) => richText(s, names, myNames))), m.final && !failed ? h("p.route-note.end", { title: "The sender closed this exchange and expects no answer" }, icon("check", 12), " Ended the exchange") : null, note),
   );
   if (!who.mine) row.style.setProperty("--h", String(hue(who.id)));
   return row;
@@ -544,6 +549,7 @@ export function channelView(main, chId) {
     members.replaceChildren(
       h("div.members-head", null, h("h2", null, c.kind === "group" ? "In this group" : "In this channel"), iconButton("close", "Close members", () => setMembersOpen(false), "members-close")),
       h("ul.member-list", null, c.members.map((m) => memberRow(c, m))),
+      ...[followupList(c.id, { title: "Your Spencer will follow up" })].filter(Boolean),
       h(
         "section.access",
         { "aria-label": "Access" },
@@ -778,6 +784,7 @@ export function channelView(main, chId) {
     on(`messages:${chId}`, onMessages),
     on("transfers", onTransfer),
     on(`working:${chId}`, renderWorking),
+    on("followups", renderMembers),
   ];
   return {
     destroy: () => {

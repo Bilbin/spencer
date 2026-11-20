@@ -10,6 +10,7 @@ import { S, upsertRequest } from "./state.js";
  */
 export function requestCard(id, fallback = {}) {
   const r = S.requests.get(id);
+  if (r?.kind === "continue") return continueCard(r);
   const state = r?.state ?? "pending";
   const who = r?.fromName ?? "A peer's Spencer";
   const ts = r?.createdAt ?? fallback.ts;
@@ -57,6 +58,48 @@ export function requestCard(id, fallback = {}) {
     ),
     h("div.ask-text.peer-text", null, linkify(text)),
     state === "pending" ? h("div.ask-chips", null, chips) : null,
+    foot,
+  );
+}
+
+/**
+ * A "continue?" card: the channel used up its automatic replies (turn budget), so the conversation is
+ * paused. Continue answers the waiting message and refills the budget; Stop tells the peer it is paused.
+ */
+function continueCard(r) {
+  const who = r.fromName ?? "the other Spencer";
+  const channel = S.channels.has(r.ch) ? h("a.ask-where", { href: `#/c/${encodeURIComponent(r.ch)}` }, r.channelName || "channel") : h("span.ask-where", null, r.channelName || "a channel");
+  let foot;
+  if (r.state === "pending") {
+    const go = h("button.btn.primary", { type: "button" }, "Continue");
+    const stop = h("button.btn", { type: "button" }, "Stop");
+    const decide = async (yes) => {
+      go.disabled = stop.disabled = true;
+      const res = await attempt(() => api.decideRequest(r.id, yes));
+      if (res?.id) {
+        upsertRequest(res);
+        toast(yes ? "Continuing. Your Spencer answers the waiting message." : `Stopped. ${who} was told the conversation is paused.`, "info");
+      } else go.disabled = stop.disabled = false;
+    };
+    go.addEventListener("click", () => decide(true));
+    stop.addEventListener("click", () => decide(false));
+    foot = h("div.ask-foot", null, h("p.ask-hint", null, "Continue gives it a fresh set of automatic replies. Writing in the channel yourself does the same."), h("div.ask-actions", null, stop, go));
+  } else {
+    const when = r.decidedAt ? h("time", { datetime: new Date(r.decidedAt).toISOString(), title: timeFull(r.decidedAt) }, timeShort(r.decidedAt)) : null;
+    foot = h("div.ask-foot.decided", null, icon(r.state === "approved" ? "check" : "close", 14), h("span", null, r.state === "approved" ? "You let it continue" : "You stopped it", when ? " at " : null, when));
+  }
+  return h(
+    `article.ask.continue.${r.state}`,
+    { "aria-label": `Paused conversation in ${r.channelName ?? "a channel"}`, dataset: { request: r.id } },
+    h(
+      "header.ask-head",
+      null,
+      avatar(who, r.from ?? who, "sm"),
+      h("div.ask-title", null, "Your Spencer paused its conversation with ", h("strong", null, who), " in ", channel),
+      r.createdAt ? h("time.ask-time", { datetime: new Date(r.createdAt).toISOString(), title: timeFull(r.createdAt), "data-rel": r.state === "pending" ? String(r.createdAt) : undefined }, r.state === "pending" ? relTime(r.createdAt) : timeShort(r.createdAt)) : null,
+    ),
+    r.text ? h("div.ask-text.peer-text", null, linkify(r.text)) : null,
+    r.state === "pending" ? h("div.ask-chips", null, h("span.chip", { title: "Your Spencer answered automatically as many times as its budget allows since you last wrote here." }, icon("shield", 12), "Automatic reply limit reached")) : null,
     foot,
   );
 }

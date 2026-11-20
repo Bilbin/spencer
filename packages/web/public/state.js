@@ -10,7 +10,8 @@ export const S = {
   channels: new Map(), // id -> Channel
   transfers: new Map(), // tid -> Transfer
   mcp: [], // McpServerStatus[]
-  requests: new Map(), // id -> OwnerRequest (ask_owner approvals)
+  requests: new Map(), // id -> OwnerRequest (ask_owner approvals and "continue?" cards)
+  followups: new Map(), // id -> Followup (reminders the agents scheduled on themselves)
   working: new Map(), // ch -> Map(memberId -> {replyTo, activity, steps, since, ts}): a Spencer is working on a reply
   messages: new Map(), // ch -> ChannelMessage[] (only for channels that were opened)
   owner: null, // OwnerItem[] once loaded
@@ -98,6 +99,7 @@ export function setState(st) {
   S.transfers = new Map((st.transfers ?? []).map((t) => [t.tid, t]));
   S.mcp = st.mcp ?? [];
   S.requests = new Map((st.requests ?? []).map((r) => [r.id, r]));
+  S.followups = new Map((st.followups ?? []).map((f) => [f.id, f]));
   for (const ch of Object.keys(S.ack)) {
     const c = S.channels.get(ch);
     // The server count dropped (e.g. it marked messages read): don't hide future ones.
@@ -113,12 +115,25 @@ export function setState(st) {
   emit("mcp");
   emit("owner");
   emit("requests");
+  emit("followups");
 }
 
 export function setOwnerBusy(busy) {
   if (busy && !S.ownerBusy) S.ownerBusySince = Date.now();
   S.ownerBusy = !!busy;
   emit("busy");
+}
+
+export function upsertFollowup(f) {
+  S.followups.set(f.id, f);
+  emit("followups");
+}
+
+/** Follow-ups still to come, soonest first. conversation: "owner", or a channel id. */
+export function pendingFollowups(where) {
+  return [...S.followups.values()]
+    .filter((f) => (f.state === "pending" || f.state === "running") && (where === "owner" ? f.conversation === "owner" : f.ch === where && f.conversation === "channel"))
+    .sort((a, b) => a.dueAt - b.dueAt);
 }
 
 export function upsertRequest(r) {
@@ -258,15 +273,16 @@ const WORKING_STALE_MS = 150_000;
 export function setWorking(ev) {
   let m = S.working.get(ev.ch);
   if (!m) S.working.set(ev.ch, (m = new Map()));
-  if (ev.state === "done") m.delete(ev.from);
+  if (ev.state === "done" || ev.state === "completed" || ev.state === "failed") m.delete(ev.from);
   else {
-    const activity = ev.activity || "Working…";
+    // input_required: the run is parked on its owner's approval (a remote ask_owner).
+    const activity = ev.state === "input_required" ? "Waiting for its owner's approval" : ev.activity || "Working…";
     const prev = m.get(ev.from);
     const same = prev && prev.replyTo === ev.replyTo;
     // Earlier activities of this run, so the UI can show a short trace instead of only the latest step.
     const steps = same ? [...prev.steps] : [];
     if (same && prev.activity !== activity) steps.push(prev.activity);
-    m.set(ev.from, { replyTo: ev.replyTo, activity, steps: steps.slice(-6), since: same ? prev.since : Date.now(), ts: Date.now() });
+    m.set(ev.from, { replyTo: ev.replyTo, activity, waiting: ev.state === "input_required", steps: steps.slice(-6), since: same ? prev.since : Date.now(), ts: Date.now() });
   }
   emit(`working:${ev.ch}`);
   emit("working");
@@ -292,20 +308,16 @@ export function workingIn(ch) {
 }
 
 // ---------------------------------------------------------------- presence
-// The daemon's presence API is not final. Everything is read defensively, and the UI shows nothing
-// presence-related when the data is absent.
+// The daemon sends member.presence = "online"|"offline"|"unknown" and member.lastSeen (ms), see PROTOCOL §8.
+// An older daemon sends nothing; the UI then shows nothing presence-related.
 
-/**
- * Presence of a channel member: {known, online, lastSeenAt}.
- * Reads member.presence?.online and member.presence?.lastSeenAt. `known` is false when the daemon sent
- * no usable presence for this member (older daemon, or my own entry).
- */
+/** Presence of a channel member: {known, online, lastSeenAt}. `known` is false for "unknown" or missing data. */
 export function presenceOf(member) {
   const p = member?.presence;
-  if (!p || typeof p !== "object") return { known: false, online: false, lastSeenAt: undefined };
-  const lastSeenAt = Number.isFinite(p.lastSeenAt) ? p.lastSeenAt : undefined;
-  if (typeof p.online !== "boolean") return { known: lastSeenAt !== undefined, online: false, lastSeenAt };
-  return { known: true, online: p.online, lastSeenAt };
+  const seen = Number.isFinite(member?.lastSeen) ? member.lastSeen : undefined;
+  if (p === "online") return { known: true, online: true, lastSeenAt: seen };
+  if (p === "offline") return { known: true, online: false, lastSeenAt: seen };
+  return { known: false, online: false, lastSeenAt: undefined };
 }
 
 /** Is this member's Spencer working in the channel right now? (Working implies reachable.) */
@@ -313,24 +325,16 @@ export function workingOf(ch, memberId) {
   return workingIn(ch).find((w) => w.from === memberId);
 }
 
-/**
- * A presence event. Accepted shapes: {type:"presence", id|member|from, ch?, presence:{online, lastSeenAt}} or with
- * online/lastSeenAt at the top level. Without `ch` it applies to that member in every channel.
- */
+/** A presence event: {type:"presence", ch, id, presence: "online"|"offline"|"unknown", lastSeen?}. */
 export function applyPresence(ev) {
-  const id = ev?.id ?? ev?.member ?? ev?.from;
-  if (typeof id !== "string") return;
-  const src = ev.presence && typeof ev.presence === "object" ? ev.presence : ev;
-  const next = {};
-  if (typeof src.online === "boolean") next.online = src.online;
-  if (Number.isFinite(src.lastSeenAt)) next.lastSeenAt = src.lastSeenAt;
-  if (!Object.keys(next).length) return;
+  if (typeof ev?.id !== "string" || typeof ev.presence !== "string") return;
   let touched = false;
   for (const c of S.channels.values()) {
     if (typeof ev.ch === "string" && ev.ch !== c.id) continue;
-    const m = c.members?.find((x) => x.id === id);
+    const m = c.members?.find((x) => x.id === ev.id);
     if (!m || m.me) continue;
-    m.presence = { ...(m.presence ?? {}), ...next };
+    m.presence = ev.presence;
+    if (Number.isFinite(ev.lastSeen)) m.lastSeen = ev.lastSeen;
     touched = true;
     emit(`channel:${c.id}`);
   }
@@ -354,14 +358,14 @@ export function relaysDown() {
 export function channelStatus(c) {
   if (!c) return { state: "unknown", text: "" };
   const req = pendingRequests().find((r) => r.ch === c.id);
-  if (req) return { state: "waiting", text: `Needs your yes for ${req.fromName ?? "a peer"}`, owes: true };
+  if (req) return { state: "waiting", text: req.kind === "continue" ? "Paused: continue or stop?" : `Needs your yes for ${req.fromName ?? "a peer"}`, owes: true };
   const xfer = [...S.transfers.values()].filter((t) => t.ch === c.id && needsAction(t)).sort((a, b) => a.createdAt - b.createdAt)[0];
   if (xfer) return { state: "waiting", text: xfer.direction === "out" ? `Waiting on your approval to send ${xfer.name}` : `Wants to send you ${xfer.name}`, owes: true };
   const others = peers(c);
   if (!others.length) return { state: "pending", text: "Invite not used yet" };
   if (S.loaded && S.wsUp && S.relay && S.relay.connected === false) return { state: "blocked", text: "Relay offline. Messages are queued." };
   const w = workingIn(c.id)[0];
-  if (w) return { state: /^thinking/i.test(w.activity) ? "thinking" : "working", text: w.activity.replace(/…$/, ""), from: w.from };
+  if (w) return { state: w.waiting ? "waiting" : /^thinking/i.test(w.activity) ? "thinking" : "working", text: w.activity.replace(/…$/, ""), from: w.from };
   if (c.kind === "group") {
     const known = others.filter((m) => presenceOf(m).known);
     if (!known.length) return { state: "unknown", text: `${c.members.length} member${c.members.length === 1 ? "" : "s"}` };

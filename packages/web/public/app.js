@@ -11,6 +11,7 @@ import {
   upsertTransfer,
   upsertOwner,
   upsertRequest,
+  upsertFollowup,
   setWorking,
   clearWorkingFor,
   setOwner,
@@ -61,7 +62,14 @@ function linkStatus() {
   const down = relaysDown();
   if (S.relay?.connected && !down.length) return { state: "up", text: "Connected", title: `Relay connected: ${S.relay.url}` };
   const urls = down.length ? down.map((r) => r.url).join(", ") : (S.relay?.url ?? "");
-  return { state: "down", text: "Relay offline", title: `Relay disconnected: ${urls}. Messages are queued until it is back.` };
+  const r = down[0];
+  const why = r?.lastError ? ` Last error: ${r.lastError}.` : "";
+  if (r?.state === "connecting") return { state: "down", text: "Connecting to relay", title: `Connecting to ${urls}. Messages are queued.${why}` };
+  if (r?.state === "waiting" && Number.isFinite(r.retryAt)) {
+    const s = Math.max(0, Math.round((r.retryAt - Date.now()) / 1000));
+    return { state: "down", text: s > 1 ? `Relay offline · retry in ${s}s` : "Relay offline · retrying", title: `Relay disconnected: ${urls}. Messages are queued until it is back.${why}` };
+  }
+  return { state: "down", text: "Relay offline", title: `Relay disconnected: ${urls}. Messages are queued until it is back.${why}` };
 }
 
 function renderSidebar() {
@@ -282,7 +290,7 @@ function handleEvent(ev) {
       const prev = S.requests.get(r.id);
       upsertRequest(r);
       if (!prev && r.state === "pending" && S.view.name !== "owner" && S.view.name !== "inbox")
-        toast(`${r.fromName ?? "A peer's Spencer"} asks for your approval`, "attn", { action: { label: "Review", onClick: () => navigate({ name: "inbox" }) } });
+        toast(r.kind === "continue" ? `Your Spencer paused its conversation in ${r.channelName ?? "a channel"}` : `${r.fromName ?? "A peer's Spencer"} asks for your approval`, "attn", { action: { label: "Review", onClick: () => navigate({ name: "inbox" }) } });
       break;
     }
     case "owner_busy":
@@ -291,12 +299,17 @@ function handleEvent(ev) {
     case "presence":
       applyPresence(ev);
       break;
-    case "relay":
-      // With several relays in use, the event is about one of them; "connected" overall means all are.
-      if (S.relays.length && ev.url) S.relays = S.relays.map((r) => (r.url === ev.url ? { ...r, connected: !!ev.connected } : r));
+    case "followup":
+      if (ev.followup?.id) upsertFollowup(ev.followup);
+      break;
+    case "relay": {
+      // {type:"relay", ...RelayStatus}: one relay's connection changed; "connected" overall means all are.
+      const { type: _t, ...rs } = ev;
+      if (ev.url) S.relays = S.relays.some((r) => r.url === ev.url) ? S.relays.map((r) => (r.url === ev.url ? { ...r, ...rs } : r)) : [...S.relays, rs];
       S.relay = { url: S.relay.url || ev.url || "", connected: S.relays.length ? S.relays.every((r) => r.connected) : !!ev.connected };
       emit("relay");
       break;
+    }
     case "mcp":
       if (Array.isArray(ev.servers)) {
         S.mcp = ev.servers;

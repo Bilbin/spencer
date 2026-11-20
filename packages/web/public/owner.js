@@ -2,7 +2,7 @@
 import { h, icon, linkify, timeShort, timeFull, selfAvatar } from "./dom.js";
 import { api, attempt } from "./api.js";
 import { S, on, setOwner } from "./state.js";
-import { viewHeader, composer, SEND_HINT, stage, skeleton, trace, mark, activityNode } from "./common.js";
+import { viewHeader, composer, SEND_HINT, stage, skeleton, trace, mark, activityNode, followupList } from "./common.js";
 import { markdown } from "./md.js";
 import { scrollKeeper } from "./scroll.js";
 import { requestCard } from "./requests.js";
@@ -151,7 +151,11 @@ export function ownerView(main) {
 
   const headMark = h("span.header-mark");
   const sub = h("span.subtitle");
-  main.append(viewHeader([headMark, h("div.title-stack", null, h("h1", null, "Spencer"), sub)]), st.el, comp.form);
+  // Reminders Spencer set on itself, docked above the composer so "I'll check back" stays visible.
+  const later = h("div.owner-later");
+  const renderLater = () => later.replaceChildren(...[followupList("owner", { compact: true, title: "Spencer will check back" })].filter(Boolean));
+  main.append(viewHeader([headMark, h("div.title-stack", null, h("h1", null, "Spencer"), sub)]), st.el, later, comp.form);
+  renderLater();
 
   let seen = 0;
   const render = () => {
@@ -234,6 +238,6 @@ export function ownerView(main) {
     comp.input.focus();
   });
 
-  const offs = [on("owner", () => (render(), renderBusy())), on("busy", () => (render(), renderBusy()))];
+  const offs = [on("owner", () => (render(), renderBusy())), on("busy", () => (render(), renderBusy())), on("followups", renderLater)];
   return { destroy: () => offs.forEach((f) => f()) };
 }

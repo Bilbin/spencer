@@ -9,8 +9,8 @@
  * progress, working status, presence changes, an owner request), so every screen can be exercised
  * without a daemon.
  *
- * Presence is not in the daemon's contracts yet. The mock sends the shape the UI reads defensively:
- * `member.presence = {online, lastSeenAt}` on channel members, plus `{type:"presence", id, presence}` events.
+ * Presence follows PROTOCOL §8: `member.presence = "online"|"offline"|"unknown"` and `member.lastSeen`, plus
+ * `{type:"presence", ch, id, presence, lastSeen}` events (one per channel the member is in).
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -18,14 +18,14 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { join, normalize, extname, basename, sep } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { Channel, ChannelMember, ChannelMessage, Transfer, OwnerItem, OwnerRequest, McpServerStatus, DaemonEvent } from "../../spencer/src/contracts.ts";
+import type { Channel, ChannelMember, ChannelMessage, Transfer, OwnerItem, OwnerRequest, McpServerStatus, DaemonEvent, Followup } from "../../spencer/src/contracts.ts";
 
 interface Presence {
   online: boolean;
   lastSeenAt?: number;
 }
-type MockMember = ChannelMember & { presence?: Presence };
-type MockEvent = DaemonEvent | { type: "presence"; id: string; presence: Presence };
+type MockMember = ChannelMember;
+type MockEvent = DaemonEvent;
 
 const PORT = Number(process.argv[2] ?? process.env.PORT ?? 7421);
 const TOKEN = process.env.SPENCER_TOKEN ?? randomBytes(16).toString("hex");
@@ -81,6 +81,7 @@ const messages = new Map<string, ChannelMessage[]>();
 const transfers = new Map<string, Transfer>();
 const owner: OwnerItem[] = [];
 const requests = new Map<string, OwnerRequest>();
+const followups = new Map<string, Followup>();
 /** Live working statuses (ch -> from -> event), replayed to a UI that connects mid-run. */
 const working = new Map<string, Extract<DaemonEvent, { type: "status" }>>();
 let ownerBusy = false;
@@ -118,7 +119,15 @@ const mcp: McpServerStatus[] = [
 
 function member(p: Person): MockMember {
   const pr = presence.get(p.id);
-  return { id: p.id, name: p.name, fingerprint: p.fingerprint, me: p.id === me.id, ...(pr ? { presence: { ...pr } } : {}) };
+  const mine = p.id === me.id;
+  return {
+    id: p.id,
+    name: p.name,
+    fingerprint: p.fingerprint,
+    me: mine,
+    presence: mine ? "online" : pr ? (pr.online ? "online" : "offline") : "unknown",
+    ...(pr?.lastSeenAt ? { lastSeen: pr.lastSeenAt } : {}),
+  };
 }
 
 function addChannel(kind: "direct" | "group", name: string, ps: Person[], extra: Partial<Channel> = {}): Channel {
@@ -229,6 +238,8 @@ addMsg(
   },
   t0 + 7.2 * MIN,
 );
+const fu = addMsg(bobCh.id, me, { text: "Following up as promised: the restore test from last night's backup passed (3,214 files, 0 mismatches).", hop: 1, by: "agent", origin: "agent-followup" }, t0 + 15 * MIN);
+addMsg(bobCh.id, bob, { text: "Great, that's all I needed. Thanks!", hop: 2, by: "agent", replyTo: fu.id, final: true }, t0 + 15.5 * MIN);
 addMsg(bobCh.id, bob, { text: "(Bob here, typing myself) are we still on for Friday?", hop: 0, by: "human", note: "not addressed" }, t0 + 20 * MIN);
 addMsg(bobCh.id, me, { text: "Friday works — see you at 7. Details: https://example.com/friday?ref=spencer", hop: 0, by: "human", status: "pending" }, t0 + 21 * MIN);
 
@@ -269,6 +280,7 @@ addOwner({ role: "assistant", text: "Bob's Spencer confirmed the backup finished
 addOwner({ role: "note", text: "Channel Networking Group used mcp__t3code__project_list (allowed in that channel)." }, t0 + 12.1 * MIN);
 const req: OwnerRequest = {
   id: b64u(12),
+  kind: "peer",
   ch: group.id,
   channelName: group.name,
   from: dave.id,
@@ -278,8 +290,30 @@ const req: OwnerRequest = {
   createdAt: t0 + 12.2 * MIN,
 };
 requests.set(req.id, req);
+// The Networking Group used up its automatic replies: a "continue?" card.
+const cont: OwnerRequest = {
+  id: b64u(12),
+  kind: "continue",
+  ch: group.id,
+  channelName: group.name,
+  from: carol.id,
+  fromName: carol.name,
+  text: "Carol's Spencer and I have traded 20 automatic replies about the meetup agenda since you last wrote here.",
+  state: "pending",
+  createdAt: t0 + 13 * MIN,
+};
+requests.set(cont.id, cont);
+addOwner({ role: "note", request: cont.id, text: cont.text }, t0 + 13 * MIN);
 addOwner({ role: "note", untrusted: true, request: req.id, text: `Request from ${dave.name} in ${group.name}:\n${req.text}` }, t0 + 12.2 * MIN);
 addOwner({ role: "note", text: "Transfer photos.zip from Bob's Spencer completed. It is in quarantine." }, t0 + 30 * MIN);
+
+for (const f of [
+  { conversation: "owner", note: "Check whether Bob's Spencer finished the restore test and tell me the result.", dueAt: now() + 25 * MIN, wakeOnReplyIn: bobCh.id },
+  { conversation: "channel", ch: group.id, note: "Post the T3 thread result for Dave once the preview server restart finishes.", dueAt: now() + 8 * MIN },
+] as const) {
+  const id = b64u(9);
+  followups.set(id, { id, depth: 0, state: "pending", createdAt: t0 + 20 * MIN, ...f } as Followup);
+}
 
 addTransfer({ ch: bobCh.id, direction: "out", peer: bob.id, name: "q3-report.pdf", size: 2_516_582, state: "awaiting_approval", initiatedBy: "peer-agent", reason: "Bob asked for the Q3 report for tomorrow's review", createdAt: t0 + 8 * MIN, path: "/home/alice/.local/share/spencer/outgoing/x/q3-report.pdf" });
 addTransfer({ ch: bobCh.id, direction: "in", peer: bob.id, name: "backup-2026-11-19.log", size: 18_874_368, state: "offered", initiatedBy: "peer", createdAt: t0 + 7.5 * MIN });
@@ -328,9 +362,11 @@ function setPresence(p: Person, online: boolean) {
   presence.set(p.id, pr);
   for (const c of channels.values()) {
     const m = (c.members as MockMember[]).find((x) => x.id === p.id);
-    if (m) m.presence = { ...pr };
+    if (!m) continue;
+    m.presence = online ? "online" : "offline";
+    m.lastSeen = pr.lastSeenAt;
+    emit({ type: "presence", ch: c.id, id: p.id, presence: m.presence, ...(m.lastSeen ? { lastSeen: m.lastSeen } : {}) });
   }
-  emit({ type: "presence", id: p.id, presence: pr });
 }
 
 function incoming(ch: Channel, from: Person, m: Partial<ChannelMessage> & { text?: string }) {
@@ -554,6 +590,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       policy,
       ownerBusy,
       requests: [...requests.values()].reverse(),
+      followups: [...followups.values()],
     };
   }
   if (a === "owner" && b === "messages" && !c) {
@@ -667,6 +704,17 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     if (b && !c && method === "GET") return getTransfer(b);
   }
   if (a === "mcp" && method === "GET" && !b) return { servers: mcp };
+  if (a === "followups") {
+    if (!b && method === "GET") return { items: [...followups.values()] };
+    if (b && c === "cancel" && method === "POST") {
+      const f = followups.get(b);
+      if (!f) throw new HttpError(404, "unknown follow-up");
+      if (f.state !== "pending" && f.state !== "running") throw new HttpError(409, `follow-up already ${f.state}`);
+      f.state = "cancelled";
+      emit({ type: "followup", followup: f });
+      return f;
+    }
+  }
   if (a === "requests") {
     if (!b && method === "GET") return { items: [...requests.values()].reverse() };
     if (b && (c === "approve" || c === "deny") && method === "POST") {
@@ -676,7 +724,9 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       r.state = c === "approve" ? "approved" : "denied";
       r.decidedAt = now();
       emit({ type: "request", request: r });
-      if (c === "approve") {
+      if (r.kind === "continue") {
+        if (c === "deny" && channels.has(r.ch)) emitMsg(addMsg(r.ch, me, { text: "Pausing here; my owner will pick this up.", hop: 1, by: "agent", origin: "agent-reply", final: true }));
+      } else if (c === "approve") {
         emitOwner(addOwner({ role: "user", text: `I approve this request from ${r.fromName}: ${r.text}` }));
         ownerReply("approved request");
       } else if (channels.has(r.ch)) {
