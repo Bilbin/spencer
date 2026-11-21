@@ -1,9 +1,11 @@
 import { isB64uId } from "./encoding.ts";
 
+export const P2P_FILES_FEATURE = "p2p-files/1";
+export const MAX_LINK_SEALED = 16 * 1024;
 export const MAX_CHAT_TEXT = 16_000;
 export const AGENT_VERSION = "spencer/0.1";
 
-export type HelloBody = { type: "hello"; name: string; about?: string; agent: string };
+export type HelloBody = { type: "hello"; name: string; about?: string; agent: string; features?: string[] };
 export type ChatBody = {
   type: "chat";
   text: string;
@@ -28,7 +30,7 @@ export type FileOfferBody = {
 };
 export type FileAcceptBody = { type: "file_accept"; tid: string; to: string; sealed: string };
 export type FileDeclineBody = { type: "file_decline"; tid: string; to: string; reason?: string };
-export type FileReadyBody = { type: "file_ready"; tid: string; to: string; attempt: number };
+export type FileReadyBody = { type: "file_ready"; tid: string; to: string; attempt: number; via?: "link" };
 export type FileRetryBody = { type: "file_retry"; tid: string; to: string; attempt: number };
 export type FileAckBody = { type: "file_ack"; tid: string; to: string; ok: boolean; sha256?: string; reason?: string };
 export type FileCancelBody = { type: "file_cancel"; tid: string; to: string; reason: string };
@@ -55,7 +57,14 @@ export const STATUS_STATES = ["working", "done", "input_required", "completed", 
 export type StatusState = (typeof STATUS_STATES)[number];
 export type StatusBody = { type: "status"; replyTo: string; state: StatusState; activity?: string };
 
-export type Body = HelloBody | ChatBody | FileBody | StatusBody;
+export type LinkOfferBody = { type: "link_offer"; to: string; sid: string; sealed: string };
+export type LinkAnswerBody = { type: "link_answer"; to: string; sid: string; sealed: string };
+export type LinkCloseBody = { type: "link_close"; to: string; sid: string; reason?: string };
+export type LinkBody = LinkOfferBody | LinkAnswerBody | LinkCloseBody;
+export const LINK_BODY_TYPES = new Set(["link_offer", "link_answer", "link_close"]);
+export function isLinkBody(b: Body): b is LinkBody { return LINK_BODY_TYPES.has(b.type); }
+
+export type Body = HelloBody | ChatBody | FileBody | StatusBody | LinkBody;
 
 export const FILE_BODY_TYPES = new Set([
   "file_offer",
@@ -84,7 +93,8 @@ export function parseBody(raw: unknown): Body | null {
     case "hello":
       if (!isStr(b.name, 200) || !isStr(b.agent, 100)) return null;
       if (b.about !== undefined && !isStr(b.about, 2000)) return null;
-      return { type: "hello", name: b.name, agent: b.agent, ...(b.about !== undefined ? { about: b.about as string } : {}) };
+      if (b.features !== undefined && (!Array.isArray(b.features) || b.features.length > 8 || !b.features.every((f: unknown) => isStr(f, 32) && f.length > 0))) return null;
+      return { type: "hello", name: b.name, agent: b.agent, ...(b.features !== undefined ? { features: b.features as string[] } : {}), ...(b.about !== undefined ? { about: b.about as string } : {}) };
     case "chat": {
       if (!isStr(b.text, MAX_CHAT_TEXT) || !isInt(b.hop) || (b.by !== "human" && b.by !== "agent")) return null;
       if (b.replyTo !== undefined && !isB64uId(b.replyTo)) return null;
@@ -103,6 +113,15 @@ export function parseBody(raw: unknown): Body | null {
       return { type: "status", replyTo: b.replyTo, state: b.state as StatusState, ...(b.activity !== undefined ? { activity: b.activity as string } : {}) };
     }
   }
+  if (LINK_BODY_TYPES.has(b.type as string)) {
+    if (!isId32(b.to) || !isB64uId(b.sid)) return null;
+    if (b.type === "link_close") {
+      if (b.reason !== undefined && !isStr(b.reason, 200)) return null;
+      return { type: "link_close", to: b.to, sid: b.sid, ...(b.reason !== undefined ? { reason: b.reason as string } : {}) };
+    }
+    if (!isStr(b.sealed, MAX_LINK_SEALED) || !b.sealed.length) return null;
+    return { type: b.type as "link_offer" | "link_answer", to: b.to, sid: b.sid, sealed: b.sealed };
+  }
   if (!FILE_BODY_TYPES.has(b.type as string)) return null;
   if (!isB64uId(b.tid) || !isId32(b.to)) return null;
   const base = { tid: b.tid as string, to: b.to as string };
@@ -117,6 +136,8 @@ export function parseBody(raw: unknown): Body | null {
       if (b.reason !== undefined && !isStr(b.reason)) return null;
       return { type: "file_decline", ...base, ...(b.reason !== undefined ? { reason: b.reason as string } : {}) };
     case "file_ready":
+      if (!isInt(b.attempt, 1) || (b.via !== undefined && b.via !== "link")) return null;
+      return { type: "file_ready", ...base, attempt: b.attempt, ...(b.via === "link" ? { via: "link" } : {}) };
     case "file_retry":
       if (!isInt(b.attempt, 1)) return null;
       return { type: b.type, ...base, attempt: b.attempt };

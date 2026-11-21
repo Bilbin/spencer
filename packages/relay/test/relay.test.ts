@@ -591,3 +591,32 @@ test("ephemeral sends: pushed live as `eph`, never stored or redelivered; an old
   assert.equal(stored.seq, 1, "stored like any message");
   assert.equal(countMessages(old.dbPath, oc.ch), 1);
 });
+
+test("STUN binding, rate limiting, welcome and shutdown", async () => {
+  const { createSocket } = await import("node:dgram");
+  const r = await relay({ stunBind: "127.0.0.1:0" });
+  const c = await Client.connect(r.url);
+  assert.ok(c.welcome!.features.includes("stun"));
+  assert.equal(c.welcome!.stun, `127.0.0.1:${r.stunPort}`);
+  const plain = await relay();
+  const other = await Client.connect(plain.url);
+  assert.equal(other.welcome!.stun, undefined);
+  assert.ok(!other.welcome!.features.includes("stun"));
+  const sock = createSocket("udp4");
+  await new Promise<void>(resolve => sock.bind(0, "127.0.0.1", resolve));
+  const req = Buffer.alloc(20); req.writeUInt16BE(1, 0); req.writeUInt32BE(0x2112a442, 4); req.fill(7, 8);
+  const received: Buffer[] = []; sock.on("message", m => received.push(m));
+  const send = (b: Buffer) => new Promise<void>((resolve, reject) => sock.send(b, r.stunPort!, "127.0.0.1", e => e ? reject(e) : resolve()));
+  await send(Buffer.alloc(20));
+  for (let i = 0; i < 25; i++) await send(req);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(received.length, 20);
+  const res = received[0]; assert.equal(res.readUInt16BE(0), 0x101); assert.equal(res.readUInt32BE(4), 0x2112a442);
+  assert.deepEqual(res.subarray(8, 20), req.subarray(8)); assert.equal(res.readUInt16BE(20), 0x20); assert.equal(res[25], 1);
+  assert.equal(res.readUInt16BE(26) ^ 0x2112, sock.address().port);
+  assert.deepEqual([...res.subarray(28, 32)].map((x, i) => x ^ res[4 + i]), [127, 0, 0, 1]);
+  sock.close(); c.close(); await r.close();
+  const reuse = createSocket("udp4");
+  await new Promise<void>((resolve, reject) => { reuse.once("error", reject); reuse.bind(r.stunPort!, "127.0.0.1", resolve); });
+  reuse.close();
+});

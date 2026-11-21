@@ -30,9 +30,12 @@ const relay = await startRelay({
   dbPath,
   ttlDays,
   ...(crocOn ? { crocRelay, crocPass } : {}),
+  ...(env.SPENCER_RELAY_STUN_BIND ? { stunBind: env.SPENCER_RELAY_STUN_BIND, stunPublic: env.SPENCER_RELAY_STUN_PUBLIC } : {}),
   log,
 });
 log(`spencer-relay listening on ${relay.httpUrl} (db ${dbPath}, ttl ${ttlDays}d, croc ${crocOn ? crocRelay : "off"})`);
+
+log(`STUN ${relay.stunAddress ?? "off"}`);
 
 let stopping = false;
 const stop = (sig: string) => {

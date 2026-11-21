@@ -15,7 +15,7 @@ export interface MemberInfo {
 }
 
 /** Optional relay features announced in `welcome.features`. */
-export type RelayFeature = "presence" | "ephemeral";
+export type RelayFeature = "presence" | "ephemeral" | "stun";
 
 // ----- client → relay -----
 export type ClientFrame =
@@ -32,7 +32,7 @@ export type ClientFrame =
 // ----- relay → client -----
 export type ServerFrame =
   | { t: "challenge"; nonce: string; server: string }
-  | { t: "welcome"; id: string; croc?: CrocInfo; features?: string[] }
+  | { t: "welcome"; id: string; croc?: CrocInfo; features?: string[]; stun?: string }
   | { t: "ok"; rid: string; [k: string]: unknown }
   | { t: "err"; rid?: string; code: RelayErrorCode; msg: string }
   | { t: "msg"; ch: string; seq: number; env: Envelope }

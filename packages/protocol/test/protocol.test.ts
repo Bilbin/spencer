@@ -188,3 +188,28 @@ test("sanitizeFileName", () => {
   assert.equal(sanitizeFileName("ok name.tar.gz"), "ok name.tar.gz");
   assert.ok(sanitizeFileName("x".repeat(300) + ".txt").endsWith(".txt"));
 });
+
+test("link bodies, features, encryption and relay URL", async () => {
+  const { sealLink, openLink, normalizeRelayUrl, MAX_LINK_SEALED, isLinkBody } = await import("../src/index.ts");
+  const to = generateIdentity().id, sid = newChannelSecret().ch;
+  const hello = { type: "hello", name: "n", agent: "a", features: ["p2p-files/1"] };
+  assert.deepEqual(parseBody(hello), hello);
+  for (const features of [null, [""], ["x".repeat(33)], Array(9).fill("x"), [1]]) assert.equal(parseBody({ ...hello, features }), null);
+  for (const type of ["link_offer", "link_answer"]) {
+    const body = { type, to, sid, sealed: "x" };
+    assert.deepEqual(parseBody(body), body);
+    assert.ok(isLinkBody(parseBody(body)!));
+    for (const patch of [{ to: "bad" }, { sid: "bad" }, { sealed: "" }, { sealed: "x".repeat(MAX_LINK_SEALED + 1) }]) assert.equal(parseBody({ ...body, ...patch }), null);
+  }
+  assert.deepEqual(parseBody({ type: "link_close", to, sid, reason: "done" }), { type: "link_close", to, sid, reason: "done" });
+  assert.equal(parseBody({ type: "link_close", to, sid, reason: "x".repeat(201) }), null);
+  assert.equal(parseBody({ type: "file_ready", to, tid: sid, attempt: 1, via: "bad" }), null);
+  assert.deepEqual(parseBody({ type: "file_ready", to, tid: sid, attempt: 1, via: "link" }), { type: "file_ready", to, tid: sid, attempt: 1, via: "link" });
+  const key = new Uint8Array(32), sealed = sealLink(key, "offer", sid, { ok: true });
+  assert.deepEqual(openLink(key, "offer", sid, sealed), { ok: true });
+  assert.throws(() => openLink(key, "answer", sid, sealed));
+  assert.throws(() => openFrom(key, sid, sealed));
+  assert.equal(normalizeRelayUrl(" https://example.com/ "), "wss://example.com/ws");
+  assert.equal(normalizeRelayUrl("http://example.com/relay/ws/"), "ws://example.com/relay/ws");
+  for (const url of ["bad", "ftp://x", "ws://u:p@x", "ws://x/?a", "ws://x/#a"]) assert.throws(() => normalizeRelayUrl(url));
+});

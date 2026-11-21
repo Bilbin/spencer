@@ -19,6 +19,7 @@ import {
   type Envelope,
   type RelayErrorCode,
 } from "@spencer/protocol";
+import { startStun } from "./stun.ts";
 import { RelayDb } from "./db.ts";
 import { INVITE_PAGE_HEADERS, INVITE_PAGE_HTML, INVITE_PATH_RE } from "./invite-page.ts";
 
@@ -29,16 +30,20 @@ export interface RelayOptions {
   ttlDays?: number;
   crocRelay?: string;
   crocPass?: string;
+  stunBind?: string;
+  stunPublic?: string;
   now?: () => number;
   log?: (msg: string) => void;
   /** Optional protocol features, all on by default (tests turn them off to act like an older relay). */
-  features?: { presence?: boolean; ephemeral?: boolean };
+  features?: { presence?: boolean; ephemeral?: boolean; stun?: boolean };
 }
 
 export interface RelayHandle {
   port: number;
   url: string;
   httpUrl: string;
+  stunPort?: number;
+  stunAddress?: string;
   close(): Promise<void>;
 }
 
@@ -120,9 +125,16 @@ export async function startRelay(opts: RelayOptions): Promise<RelayHandle> {
   const croc: CrocInfo | undefined = opts.crocRelay ? { relay: opts.crocRelay, pass: opts.crocPass ?? "" } : undefined;
   const presenceOn = opts.features?.presence !== false;
   const ephemeralOn = opts.features?.ephemeral !== false;
-  const features = [...(presenceOn ? ["presence"] : []), ...(ephemeralOn ? ["ephemeral"] : [])];
-
   const db = new RelayDb(opts.dbPath);
+  let stun: Awaited<ReturnType<typeof startStun>> | undefined;
+  if (opts.stunBind && opts.features?.stun !== false) {
+    const match = /^(?:\[([^\]]+)\]|([^:]+)):(\d+)$/.exec(opts.stunBind);
+    if (!match || Number(match[3]) > 65535) { db.close(); throw new Error("invalid STUN bind address"); }
+    try { stun = await startStun(match[1] || match[2], Number(match[3])); } catch (e) { db.close(); throw e; }
+  }
+  const stunAddress = stun ? (opts.stunPublic || `${stun.host.includes(":") ? `[${stun.host}]` : stun.host}:${stun.port}`) : undefined;
+  const features = [...(presenceOn ? ["presence"] : []), ...(ephemeralOn ? ["ephemeral"] : []), ...(stun ? ["stun"] : [])];
+
   const conns = new Set<Conn>();
   /** identity id → its authenticated connections */
   const byId = new Map<string, Set<Conn>>();
@@ -396,6 +408,7 @@ export async function startRelay(opts: RelayOptions): Promise<RelayHandle> {
     const cameOnline = set.size === 0;
     set.add(c);
     const welcome: Record<string, unknown> = { t: "welcome", id, features };
+    if (stunAddress) welcome.stun = stunAddress;
     if (croc && db.hasAnyMembership(id)) welcome.croc = croc;
     sendFrame(c, welcome);
     if (presenceOn) {
@@ -569,6 +582,7 @@ export async function startRelay(opts: RelayOptions): Promise<RelayHandle> {
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
   });
 
+  try {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(opts.port ?? 0, host, () => {
@@ -576,6 +590,7 @@ export async function startRelay(opts: RelayOptions): Promise<RelayHandle> {
       resolve();
     });
   });
+  } catch (e) { clearInterval(heartbeat); clearInterval(gcTimer); db.close(); await stun?.close(); throw e; }
   server.on("error", (e) => log(`http error: ${e.message}`));
 
   const port = (server.address() as AddressInfo).port;
@@ -584,6 +599,7 @@ export async function startRelay(opts: RelayOptions): Promise<RelayHandle> {
 
   return {
     port,
+    ...(stun ? { stunPort: stun.port, stunAddress } : {}),
     url: `ws://${hostForUrl}:${port}/ws`,
     httpUrl: `http://${hostForUrl}:${port}`,
     close() {
@@ -599,6 +615,7 @@ export async function startRelay(opts: RelayOptions): Promise<RelayHandle> {
           server.close(() => resolve());
           server.closeAllConnections();
         });
+        await stun?.close();
         db.close();
       })();
       return closing;

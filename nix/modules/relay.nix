@@ -77,6 +77,13 @@ in
       type = lib.types.str;
       default = "192M";
     };
+    stun = {
+      enable = lib.mkEnableOption "the STUN server";
+      bind = lib.mkOption { type = lib.types.str; default = "0.0.0.0:${toString cfg.stun.port}"; };
+      port = lib.mkOption { type = lib.types.port; default = 3478; };
+      publicAddress = lib.mkOption { type = lib.types.str; default = "${cfg.nginx.domain}:${toString cfg.stun.port}"; };
+      openFirewall = lib.mkOption { type = lib.types.bool; default = true; };
+    };
     croc = {
       enable = lib.mkEnableOption "a self-hosted croc relay for Spencer file transfers";
       package = lib.mkOption {
@@ -119,6 +126,8 @@ in
         SPENCER_RELAY_HOST = cfg.host;
         SPENCER_RELAY_PORT = toString cfg.port;
         SPENCER_RELAY_TTL_DAYS = toString cfg.ttlDays;
+        SPENCER_RELAY_STUN_BIND = if cfg.stun.enable then cfg.stun.bind else "";
+        SPENCER_RELAY_STUN_PUBLIC = if cfg.stun.enable then cfg.stun.publicAddress else "";
         SPENCER_CROC_RELAY = if cfg.croc.enable then cfg.croc.publicAddress else "";
         NODE_OPTIONS = "--max-old-space-size=128";
       };
@@ -149,6 +158,8 @@ in
         MemoryDenyWriteExecute = true;
       };
     };
+
+    networking.firewall.allowedUDPPorts = lib.mkIf (cfg.stun.enable && cfg.stun.openFirewall) [ cfg.stun.port ];
 
     networking.firewall.allowedTCPPortRanges = lib.mkIf (cfg.croc.enable && cfg.croc.openFirewall) [
       {

@@ -126,3 +126,20 @@ export function sealFor(key: Uint8Array, tid: string, obj: unknown): string {
 export function openFrom<T = unknown>(key: Uint8Array, tid: string, sealed: string): T {
   return JSON.parse(fromUtf8(openWith(key, `spencer/v1/seal:${tid}`, sealed))) as T;
 }
+
+export function sealLink(key: Uint8Array, role: "offer" | "answer", sid: string, obj: unknown): string {
+  return sealWith(key, `spencer/v1/link:${role}:${sid}`, utf8(JSON.stringify(obj)));
+}
+export function openLink<T = unknown>(key: Uint8Array, role: "offer" | "answer", sid: string, sealed: string): T {
+  return JSON.parse(fromUtf8(openWith(key, `spencer/v1/link:${role}:${sid}`, sealed))) as T;
+}
+export function normalizeRelayUrl(input: string): string {
+  let u: URL;
+  try { u = new URL(input.trim()); } catch { throw new Error("invalid relay URL"); }
+  if (!["ws:", "wss:", "http:", "https:"].includes(u.protocol)) throw new Error("relay URL must use ws, wss, http or https");
+  if (u.username || u.password || u.search || u.hash || input.trim().includes("?") || input.trim().includes("#")) throw new Error("relay URL cannot contain credentials, query or fragment");
+  if (u.protocol === "http:") u.protocol = "ws:";
+  if (u.protocol === "https:") u.protocol = "wss:";
+  u.pathname = u.pathname === "/" ? "/ws" : u.pathname.replace(/\/+$/, "");
+  return u.toString();
+}
