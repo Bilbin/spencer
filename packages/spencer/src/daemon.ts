@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import {
@@ -16,7 +16,7 @@ import {
   type Identity,
   type ServerFrame,
 } from "@spencer/protocol";
-import { loadConfig, resolveConfig, type SpencerConfig } from "./config.ts";
+import { loadConfig, resolveConfig, type ModelConfig, type SpencerConfig } from "./config.ts";
 import type {
   AgentService,
   Channel,
@@ -500,6 +500,7 @@ export class Daemon {
       db: this.need("db"),
       dataDir: this.dataDir,
       config: () => this.need("cfg"),
+      saveModel: (model) => this.saveModel(model),
       me: () => this.identity,
       listChannels: () => channels.list(),
       getChannel: (ch) => channels.get(ch),
@@ -600,6 +601,17 @@ export class Daemon {
     };
   }
 
+  /** Writes `model` into config.json (keeping everything else in the file) and the running config. */
+  saveModel(model: ModelConfig): void {
+    const file = join(this.dataDir, "config.json");
+    const raw = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>) : {};
+    raw.model = model;
+    const tmp = `${file}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(raw, null, 2) + "\n", { mode: 0o600 });
+    renameSync(tmp, file);
+    this.s.cfg = { ...this.need("cfg"), model };
+  }
+
   apiState(): unknown {
     const cfg = this.need("cfg");
     const pool = this.need("pool");
@@ -621,6 +633,7 @@ export class Daemon {
       ownerBusy: agent?.ownerBusy() ?? false,
       requests: agent?.listRequests?.() ?? [],
       followups: agent?.listFollowups?.() ?? [],
+      model: agent?.modelStatus?.(),
     };
   }
 }

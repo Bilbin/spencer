@@ -11,7 +11,7 @@
  */
 import type { DatabaseSync } from "node:sqlite";
 import type { ChatBody, CrocInfo, FileBody, Identity, StatusState } from "@spencer/protocol";
-import type { SpencerConfig, Policy } from "./config.ts";
+import type { ModelConfig, SpencerConfig, Policy } from "./config.ts";
 
 // ---------------------------------------------------------------- API shapes
 
@@ -225,7 +225,8 @@ export type DaemonEvent =
     }
   /** A member's Spencer came online or went offline (relay "presence" feature). */
   | { type: "presence"; ch: string; id: string; presence: Presence; lastSeen?: number }
-  | { type: "mcp"; servers: McpServerStatus[] };
+  | { type: "mcp"; servers: McpServerStatus[] }
+  | { type: "model"; model: ModelStatus };
 
 export interface EventSink {
   emit(e: DaemonEvent): void;
@@ -322,6 +323,8 @@ export interface CoreServices {
   db: DatabaseSync;
   dataDir: string;
   config: () => SpencerConfig;
+  /** Persist a new model choice to config.json (the model page). */
+  saveModel?(model: ModelConfig): void;
   me(): { id: string; name: string; fingerprint: string };
   listChannels(): Channel[];
   getChannel(ch: string): Channel | undefined;
@@ -380,4 +383,47 @@ export interface AgentService {
   listFollowups?(): Followup[];
   /** The owner cancels a pending follow-up. */
   cancelFollowup?(id: string): Followup;
+  /** Which model Spencer thinks with, and the sign-ins behind it. */
+  modelStatus?(): ModelStatus | undefined;
+  /** The same, after re-reading the GitHub CLI accounts. */
+  refreshModelStatus?(): Promise<ModelStatus>;
+  /** Switch the model (persisted to config.json). */
+  setModel?(provider: string, modelId: string): Promise<ModelStatus>;
+  /** Start "Sign in with GitHub" for Copilot; progress arrives as `model` events. */
+  startCopilotLogin?(): Promise<ModelStatus>;
+  cancelCopilotLogin?(): ModelStatus;
+  /** Reuse a GitHub CLI login for Copilot. */
+  useGhLogin?(login: string): Promise<ModelStatus>;
+  copilotLogout?(): Promise<ModelStatus>;
+}
+
+/** A sign-in in progress ("Sign in with GitHub"), or how the last one ended. */
+export interface LoginState {
+  state: "waiting" | "connecting" | "failed" | "cancelled";
+  userCode?: string;
+  verificationUri?: string;
+  expiresAt?: number;
+  error?: string;
+}
+
+export interface ModelStatus {
+  provider?: string;
+  modelId?: string;
+  /** A model is set up and signed in. */
+  ready: boolean;
+  /** Why not (never contains a secret). */
+  error?: string;
+  copilot: {
+    connected: boolean;
+    login?: string;
+    plan?: string;
+    via?: "device" | "gh-cli";
+    /** Models the account can use (id + display name), when connected. */
+    models: { id: string; name: string }[];
+    /** "Sign in with GitHub" is available (Spencer's GitHub OAuth app is configured). */
+    deviceLogin: boolean;
+    /** GitHub CLI accounts that can be reused. */
+    ghAccounts: { login: string; active: boolean }[];
+    signIn?: LoginState;
+  };
 }

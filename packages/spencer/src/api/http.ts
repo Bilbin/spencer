@@ -404,6 +404,36 @@ export class ApiServer {
 
     if (p === "/api/mcp" && method === "GET") return { servers: b.agent().mcpStatus() };
 
+    if (p === "/api/model") {
+      const agent = b.agent();
+      if (!agent.refreshModelStatus || !agent.setModel) throw new HttpError(404, "model settings are not supported");
+      if (method === "GET") return await agent.refreshModelStatus();
+      if (method === "PUT") {
+        const body = await readJson(req);
+        if (typeof body.provider !== "string" || typeof body.modelId !== "string") throw new HttpError(400, "provider and modelId are required");
+        return await agent.setModel(body.provider, body.modelId);
+      }
+    }
+    if ((m = /^\/api\/auth\/github-copilot\/(login|cancel|gh|logout)$/.exec(p)) && method === "POST") {
+      const agent = b.agent();
+      if (!agent.startCopilotLogin || !agent.cancelCopilotLogin || !agent.useGhLogin || !agent.copilotLogout) {
+        throw new HttpError(404, "sign-in is not supported");
+      }
+      switch (m[1]) {
+        case "login":
+          return await agent.startCopilotLogin();
+        case "cancel":
+          return agent.cancelCopilotLogin();
+        case "gh": {
+          const body = await readJson(req);
+          if (typeof body.login !== "string" || !body.login) throw new HttpError(400, "login is required");
+          return await agent.useGhLogin(body.login);
+        }
+        case "logout":
+          return await agent.copilotLogout();
+      }
+    }
+
     return NOT_FOUND;
   }
 

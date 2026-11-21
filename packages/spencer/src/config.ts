@@ -64,6 +64,8 @@ export interface SpencerConfig {
   croc: { path: string; relay: string | null; pass: string | null; allowLocal: boolean; throttleUpload: string | null };
   mcpServers: Record<string, McpServerConfig>;
   policy: Policy;
+  /** Model sign-in settings. `githubClientId`: Spencer's GitHub OAuth app for "Sign in with GitHub" (Copilot). */
+  auth: { githubClientId?: string };
 }
 
 export const DEFAULT_POLICY: Policy = {
@@ -96,6 +98,7 @@ export function defaultConfig(): SpencerConfig {
     croc: { path: "croc", relay: null, pass: null, allowLocal: false, throttleUpload: null },
     mcpServers: {},
     policy: { ...DEFAULT_POLICY },
+    auth: {},
   };
 }
 
@@ -114,7 +117,13 @@ export function resolveConfig(raw: Partial<SpencerConfig> & Record<string, unkno
     croc: { ...d.croc, ...(raw.croc ?? {}) },
     mcpServers: (raw.mcpServers as Record<string, McpServerConfig>) ?? {},
     policy: { ...d.policy, ...(raw.policy ?? {}) },
+    auth: {},
   };
+  const auth = raw.auth as Record<string, unknown> | undefined;
+  if (auth && typeof auth.githubClientId === "string" && auth.githubClientId.trim()) {
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(auth.githubClientId.trim())) throw new Error("auth.githubClientId does not look like a GitHub OAuth client id");
+    cfg.auth.githubClientId = auth.githubClientId.trim();
+  }
   if (process.env.SPENCER_PORT) cfg.http.port = Number(process.env.SPENCER_PORT);
   if (!Number.isInteger(cfg.http.port) || cfg.http.port < 0 || cfg.http.port > 65535) throw new Error("invalid http.port");
   if (!/^wss?:\/\//.test(cfg.relay)) throw new Error("relay must be a ws:// or wss:// URL");

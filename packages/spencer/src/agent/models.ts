@@ -7,7 +7,8 @@
  *  - `fake`: a faux provider driven by `fake-brain.ts`.
  *
  * API keys (from `apiKeyEnv` or a literal `apiKey`) go into an in-memory credential store for that provider
- * and are never logged. A misconfiguration does not throw: the result carries `error` and no `ref`, so
+ * and are never logged. `github-copilot` is Spencer's own Copilot sign-in (copilot.ts); its credential lives in
+ * the saved store passed as `credentials`. A misconfiguration does not throw: the result carries `error` and no `ref`, so
  * conversations run without a model and the agent turns that into a clear error in the owner chat.
  */
 import {
@@ -18,9 +19,11 @@ import {
   type Model,
   type Models,
   type MutableModels,
+  type CredentialStore,
   type Provider,
 } from "@earendil-works/pi-ai";
 import type { ModelConfig } from "../config.ts";
+import { COPILOT_PROVIDER, isCopilotCredential, spencerCopilotProvider } from "./copilot.ts";
 import { createFakeBrain, type FakeBrainHooks } from "./fake-brain.ts";
 import { BUILTIN_PROVIDERS } from "./providers.ts";
 
@@ -38,10 +41,18 @@ const PROVIDER_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
 
 export async function setupModels(
   cfg: ModelConfig,
-  opts: { name: () => string; fakeHooks?: FakeBrainHooks },
+  opts: {
+    name: () => string;
+    fakeHooks?: FakeBrainHooks;
+    /** Saved sign-ins (OAuth providers). */
+    credentials?: CredentialStore;
+    /** Spencer's GitHub OAuth app id, if any. */
+    githubClientId?: () => string | undefined;
+  },
 ): Promise<ModelSetup> {
   try {
     if (cfg.provider === "fake") return fakeSetup(opts);
+    if (cfg.provider === COPILOT_PROVIDER) return await copilotSetup(cfg as { modelId?: string }, opts);
     const c = cfg as { provider: string; modelId?: string; apiKeyEnv?: string; apiKey?: string; baseUrl?: string };
     if (!c.modelId || typeof c.modelId !== "string") return fail(`model.modelId is required for provider "${c.provider}"`);
     const key = resolveKey(c);
@@ -66,6 +77,24 @@ export async function setupModels(
   } catch (e) {
     return fail(`model setup failed: ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+async function copilotSetup(
+  c: { modelId?: string },
+  opts: { credentials?: CredentialStore; githubClientId?: () => string | undefined },
+): Promise<ModelSetup> {
+  const base = await loadBuiltinProvider(COPILOT_PROVIDER);
+  if (!base) return fail("the GitHub Copilot provider is missing from this build");
+  const credentials = opts.credentials ?? new InMemoryCredentialStore();
+  const models = createModels({ credentials });
+  const provider = spencerCopilotProvider(base, opts.githubClientId ?? (() => undefined));
+  models.setProvider(provider);
+  if (!isCopilotCredential(await credentials.read(COPILOT_PROVIDER))) {
+    return { models, error: "GitHub Copilot is not connected yet: sign in on the Model page" };
+  }
+  if (!c.modelId || typeof c.modelId !== "string") return { models, error: "no GitHub Copilot model is chosen: pick one on the Model page" };
+  if (!models.getModel(COPILOT_PROVIDER, c.modelId)) return { models, error: `unknown GitHub Copilot model "${c.modelId}"` };
+  return { models, ref: { provider: COPILOT_PROVIDER, modelId: c.modelId } };
 }
 
 function fail(error: string): ModelSetup {
@@ -138,7 +167,7 @@ async function openAICompatibleProvider(
 }
 
 /** `amazon-bedrock` → `amazonBedrockProvider`, from `@earendil-works/pi-ai/providers/amazon-bedrock`. */
-async function loadBuiltinProvider(id: string): Promise<Provider | undefined> {
+export async function loadBuiltinProvider(id: string): Promise<Provider | undefined> {
   const load = Object.hasOwn(BUILTIN_PROVIDERS, id) ? BUILTIN_PROVIDERS[id] : undefined;
   if (!load) return undefined;
   let mod: Record<string, unknown>;

@@ -447,9 +447,23 @@ that, `schedule_followup` fails and tells the model to report what it has (or as
 | POST | `/api/transfers` | `{ch, path, to?}` → `Transfer` (owner-initiated; `to` is required in groups) |
 | POST | `/api/transfers/:tid/approve` · `/deny` · `/accept` · `/decline` · `/cancel` | → `Transfer` |
 | GET | `/api/mcp` | → `{servers: McpServer[]}` |
-| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", ...RelayStatus}` (any change of a relay connection's state), `{type:"presence", ch, id, presence, lastSeen?}` (a member's Spencer came online or went offline in channel `ch`; when *our* connection to a relay goes up or down, each of its channels is re-sent as a `channel` event instead, since every member's presence changes), `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"followup", followup: Followup}` (created or changed), `{type:"status", ch, from, replyTo, state, activity?, ts}` (progress of a Spencer, possibly mine, on message `replyTo`; `state` as in §3.1, including the task states) |
+| GET | `/api/model` | → `ModelStatus` (re-reads the GitHub CLI accounts) |
+| PUT | `/api/model` | `{provider, modelId}` → `ModelStatus`: switch model now and save it to config.json. `provider` is `github-copilot` (signed in, a model the account has) or the configured provider (another `modelId`); 400/409 otherwise |
+| POST | `/api/auth/github-copilot/login` | → `ModelStatus` with `copilot.signIn = {state:"waiting", userCode, verificationUri, expiresAt}`; progress follows as `model` events. 409 when no GitHub OAuth app is configured (`auth.githubClientId`) |
+| POST | `/api/auth/github-copilot/cancel` | → `ModelStatus` |
+| POST | `/api/auth/github-copilot/gh` | `{login}` → `ModelStatus`: reuse that GitHub CLI login (`gh auth token`); 400 if it has no Copilot |
+| POST | `/api/auth/github-copilot/logout` | → `ModelStatus` (forgets the saved sign-in) |
+| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", ...RelayStatus}` (any change of a relay connection's state), `{type:"presence", ch, id, presence, lastSeen?}` (a member's Spencer came online or went offline in channel `ch`; when *our* connection to a relay goes up or down, each of its channels is re-sent as a `channel` event instead, since every member's presence changes), `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"followup", followup: Followup}` (created or changed), `{type:"model", model: ModelStatus}` (model, sign-in or GitHub CLI accounts changed), `{type:"status", ch, from, replyTo, state, activity?, ts}` (progress of a Spencer, possibly mine, on message `replyTo`; `state` as in §3.1, including the task states) |
 
 ```ts
+interface ModelStatus { provider?: string; modelId?: string;
+  ready: boolean; error?: string;          // ready: a model is set up and signed in; error never contains a secret
+  copilot: { connected: boolean; login?: string; plan?: string; via?: "device"|"gh-cli";
+    models: {id: string; name: string}[];  // what the signed-in account can use
+    deviceLogin: boolean;                  // "Sign in with GitHub" available (an OAuth app id is configured)
+    ghAccounts: {login: string; active: boolean}[];
+    signIn?: { state: "waiting"|"connecting"|"failed"|"cancelled"; userCode?: string; verificationUri?: string;
+               expiresAt?: number; error?: string } } }
 interface Channel { id: string; kind: "direct"|"group"; name: string; relayUrl: string;
   members: ChannelMember[];
   autoReply: boolean; allowedMcpTools: string[]; trust: "standard"|"full"; unread: number; lastSeq: number; createdAt: number }

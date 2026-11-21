@@ -17,6 +17,7 @@ import type {
   AgentService,
   Channel,
   CoreServices,
+  ModelStatus,
   Followup,
   IncomingChat,
   McpServerStatus,
@@ -28,7 +29,7 @@ import { END_MARKER, REPEAT_WINDOW, decideReply, isRepeat, loopLimits, parseAgen
 import { TurnBudget } from "./budget.ts";
 import type { FakeBrainHooks } from "./fake-brain.ts";
 import { McpManager } from "./mcp.ts";
-import { setupModels, type ModelSetup } from "./models.ts";
+import { ModelManager } from "./model-manager.ts";
 import { OWNER_KEY, PiRuntime, channelKey, type AgentRuntime, type ToolSpec } from "./runtime.ts";
 import { FollowupStore, toFollowup, type FollowupRow } from "./followups.ts";
 import { MAX_CHAT_TEXT, channelTools, followupTools, ownerTools, resolveChannel } from "./tools.ts";
@@ -85,7 +86,7 @@ export class SpencerAgent implements AgentService {
   private log: (msg: string) => void;
   private runtime: PiRuntime | undefined;
   private mcp: McpManager | undefined;
-  private models: ModelSetup | undefined;
+  private models: ModelManager | undefined;
   private budget: TurnBudget;
   private followups: FollowupStore;
   private ownerSpecs: ToolSpec[] = [];
@@ -157,14 +158,19 @@ export class SpencerAgent implements AgentService {
     this.followups.init();
 
     const cfg = this.core.config();
-    this.models = await setupModels(cfg.model, { name: () => this.core.me().name, fakeHooks: this.opts.fakeHooks });
-    if (this.models.error) this.log(`model not available: ${this.models.error}`);
-    const models = this.models;
+    const models = (this.models = new ModelManager({
+      core: this.core,
+      name: () => this.core.me().name,
+      ...(this.opts.fakeHooks ? { fakeHooks: this.opts.fakeHooks } : {}),
+      log: this.log,
+      onReload: () => this.reconfigureAll(),
+    }));
+    await models.init();
     this.runtime = new PiRuntime({
       file: join(this.core.dataDir, "pi.sqlite"),
       db,
-      models: () => models.models,
-      model: () => models.ref,
+      models: () => models.models()!,
+      model: () => models.ref(),
       log: this.log,
     });
     await this.runtime.open();
@@ -209,6 +215,7 @@ export class SpencerAgent implements AgentService {
   async stop(): Promise<void> {
     if (!this.started || this.stopping) return;
     this.stopping = true;
+    this.models?.stop();
     await this.followups.stop();
     await this.stopWatch?.().catch(() => {});
     for (const w of this.chWatches.values()) await w.then((stop) => stop()).catch(() => {});
@@ -883,6 +890,35 @@ export class SpencerAgent implements AgentService {
     return toFollowup(this.followups.get(id)!);
   }
 
+  // ---------------------------------------------------------------- model and sign-in (the Model page)
+
+  private mm(): ModelManager {
+    if (!this.models) throw new AgentHttpError(503, "the agent is starting");
+    return this.models;
+  }
+  modelStatus(): ModelStatus | undefined {
+    return this.models?.status();
+  }
+  async refreshModelStatus(): Promise<ModelStatus> {
+    await this.mm().refreshGh();
+    return this.mm().status();
+  }
+  setModel(provider: string, modelId: string): Promise<ModelStatus> {
+    return this.mm().setModel(provider, modelId);
+  }
+  startCopilotLogin(): Promise<ModelStatus> {
+    return this.mm().startCopilotLogin();
+  }
+  cancelCopilotLogin(): ModelStatus {
+    return this.mm().cancelCopilotLogin();
+  }
+  useGhLogin(login: string): Promise<ModelStatus> {
+    return this.mm().useGhLogin(login);
+  }
+  copilotLogout(): Promise<ModelStatus> {
+    return this.mm().copilotLogout();
+  }
+
   /** Fire every follow-up that is due now (tests; the timer does this on its own). */
   async followupTick(): Promise<void> {
     await this.followups.tick();
@@ -971,8 +1007,8 @@ export class SpencerAgent implements AgentService {
       .then(async (answer) => {
         if (answer.status === "done" || this.stopping) return;
         const why = answer.reason.startsWith("no_model")
-          ? `No model is available: ${this.models?.error ?? "check the model settings in config.json"}.`
-          : `The model could not answer (${answer.reason}).${this.models?.error ? ` ${this.models.error}.` : ""}`;
+          ? `No model is available: ${this.models?.error() ?? "check the model settings in config.json"}.`
+          : `The model could not answer (${answer.reason}).${this.models?.error() ? ` ${this.models.error()}.` : ""}`;
         await rt.appendNote(OWNER_KEY, { kind: "spencer.error", data: { text: why, ts: Date.now(), isError: true, role: "assistant" } });
       })
       .catch((e) => {

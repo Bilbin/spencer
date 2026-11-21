@@ -107,6 +107,15 @@ The config file is `<dataDir>/config.json`. The data dir defaults to `~/.local/s
 }
 ```
 
+### GitHub Copilot (no API key)
+
+If you have GitHub Copilot (Pro, Pro+, Business or Enterprise), Spencer can think with it. Open the web UI, go to **Model**, and either:
+
+- **Sign in with GitHub**: Spencer shows a short code; enter it at github.com/login/device. This needs Spencer's GitHub OAuth app id in config.json, `"auth": {"githubClientId": "Ov23…"}` (or `SPENCER_GITHUB_CLIENT_ID`). To register one: GitHub → Settings → Developer settings → OAuth Apps → New OAuth App, then tick *Enable Device Flow*. No client secret is needed.
+- **Reuse your GitHub CLI login**: if `gh auth login` is done on this machine, pick the account.
+
+Spencer then talks to Copilot's API directly with that GitHub token, identifying as Spencer (the flow follows OpenCode's). The sign-in is saved in `<dataDir>/secrets/credentials.json` (mode 0600), and you can switch Copilot models on the same page without restarting. In config.json it shows up as `"model": {"provider": "github-copilot", "modelId": "claude-sonnet-5.5", "thinking": "medium"}`.
+
 Other model options:
 
 - Any built-in `pi-ai` provider id (`openai`, `openrouter`, `google`, `xai`, `groq`, …) with `modelId` and `apiKeyEnv`.
