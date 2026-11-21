@@ -5,6 +5,7 @@ import {
   deriveChannelKeys,
   fingerprint,
   formatInvite,
+  normalizeRelayUrl,
   joinProof,
   newChannelSecret,
   openMeta,
@@ -35,6 +36,9 @@ export interface ChannelRow {
   allowed_mcp_tools: string;
   trust: string;
   last_hello_members: string;
+  last_hello_features: string;
+  direct_link: string;
+  allow_local_addresses: number;
   unread: number;
   gap: number;
   created_at: number;
@@ -65,6 +69,7 @@ export class UserError extends Error {
 }
 
 export interface ChannelManagerDeps {
+  localFeatures?: () => string[];
   sql: Sql;
   me: Identity;
   config: () => SpencerConfig;
@@ -82,6 +87,12 @@ const MAX_NAME = 200;
 export class ChannelManager {
   private d: ChannelManagerDeps;
   private keyCache = new Map<string, ChannelKeys>();
+  private stunByRelay = new Map<string, string>();
+  setStun(url: string, stun: string | undefined): void { if (stun) this.stunByRelay.set(url, stun); else this.stunByRelay.delete(url); }
+  stunFor(ch: string): string | undefined { const r = this.row(ch); return r ? this.stunByRelay.get(r.relay_url) : undefined; }
+  peerFeatures(ch: string, peerId: string): string[] { return safeJsonArray(this.memberRows(ch).find(m => m.id === peerId)?.features ?? "[]"); }
+  peerHasFeature(ch: string, peerId: string, feature: string): boolean { return this.peerFeatures(ch, peerId).includes(feature); }
+  directLinkConfig(ch: string): { directLink: "auto" | "off"; allowLocalAddresses: boolean } | undefined { const r = this.row(ch); return r ? { directLink: r.direct_link === "off" ? "off" : "auto", allowLocalAddresses: !!r.allow_local_addresses } : undefined; }
   private crocByRelay = new Map<string, CrocInfo>();
   /** relay URL → identity id → what that relay last said about it (only relays with the "presence" feature). */
   private presence = new Map<string, Map<string, { online: boolean; lastSeen?: number }>>();
@@ -140,8 +151,8 @@ export class ChannelManager {
 
   // ------------------------------------------------------------- views
 
-  memberRows(ch: string): { id: string; name: string | null; about: string | null; present: number }[] {
-    return this.d.sql.all("SELECT id, name, about, present FROM members WHERE ch = ? ORDER BY joined_at, rowid", ch);
+  memberRows(ch: string): { id: string; name: string | null; about: string | null; present: number; features: string }[] {
+    return this.d.sql.all("SELECT id, name, about, present, features FROM members WHERE ch = ? ORDER BY joined_at, rowid", ch);
   }
 
   peers(ch: string): string[] {
@@ -222,6 +233,7 @@ export class ChannelManager {
       .filter((m) => m.present)
       .map((m) => ({
         id: m.id,
+        features: safeJsonArray(m.features),
         ...(m.id === me ? { name: this.d.config().name } : m.name ? { name: m.name } : {}),
         fingerprint: fingerprint(m.id),
         me: m.id === me,
@@ -233,6 +245,8 @@ export class ChannelManager {
       name: this.displayName(r),
       relayUrl: r.relay_url,
       members,
+      directLink: r.direct_link === "off" ? "off" : "auto",
+      allowLocalAddresses: !!r.allow_local_addresses,
       autoReply: !!r.auto_reply,
       allowedMcpTools: safeJsonArray(r.allowed_mcp_tools),
       trust: r.trust === "full" ? "full" : "standard",
@@ -303,14 +317,14 @@ export class ChannelManager {
       const b = this.d.sql.get<{ rowid: number }>("SELECT rowid FROM messages WHERE id = ? AND ch = ?", before, ch);
       if (!b) throw new UserError(404, "unknown message");
       rows = this.d.sql.all<MessageRow>(
-        `SELECT * FROM messages WHERE ch = ? AND ${typeIn} AND rowid < ? ORDER BY rowid DESC LIMIT ?`,
+        `SELECT * FROM messages WHERE ch = ? AND COALESCE(origin, '') != 'feature-hello' AND ${typeIn} AND rowid < ? ORDER BY rowid DESC LIMIT ?`,
         ch,
         ...types,
         b.rowid,
         lim,
       );
     } else {
-      rows = this.d.sql.all<MessageRow>(`SELECT * FROM messages WHERE ch = ? AND ${typeIn} ORDER BY rowid DESC LIMIT ?`, ch, ...types, lim);
+      rows = this.d.sql.all<MessageRow>(`SELECT * FROM messages WHERE ch = ? AND COALESCE(origin, '') != 'feature-hello' AND ${typeIn} ORDER BY rowid DESC LIMIT ?`, ch, ...types, lim);
     }
     return rows.reverse().map((r) => this.toMessage(r));
   }
@@ -384,35 +398,42 @@ export class ChannelManager {
     const greeted = new Set(safeJsonArray(r.last_hello_members));
     const newcomer = present.some((id) => !greeted.has(id));
     const next = JSON.stringify([...present].sort());
-    if (!newcomer) {
+    const feats = [...new Set(this.d.localFeatures?.() ?? [])].sort();
+    const featsJson = JSON.stringify(feats);
+    if (!newcomer && !(present.length > 0 && featsJson !== r.last_hello_features)) {
       if (next !== r.last_hello_members && present.length < greeted.size) {
         // Someone left: shrink the set so a rejoin gets a fresh hello.
         this.d.sql.run("UPDATE channels SET last_hello_members = ? WHERE id = ?", next, ch);
       }
       return;
     }
-    const hello: HelloBody = { type: "hello", name: this.d.config().name, agent: AGENT_VERSION };
-    this.d.outbox().enqueue(ch, hello);
-    this.d.sql.run("UPDATE channels SET last_hello_members = ? WHERE id = ?", next, ch);
+    const hello: HelloBody = { type: "hello", name: this.d.config().name, agent: AGENT_VERSION, ...(feats.length ? { features: feats } : {}) };
+    this.d.outbox().enqueue(ch, hello, newcomer ? {} : { origin: "feature-hello" });
+    this.d.sql.run("UPDATE channels SET last_hello_members = ?, last_hello_features = ? WHERE id = ?", next, featsJson, ch);
   }
 
+  recheckHellos(): void { for (const r of this.rows()) this.maybeHello(r.id); }
+
   /** A hello from a peer: update its self-asserted name/about. */
-  onHello(ch: string, from: string, body: HelloBody): void {
+  onHello(ch: string, from: string, body: HelloBody): { featureOnly: boolean } {
+    const previous = this.memberRows(ch).find(m => m.id === from);
     const name = body.name.trim().slice(0, MAX_NAME) || null;
     const r = this.d.sql.run(
-      `INSERT INTO members (ch, id, name, about, agent, present, joined_at) VALUES (?, ?, ?, ?, ?, 1, ?)
-       ON CONFLICT (ch, id) DO UPDATE SET name = excluded.name, about = excluded.about, agent = excluded.agent`,
+      `INSERT INTO members (ch, id, name, about, agent, present, joined_at, features) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+       ON CONFLICT (ch, id) DO UPDATE SET name = excluded.name, about = excluded.about, agent = excluded.agent, features = excluded.features`,
       ch,
       from,
       name,
       body.about ?? null,
       body.agent,
       Date.now(),
+      JSON.stringify(body.features ?? []),
     );
     if (r.changes > 0) {
       this.emitChannel(ch);
       this.d.channelChanged(ch);
     }
+    return { featureOnly: !!previous && previous.name === name && previous.about === (body.about ?? null) };
   }
 
   // ------------------------------------------------------------- relay sync
@@ -451,11 +472,12 @@ export class ChannelManager {
 
   // ------------------------------------------------------------- lifecycle
 
-  async createInvite(kind: "direct" | "group", name: string): Promise<{ link: string; channel: Channel }> {
+  async createInvite(kind: "direct" | "group", name: string, relay?: string): Promise<{ link: string; channel: Channel }> {
     if (kind !== "direct" && kind !== "group") throw new UserError(400, "kind must be direct or group");
     const label = typeof name === "string" ? name.trim().slice(0, MAX_NAME) : "";
     if (!label) throw new UserError(400, "name is required");
-    const relayUrl = this.d.config().relay;
+    let relayUrl = this.d.config().relay;
+    if (relay?.trim()) { try { relayUrl = normalizeRelayUrl(relay); } catch { throw new UserError(400, "invalid relay URL"); } }
     const { ch, secret } = newChannelSecret();
     const keys = deriveChannelKeys(secret, ch);
     const me = this.d.me.id;
@@ -578,7 +600,7 @@ export class ChannelManager {
     void this.pruneRelays();
   }
 
-  update(ch: string, patch: { name?: unknown; autoReply?: unknown; allowedMcpTools?: unknown; trust?: unknown }): Channel {
+  update(ch: string, patch: { name?: unknown; autoReply?: unknown; allowedMcpTools?: unknown; trust?: unknown; directLink?: unknown; allowLocalAddresses?: unknown }): Channel {
     const r = this.row(ch);
     if (!r) throw new UserError(404, "unknown channel");
     const sets: string[] = [];
@@ -607,6 +629,8 @@ export class ChannelManager {
       sets.push("trust = ?");
       args.push(patch.trust);
     }
+    if (patch.directLink !== undefined) { if (patch.directLink !== "auto" && patch.directLink !== "off") throw new UserError(400, "invalid directLink"); sets.push("direct_link = ?"); args.push(patch.directLink); }
+    if (patch.allowLocalAddresses !== undefined) { if (typeof patch.allowLocalAddresses !== "boolean") throw new UserError(400, "invalid allowLocalAddresses"); sets.push("allow_local_addresses = ?"); args.push(patch.allowLocalAddresses ? 1 : 0); }
     if (sets.length > 0) {
       this.d.sql.run(`UPDATE channels SET ${sets.join(", ")} WHERE id = ?`, ...args, ch);
       this.emitChannel(ch);

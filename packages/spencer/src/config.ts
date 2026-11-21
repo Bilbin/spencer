@@ -2,6 +2,10 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
+import { normalizeRelayUrl } from "@spencer/protocol";
+
+export type P2pConfig = { mode: "files" | "off"; hideLocalAddresses: boolean; minFileBytes: number; stun: string[] };
+
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high";
 
 export type ModelConfig =
@@ -58,6 +62,7 @@ export interface Policy {
 export interface SpencerConfig {
   name: string;
   relay: string;
+  p2p: P2pConfig;
   http: { host: "127.0.0.1"; port: number };
   model: ModelConfig;
   /** `throttleUpload`: croc's --throttleUpload for sends (e.g. "500k"), null = unlimited. */
@@ -93,6 +98,7 @@ export function defaultConfig(): SpencerConfig {
   return {
     name: "Spencer",
     relay: "wss://spencer.pjalv.com/ws",
+    p2p: { mode: "files", hideLocalAddresses: true, minFileBytes: 4 * 1024 * 1024, stun: [] },
     http: { host: "127.0.0.1", port: 7420 },
     model: { provider: "anthropic", modelId: "claude-sonnet-5-5", apiKeyEnv: "ANTHROPIC_API_KEY" },
     croc: { path: "croc", relay: null, pass: null, allowLocal: false, throttleUpload: null },
@@ -112,6 +118,7 @@ export function resolveConfig(raw: Partial<SpencerConfig> & Record<string, unkno
   const cfg: SpencerConfig = {
     name: typeof raw.name === "string" && raw.name.trim() ? raw.name.trim().slice(0, 100) : d.name,
     relay: typeof raw.relay === "string" ? raw.relay : d.relay,
+    p2p: { ...d.p2p, ...(raw.p2p ?? {}) },
     http: { host: "127.0.0.1", port: Number(raw.http?.port ?? d.http.port) },
     model: (raw.model as ModelConfig) ?? d.model,
     croc: { ...d.croc, ...(raw.croc ?? {}) },
@@ -126,7 +133,9 @@ export function resolveConfig(raw: Partial<SpencerConfig> & Record<string, unkno
   }
   if (process.env.SPENCER_PORT) cfg.http.port = Number(process.env.SPENCER_PORT);
   if (!Number.isInteger(cfg.http.port) || cfg.http.port < 0 || cfg.http.port > 65535) throw new Error("invalid http.port");
-  if (!/^wss?:\/\//.test(cfg.relay)) throw new Error("relay must be a ws:// or wss:// URL");
+  cfg.relay = normalizeRelayUrl(process.env.SPENCER_RELAY || cfg.relay);
+  const p = cfg.p2p;
+  if ((p.mode !== "files" && p.mode !== "off") || typeof p.hideLocalAddresses !== "boolean" || !Number.isSafeInteger(p.minFileBytes) || p.minFileBytes < 0 || !Array.isArray(p.stun) || p.stun.length > 16 || !p.stun.every(x => { if (typeof x !== "string") return false; const m = /^(?:\[[^\[\]]+\]|[^:\s]+):(\d+)$/.exec(x); return !!m && Number(m[1]) >= 1 && Number(m[1]) <= 65535; })) throw new Error("invalid p2p configuration");
   if (cfg.croc.throttleUpload !== null && !/^\d+[kKmMgG]?$/.test(String(cfg.croc.throttleUpload))) {
     throw new Error('croc.throttleUpload must look like "500k" (or null)');
   }

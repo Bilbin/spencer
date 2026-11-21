@@ -71,6 +71,7 @@ export interface RelayStatus {
   lastError?: string;
   /** Optional relay features from `welcome` (e.g. "presence", "ephemeral"); [] for older relays. */
   features: string[];
+  stun?: string;
 }
 
 export interface ConnectionHandlers {
@@ -98,6 +99,7 @@ export class RelayConnection {
   /** Challenge nonce of the current connection (needed for join/create proofs). */
   nonce: string | undefined;
   croc: CrocInfo | undefined;
+  stun: string | undefined;
   /** Features the relay announced in its last `welcome`. */
   features: string[] = [];
 
@@ -143,6 +145,7 @@ export class RelayConnection {
       ...(this.phase === "waiting" && this.retryAt !== undefined ? { retryAt: this.retryAt } : {}),
       ...(this.lastError ? { lastError: this.lastError } : {}),
       features: [...this.features],
+      ...(this.stun ? { stun: this.stun } : {}),
     };
   }
 
@@ -163,6 +166,7 @@ export class RelayConnection {
     if (this.state === "closed") return;
     this.state = "connecting";
     this.nonce = undefined;
+    this.stun = undefined;
     this.setPhase("connecting");
     let ws: WebSocket;
     try {
@@ -216,6 +220,7 @@ export class RelayConnection {
         }
         clearTimeout(this.handshakeTimer);
         if (f.croc) this.croc = f.croc;
+        this.stun = typeof f.stun === "string" && f.stun.trim() ? f.stun : undefined;
         this.features = Array.isArray(f.features) ? f.features.filter((x): x is string => typeof x === "string").slice(0, 32) : [];
         this.state = "ready";
         this.failures = 0;
@@ -253,6 +258,7 @@ export class RelayConnection {
     const wasReady = this.state === "ready";
     this.ws = undefined;
     this.nonce = undefined;
+    this.stun = undefined;
     clearTimeout(this.handshakeTimer);
     clearInterval(this.pingTimer);
     for (const [, p] of this.pending) {
@@ -407,6 +413,7 @@ export class RelayConnection {
 }
 
 export interface PoolHandlers {
+  onWake?(): void;
   onReady(conn: RelayConnection): void;
   onState?(conn: RelayConnection): void;
   onDown(conn: RelayConnection): void;
@@ -438,6 +445,7 @@ export class RelayPool {
         this.lastTick = t;
         if (gap > this.tuning.wakeCheckMs + this.tuning.wakeJumpMs) {
           this.log(`clock jumped ${Math.round(gap / 1000)} s (resumed from sleep?); checking relay connections`);
+          this.handlers.onWake?.();
           for (const c of this.conns.values()) c.probe();
         }
       }, this.tuning.wakeCheckMs);

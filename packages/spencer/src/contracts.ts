@@ -22,6 +22,7 @@ import type { ModelConfig, SpencerConfig, Policy } from "./config.ts";
 export type Presence = "online" | "offline" | "unknown";
 
 export interface ChannelMember {
+  features?: string[];
   id: string;
   name?: string;
   fingerprint: string;
@@ -33,7 +34,11 @@ export interface ChannelMember {
 
 export type ChannelTrust = "standard" | "full";
 
+export type ChannelDirectLink = "auto" | "off";
+export type P2pStatus = { mode: "files" | "off"; available: boolean; error?: string };
 export interface Channel {
+  directLink: ChannelDirectLink;
+  allowLocalAddresses: boolean;
   id: string;
   kind: "direct" | "group";
   name: string;
@@ -57,7 +62,7 @@ export interface Channel {
  * agent answered a peer ("agent-reply"), or the channel agent reported back on its own after a follow-up it had
  * scheduled ("agent-followup"). Incoming messages are "peer".
  */
-export type MessageOrigin = "human" | "owner-agent" | "agent-reply" | "agent-followup" | "peer";
+export type MessageOrigin = "human" | "owner-agent" | "agent-reply" | "agent-followup" | "peer" | "feature-hello";
 
 export interface ChannelMessage {
   id: string;
@@ -108,7 +113,9 @@ export type IncomingState =
   | "cancelled";
 export const TERMINAL_STATES = new Set(["completed", "denied", "declined", "failed", "expired", "cancelled"]);
 
+export type TransferVia = "link" | "croc";
 export interface Transfer {
+  via?: TransferVia;
   tid: string;
   ch: string;
   direction: TransferDirection;
@@ -222,6 +229,7 @@ export type DaemonEvent =
       retryAt?: number;
       lastError?: string;
       features: string[];
+      stun?: string;
     }
   /** A member's Spencer came online or went offline (relay "presence" feature). */
   | { type: "presence"; ch: string; id: string; presence: Presence; lastSeen?: number }
@@ -235,7 +243,14 @@ export interface EventSink {
 // ---------------------------------------------------------------- core → xfer
 
 /** What the transfer manager needs from the core. */
+export interface TransferP2pJob { kill(): void; done: Promise<{ ok: boolean; killed?: boolean; error?: string; resumedFrom?: number }>; }
+export interface TransferP2pAdapter {
+  canTryLink(ch: string, peerId: string, size: number, hasCroc: boolean): boolean;
+  sendOverLink(opts: { tid: string; ch: string; peerId: string; attempt: number; filePath: string; size: number; onReady: () => void; onProgress: (fraction: number) => void }): TransferP2pJob;
+  receiveOverLink(opts: { tid: string; ch: string; peerId: string; attempt: number; partPath: string; finalPath: string; size: number; onProgress: (fraction: number) => void }): TransferP2pJob;
+}
 export interface TransferDeps {
+  p2p?: TransferP2pAdapter;
   db: DatabaseSync;
   dataDir: string;
   me: Identity;
@@ -351,7 +366,7 @@ export interface CoreServices {
   /** Tell the channel (and the local UI) that my agent is working on a reply to `replyTo`. Best effort. */
   sendStatus?(ch: string, s: { replyTo: string; state: StatusState; activity?: string }): void;
   listTransfers(ch?: string): Transfer[];
-  createInvite(kind: "direct" | "group", name: string): Promise<{ link: string; channel: Channel }>;
+  createInvite(kind: "direct" | "group", name: string, relay?: string): Promise<{ link: string; channel: Channel }>;
   events: EventSink;
 }
 

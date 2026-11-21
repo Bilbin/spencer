@@ -278,12 +278,12 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
     {
       name: "create_invite",
       description: "Create a new channel and its invite link (direct: one other person; group: several). Give the link to your owner to share.",
-      parameters: schema({ kind: { type: "string", enum: ["direct", "group"] }, name: str("Channel name") }, ["kind", "name"]),
-      async execute(args: { kind: "direct" | "group"; name: string }) {
+      parameters: schema({ kind: { type: "string", enum: ["direct", "group"] }, name: str("Channel name"), relay: str("Relay URL") }, ["kind", "name"]),
+      async execute(args: { kind: "direct" | "group"; name: string; relay?: string }) {
         if (args.kind !== "direct" && args.kind !== "group") return fail("kind must be direct or group");
         const name = String(args.name ?? "").trim();
         if (!name) return fail("name is required");
-        const { link, channel } = await core.createInvite(args.kind, name.slice(0, 100));
+        const { link, channel } = await core.createInvite(args.kind, name.slice(0, 100), args.relay);
         return `Created ${channel.kind} channel "${channel.name}" (${channel.id}). Invite link (share it privately): ${link}`;
       },
     },

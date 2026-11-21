@@ -357,7 +357,8 @@ export class ApiServer {
 
     if (p === "/api/invites" && method === "POST") {
       const body = await readJson(req);
-      return await b.core.createInvite(body.kind as "direct" | "group", body.name as string);
+      if (body.relay !== undefined && typeof body.relay !== "string") throw new UserError(400, "relay must be a string");
+      return await b.core.createInvite(body.kind as "direct" | "group", body.name as string, body.relay as string | undefined);
     }
     if (p === "/api/invites/accept" && method === "POST") {
       const body = await readJson(req);
