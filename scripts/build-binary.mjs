@@ -34,6 +34,12 @@ const CROC = {
   "darwin-arm64": ["macOS-ARM64", "4e8a2fb7e2e5bb5091567dbf7a0a2cb404fb25227d7688c755b8340bd9ead2ef"],
   "darwin-x64": ["macOS-64bit", "169aec647b8078ceb34d600d4cbff57d93fa849404b9d943a8e6e42b910984a0"],
 };
+const ADDONS = {
+  "linux-x64": ["linux-x64-gnu", "0174d33d56968a9be4279f0d33e60bdf45adc3d42dabc2b5e174a85e9b7fc59c"],
+  "linux-arm64": ["linux-arm64-gnu", "a9e451948865371bd31670b4566b325b98a4e4ed3d02c5af501f3874296bb01c"],
+  "darwin-arm64": ["darwin-arm64", "76cc03f43db90340868380e18aa2b4871c6e9ac9f949f7085533a2dde3a03abc"],
+  "darwin-x64": ["darwin-x64", "d442113813baab39f78ed1c0739ae17a9775fac2b4cf17ad0f563849733b4dc2"],
+};
 const SEA_FUSE = "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -92,7 +98,7 @@ await build({
   target: "node24",
   format: "cjs",
   // Optional native accelerators of ws; it falls back to JS when they are missing.
-  external: ["bufferutil", "utf-8-validate"],
+  external: ["bufferutil", "utf-8-validate", "node-datachannel", "@node-datachannel/*"],
   // A few dependencies read import.meta.url (resolving files next to themselves); point it at the binary.
   define: { "import.meta.url": "__spencerImportMetaUrl", "process.env.SPENCER_BUILD": JSON.stringify(`${version}+${commit}`) },
   banner: {
@@ -130,11 +136,14 @@ for (const target of targets) {
   const croc = untar(crocTar, "croc", join(work, "croc"));
 
   // 4. SEA config and blob.
-  const assets = { croc };
+  const [addonTarget, addonSha] = ADDONS[target];
+  const addonTar = await fetchPinned(`https://registry.npmjs.org/@node-datachannel/${addonTarget}/-/${addonTarget}-0.33.6.tgz`, addonSha);
+  const addon = untar(addonTar, "package/node_datachannel.node", join(work, "addons"));
+  const assets = { croc, "addons/node_datachannel.node": addon };
   for (const f of webFiles) assets[`web/${relative(webDir, f).split("\\").join("/")}`] = f;
   const buildId = sha256(Buffer.concat([readFileSync(bundle), ...Object.entries(assets).sort().map(([k, f]) => Buffer.concat([Buffer.from(k), readFileSync(f)]))])).slice(0, 16);
   const manifest = join(work, "manifest.json");
-  writeFileSync(manifest, JSON.stringify({ version: `${version}+${commit}`, build: buildId, files: Object.keys(assets).filter((k) => k.startsWith("web/")), croc: "croc" }));
+  writeFileSync(manifest, JSON.stringify({ version: `${version}+${commit}`, build: buildId, files: Object.keys(assets).filter((k) => k.startsWith("web/")), croc: "croc", addons: { "node-datachannel": "addons/node_datachannel.node" } }));
   assets["manifest.json"] = manifest;
   const blob = join(work, "sea.blob");
   const config = join(work, "sea-config.json");

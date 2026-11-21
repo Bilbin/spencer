@@ -14,13 +14,14 @@ let
   workspace = pkgs.buildNpmPackage {
     pname = "spencer-workspace";
     inherit version src nodejs;
-    npmDepsHash = "sha256-HgVidD1pWzA94jAP5BwRRcc4UwI3B35nOhkuXr/CdvE=";
+    npmDepsHash = "sha256-XuGYMae1C1Kn9LmcOsM1uHachzuxWKNwfPZGhbDo8HU=";
     # Install scripts are not needed (esbuild finds its platform binary package directly).
     npmFlags = [ "--ignore-scripts" ];
     npmBuildScript = "build:relay";
     installPhase = ''
       runHook preInstall
       npm prune --omit=dev --ignore-scripts --offline
+      node -e 'const m = { exports: {} }; process.dlopen(m, require.resolve("@node-datachannel/" + process.platform + "-" + process.arch + (process.platform === "linux" ? "-gnu" : "")));'
       # Build-only tools that prune leaves behind in a workspace (the native tsc alone is ~100 MB).
       rm -rf node_modules/{typescript,@typescript,esbuild,@esbuild,@types} node_modules/.bin
       mkdir -p $out/lib/spencer
