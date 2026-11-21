@@ -29,8 +29,10 @@ export async function startStun(host: string, port: number) {
     bucket.tokens = Math.min(20, bucket.tokens + (now - bucket.time) * 0.005); bucket.time = now;
     if (bucket.tokens < 1) return;
     bucket.tokens--;
-    const ipv4 = isIP(remote.address) === 4;
-    const addr = ipBytes(remote.address);
+    const cleanAddr = remote.address.split("%")[0].replace(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i, "$1");
+    const ipv4 = isIP(cleanAddr) === 4;
+    if (!ipv4 && isIP(cleanAddr) !== 6) return;
+    const addr = ipBytes(cleanAddr);
     const response = Buffer.alloc(ipv4 ? 32 : 44);
     response.writeUInt16BE(0x0101, 0); response.writeUInt16BE(response.length - 20, 2);
     response.writeUInt32BE(0x2112a442, 4); msg.copy(response, 8, 8, 20);

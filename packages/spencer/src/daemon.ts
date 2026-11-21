@@ -6,6 +6,7 @@ import {
   fingerprint,
   isB64uId,
   isEnvelope,
+  isLinkBody,
   openEnvelope,
   pairKey,
   sealEnvelope,
@@ -448,6 +449,7 @@ export class Daemon {
         this.need("sql").run("DELETE FROM messages WHERE id = ?", msg.id);
         return;
       default:
+        if (isLinkBody(body)) return;
         if (body.to === this.need("me").id) await this.need("transfers").onBody(msg.ch, msg.from_id, body);
     }
   }
