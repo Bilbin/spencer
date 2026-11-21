@@ -289,6 +289,10 @@ function sendFileModal(c) {
 function settingsModal(c) {
   const name = h("input.input", { type: "text", value: c.name, maxlength: "100" });
   const autoReply = h("input", { type: "checkbox", checked: c.autoReply, role: "switch" });
+  const directLink = h("input", { type: "checkbox", checked: c.directLink !== "off", role: "switch" });
+  const allowLocal = h("input", { type: "checkbox", checked: !!c.allowLocalAddresses, disabled: !directLink.checked, role: "switch" });
+  directLink.addEventListener("change", () => { allowLocal.disabled = !directLink.checked; });
+  const peerName = c.kind === "direct" ? peers(c)[0]?.name?.replace(/'s Spencer$/, "") : null;
   const toolsBox = h("div.tool-checks", null, h("p.hint", null, "Loading MCP tools…"));
   const selected = new Set(c.allowedMcpTools ?? []);
   let trust = c.trust === "full" ? "full" : "standard";
@@ -383,6 +387,11 @@ function settingsModal(c) {
   const form = h(
     "form",
     { id: "settings-form" },
+    h("div.field", null, h("div.label", null, "Hub"), h("code.mono", null, c.relayUrl ?? "")),
+    h("label.switch-row", null, directLink, h("span", null, h("strong", null, "Direct file transfers"), h("span.hint.block", null, `Send files directly when you're both online. Faster, and the bytes don't go through the server, but ${peerName ? `${peerName}'s Spencer sees` : "peers' Spencers see"} your IP address while a file is moving.`))),
+    S.p2p?.available === false ? h("div.callout.warn", null, icon("warn", 16), h("span", null, `Direct file transfers aren't available on this machine${S.p2p.error ? ": " + S.p2p.error : "."}`)) : null,
+    S.p2p?.mode === "off" ? h("span.hint.block", null, `Direct file transfers are currently disabled in Spencer's config (p2p.mode = "off").`) : null,
+    h("label.switch-row", null, allowLocal, h("span", null, h("strong", null, "Allow local network addresses"), h("span.hint.block", null, "Share local LAN addresses in this channel for faster transfers between machines on the same Wi-Fi or network."))),
     field("Name", name, c.kind === "direct" ? "Your private label for this channel. Peers don't see it." : "Your label for this group."),
     h(
       "label.switch-row",
@@ -440,6 +449,8 @@ function settingsModal(c) {
     const patch = {};
     const n = name.value.trim();
     if (n && n !== c.name) patch.name = n;
+    if ((directLink.checked ? "auto" : "off") !== (c.directLink ?? "auto")) patch.directLink = directLink.checked ? "auto" : "off";
+    if (allowLocal.checked !== !!c.allowLocalAddresses) patch.allowLocalAddresses = allowLocal.checked;
     if (autoReply.checked !== c.autoReply) patch.autoReply = autoReply.checked;
     if (trust !== (c.trust ?? "standard")) patch.trust = trust;
     const tools = [...selected].sort();

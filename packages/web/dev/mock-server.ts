@@ -18,7 +18,10 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { join, normalize, extname, basename, sep } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { Channel, ChannelMember, ChannelMessage, Transfer, OwnerItem, OwnerRequest, McpServerStatus, DaemonEvent, Followup, ModelStatus } from "../../spencer/src/contracts.ts";
+import type { Channel as BaseChannel, ChannelMember, ChannelMessage, Transfer as BaseTransfer, OwnerItem, OwnerRequest, McpServerStatus, DaemonEvent, Followup, ModelStatus } from "../../spencer/src/contracts.ts";
+
+type Channel = BaseChannel & { directLink?: "auto" | "off"; allowLocalAddresses?: boolean };
+type Transfer = BaseTransfer & { via?: "link" | "croc" };
 
 interface Presence {
   online: boolean;
@@ -169,6 +172,8 @@ function addChannel(kind: "direct" | "group", name: string, ps: Person[], extra:
     relayUrl: relay.url,
     members: [me, ...ps].map(member),
     autoReply: true,
+    directLink: "auto",
+    allowLocalAddresses: false,
     allowedMcpTools: [],
     trust: "standard",
     unread: 0,
@@ -348,8 +353,8 @@ for (const f of [
 
 addTransfer({ ch: bobCh.id, direction: "out", peer: bob.id, name: "q3-report.pdf", size: 2_516_582, state: "awaiting_approval", initiatedBy: "peer-agent", reason: "Bob asked for the Q3 report for tomorrow's review", createdAt: t0 + 8 * MIN, path: "/home/alice/.local/share/spencer/outgoing/x/q3-report.pdf" });
 addTransfer({ ch: bobCh.id, direction: "in", peer: bob.id, name: "backup-2026-11-19.log", size: 18_874_368, state: "offered", initiatedBy: "peer", createdAt: t0 + 7.5 * MIN });
-addTransfer({ ch: group.id, direction: "out", peer: dave.id, name: "meetup-slides.key", size: 48_234_496, state: "sending", initiatedBy: "owner-agent", progress: 0.35, createdAt: t0 + 5.5 * MIN });
-addTransfer({ ch: bobCh.id, direction: "in", peer: bob.id, name: "photos.zip", size: 125_829_120, state: "completed", initiatedBy: "peer", progress: 1, createdAt: t0 - 2 * HOUR, path: "/home/alice/.local/share/spencer/quarantine/k2Jd9sQx/photos.zip" });
+addTransfer({ ch: group.id, direction: "out", peer: dave.id, name: "meetup-slides.key", size: 48_234_496, state: "sending", via: "link", initiatedBy: "owner-agent", progress: 0.35, createdAt: t0 + 5.5 * MIN });
+addTransfer({ ch: bobCh.id, direction: "in", peer: bob.id, name: "photos.zip", size: 125_829_120, state: "completed", via: "croc", initiatedBy: "peer", progress: 1, createdAt: t0 - 2 * HOUR, path: "/home/alice/.local/share/spencer/quarantine/k2Jd9sQx/photos.zip" });
 addTransfer({ ch: group.id, direction: "out", peer: carol.id, name: "notes.txt", size: 4_096, state: "failed", initiatedBy: "owner", attempt: 5, error: "croc exited with code 1 after 5 attempts (relay unreachable)", createdAt: t0 - 3 * HOUR });
 
 // MOCK_EMPTY_OWNER=1 starts with an empty owner chat (to see the example prompts).
@@ -623,6 +628,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       requests: [...requests.values()].reverse(),
       followups: [...followups.values()],
       model,
+      p2p: { mode: "files", available: true },
     };
   }
   if (a === "owner" && b === "messages" && !c) {
@@ -669,6 +675,8 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     if (!c && method === "PATCH") {
       const body = await readJson(req);
       if (typeof body.name === "string" && body.name.trim()) ch.name = body.name.trim();
+      if (body.directLink === "auto" || body.directLink === "off") ch.directLink = body.directLink;
+      if (typeof body.allowLocalAddresses === "boolean") ch.allowLocalAddresses = body.allowLocalAddresses;
       if (typeof body.autoReply === "boolean") ch.autoReply = body.autoReply;
       if (body.trust === "standard" || body.trust === "full") ch.trust = body.trust;
       if (Array.isArray(body.allowedMcpTools)) ch.allowedMcpTools = body.allowedMcpTools.filter((x): x is string => typeof x === "string");
@@ -689,7 +697,20 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       const name = typeof body.name === "string" ? body.name.trim() : "";
       if (!kind) throw new HttpError(400, "kind must be direct or group");
       if (!name) throw new HttpError(400, "name is required");
-      const chn = addChannel(kind, name, [], { createdAt: now() });
+      let hub = relay.url;
+      if (body.relay !== undefined) {
+        if (typeof body.relay !== "string") throw new HttpError(400, "invalid hub URL");
+        try {
+          const url = new URL(body.relay);
+          if (!["http:", "https:", "ws:", "wss:"].includes(url.protocol)) throw new Error();
+          url.protocol = url.protocol === "http:" ? "ws:" : url.protocol === "https:" ? "wss:" : url.protocol;
+          url.pathname = "/ws";
+          url.search = "";
+          url.hash = "";
+          hub = url.toString();
+        } catch { throw new HttpError(400, "invalid hub URL"); }
+      }
+      const chn = addChannel(kind, name, [], { createdAt: now(), relayUrl: hub });
       emitChannel(chn);
       // Simulate the friend joining a little later.
       later(12_000, () => {
@@ -700,7 +721,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
         emitChannel(chn);
         incoming(chn, p, { type: "hello", text: "", hop: undefined, by: undefined });
       });
-      return { link: `https://spencer.pjalv.com/i/${chn.id}#${b64u(32)}`, channel: chn };
+      return { link: `${hub.replace(/^ws/, "http").replace(/\/ws$/, "")}/i/${chn.id}#${b64u(32)}`, channel: chn };
     }
     if (b === "accept") {
       const link = typeof body.link === "string" ? body.link.trim() : "";
@@ -709,7 +730,9 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       if (channels.has(m[1])) throw new HttpError(409, "you are already in this channel");
       const p = person("Frank's Spencer");
       people.set(p.id, p);
-      const chn = addChannel("direct", "Frank", [p], { id: m[1], createdAt: now() });
+      const inviteUrl = new URL(link);
+      const hub = `${inviteUrl.protocol === "https:" ? "wss:" : "ws:"}//${inviteUrl.host}/ws`;
+      const chn = addChannel("direct", "Frank", [p], { id: m[1], createdAt: now(), relayUrl: hub });
       later(1500, () => channels.has(chn.id) && incoming(chn, p, { type: "hello", text: "Frank's VPS", hop: undefined, by: undefined }));
       emitChannel(chn);
       return { channel: chn };
