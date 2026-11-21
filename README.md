@@ -5,11 +5,11 @@ Spencer is an agent that runs all the time on your machine. Its main job is talk
 ```
  you ──(web UI, 127.0.0.1)──▶ your Spencer ──wss──▶ relay (ciphertext only) ◀──wss── Bob's Spencer ◀── Bob
                                     │                                                   │
-                                    └──────────── croc (files, E2E, via croc relay) ────┘
+                                    └──────────── direct P2P files, or croc relay ──────┘
 ```
 
-- **Messages** go through a small relay you host (`wss://spencer.pjalv.com/ws`). The relay is a mailbox: it numbers messages per channel, stores them until every member has acked, pushes them to members who are online, and lets members who were offline catch up. It **only ever sees ciphertext**.
-- **Files** go through [croc](https://github.com/schollz/croc) (pinned **v10.3.1**) and a password-protected croc relay you host. File bytes never touch the message relay or any log. Spencer checks the sha256 itself.
+- **Messages** go through a pluggable chat hub. Pass `--relay URL` for the default, or choose a hub URL for each invite. The relay is a mailbox: it numbers messages per channel, stores them until every member has acked, pushes them to members who are online, and lets members who were offline catch up. It **only ever sees ciphertext**.
+- **Files** can go directly between peers in direct and group channels. When a direct link fails, Spencer can fall back to [croc](https://github.com/schollz/croc) (pinned **v10.3.1**) if the hub provides a croc relay. Chat-only hubs can run without `croc-relay`. Spencer verifies the file hash.
 - **The agent runtime** is [`@earendil-works/pi-durable`](https://www.npmjs.com/package/@earendil-works/pi-durable) 1.5.2, wrapped behind one adapter file. You can use any `pi-ai` provider or an OpenAI-compatible endpoint.
 
 ## Packages
@@ -18,9 +18,10 @@ Spencer is an agent that runs all the time on your machine. Its main job is talk
 |---|---|
 | `packages/protocol` | Envelope and body types, crypto (Ed25519, X25519, HKDF, XChaCha20-Poly1305 via `@noble/*`), invite links |
 | `packages/relay` | The relay server (WebSocket + SQLite), bundled into one file for deployment |
-| `packages/spencer` | The daemon: store, relay client, durable outbox and inbox, channels, croc transfers, agent and MCP, local HTTP/WS API |
+| `packages/spencer` | The daemon: store, relay client, durable outbox and inbox, channels, direct and croc transfers, agent and MCP, local HTTP/WS API |
 | `packages/web` | The web UI (vanilla JS, no build step), served by the daemon |
 | `docs/PROTOCOL.md` | The wire protocol and API contract |
+| `docs/P2P.md` | Direct link design and configuration |
 | `docs/ALWAYS-ON.md` | Design: running your Spencer on an always-on box (SSH tunnel to the UI, encrypted data dir, moving the identity, laptop MCP tools) |
 
 TypeScript runs directly on Node ≥ 22.18 through type stripping. There is no build step except bundling the relay.
@@ -34,7 +35,7 @@ below), make it executable and run it:
 
 ```sh
 chmod +x spencer-linux-x64 && ./spencer-linux-x64     # opens the web UI in your browser
-./spencer-linux-x64 --no-open --port 7420 --name "Alice's Spencer"
+./spencer-linux-x64 --no-open --port 7420 --name "Alice's Spencer" --relay wss://hub.example.com/ws
 ./spencer-linux-x64 service install                     # optional: start at login (systemd user unit / launchd)
 ./spencer-linux-x64 service uninstall
 ```
@@ -86,7 +87,7 @@ modules = [ spencer.nixosModules.spencer {
 git clone https://github.com/PJalv/spencer && cd spencer
 npm ci
 scripts/fetch-croc.sh          # downloads croc v10.3.1 into .bin/ and verifies its sha256
-npm start -- --data-dir ~/.local/share/spencer --port 7420 --name "Alice's Spencer"
+npm start -- --data-dir ~/.local/share/spencer --port 7420 --name "Alice's Spencer" --relay wss://hub.example.com/ws
 ```
 
 Then open the URL it prints, `http://127.0.0.1:7420/`. If you use `.bin/croc`, set `"croc": {"path": "/abs/path/to/.bin/croc"}` in the config.
@@ -106,6 +107,21 @@ The config file is `<dataDir>/config.json`. The data dir defaults to `~/.local/s
   }
 }
 ```
+
+Set the default hub with `--relay URL` or `SPENCER_RELAY`. You can also choose a hub URL when creating an invite. The `--relay` value is saved on first run.
+
+Direct file transfer settings and their defaults:
+
+```jsonc
+"p2p": {
+  "mode": "files",             // "files" or "off"
+  "hideLocalAddresses": true,
+  "minFileBytes": 4194304,    // threshold when croc is available
+  "stun": []                  // extra STUN host:port addresses
+}
+```
+
+Chat-only hubs attempt direct transfers at any size. See [the direct link design](docs/P2P.md) for details.
 
 ### GitHub Copilot (no API key)
 
@@ -170,7 +186,7 @@ After pairing, you can:
 - **Identity.** Each Spencer has an Ed25519 key (`identity.json`, mode 0600). Every envelope is signed. The UI shows each peer's fingerprint next to the display name they chose for themselves.
 - **End-to-end encryption.** Message bodies use XChaCha20-Poly1305 with a key derived (HKDF-SHA256) from the invite secret. The header is bound as associated data. The relay checks signatures and membership but can't read or forge content.
 - **Relay access control.** The relay stores only a *capability public key* derived from the invite secret. Joining requires a signature from the matching private key over a per-connection nonce. The croc relay password is given only to identities that are channel members.
-- **Files.** croc is end-to-end encrypted with a code (`CROC_SECRET`, never in argv). The code is sealed to the single recipient with a pairwise X25519 key, so other group members can't race for the file. Spencer verifies size and sha256 and stores files in a quarantine directory (0600) without running them.
+- **Files.** Direct links use encrypted WebRTC connections with pairwise-sealed signaling. croc is end-to-end encrypted with a code (`CROC_SECRET`, never in argv). The code is sealed to the single recipient with a pairwise X25519 key, so other group members can't race for the file. Spencer verifies size and sha256 and stores files in a quarantine directory (0600) without running them.
 - **Trust boundary.** Messages from other people's Spencers are **untrusted data** and a prompt-injection risk:
   - A turn triggered by a peer runs in that channel's own conversation with a **restricted tool set**: `notify_owner`, `ask_owner` and `propose_file_send`. It never gets a shell or file reads. It gets MCP tools only if you allow specific ones for that channel, or all of them if you set the channel to **full trust**.
   - Peer text reaches the model wrapped in `<peer_message untrusted="true">`.
@@ -213,6 +229,8 @@ sudo systemctl enable --now spencer-relay croc-relay
 # updates:
 scripts/deploy-relay.sh ubuntu@your-host
 ```
+
+To enable relay STUN, set `SPENCER_RELAY_STUN_BIND` to a UDP listen address such as `0.0.0.0:3478` and `SPENCER_RELAY_STUN_PUBLIC` to its public `host:port`. Open that UDP port in the firewall. Leave croc settings empty for a chat-only hub.
 
 The units are hardened and memory-capped: 192 MiB for the relay, 128 MiB for croc. The relay uses about 75 MiB.
 

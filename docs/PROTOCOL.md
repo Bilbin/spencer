@@ -27,7 +27,9 @@ disagree, fix one of them. Don't work around the difference.
 | Identity `I` | random Ed25519 keypair, stored in `<dataDir>/identity.json` (mode 0600) | Signs envelopes and relay auth |
 | Channel encryption key `K_enc` | `HKDF-SHA256(ikm=S, salt="spencer/v1", info="enc:"+ch, 32)` | XChaCha20-Poly1305 key for envelope bodies |
 | Channel capability key `K_cap` | Ed25519 keypair from seed `HKDF-SHA256(S, "spencer/v1", "cap:"+ch, 32)` | Proves to the relay that the holder has the invite. The relay stores only `capPub` |
-| Pair key `K_pair(A,B,ch)` | `HKDF-SHA256(X25519(mont(a), mont(B)), "spencer/v1", "pair:"+ch+":"+min(A,B)+":"+max(A,B), 32)` | Seals data meant for one member of a group, such as the croc code |
+| Pair key `K_pair(A,B,ch)` | `HKDF-SHA256(X25519(mont(a), mont(B)), "spencer/v1", "pair:"+ch+":"+min(A,B)+":"+max(A,B), 32)` | Seals data meant for one member of a group, such as the croc code and link SDP |
+
+`sealLink` and `openLink` use `K_pair` and domain-separated associated data for offers and answers (§6.4).
 
 `S` is the invite secret and `ch` is the channel id. `mont()` is the birational map from
 Ed25519 to X25519 (`ed25519.utils.toMontgomery` / `toMontgomerySecret`).
@@ -79,21 +81,26 @@ The body schema is validated after decryption (`parseBody`). Unknown `type`s are
 
 ```ts
 type Body =
-  | { type: "hello"; name: string; about?: string; agent: string }       // e.g. agent "spencer/0.1"
+  | { type: "hello"; name: string; about?: string; agent: string; features?: string[] }       // e.g. agent "spencer/0.1"
   | { type: "chat"; text: string; hop: number; by: "human" | "agent";
       replyTo?: string; mentions?: string[];                            // mentions = identity ids
       final?: true }                                                    // end of the exchange, see below
   | { type: "file_offer";  tid: string; to: string; name: string; size: number; sha256: string; expiresAt: number }
   | { type: "file_accept"; tid: string; to: string; sealed: string }    // sealed croc code, see §6
   | { type: "file_decline"; tid: string; to: string; reason?: string }
-  | { type: "file_ready";  tid: string; to: string; attempt: number }
+  | { type: "file_ready";  tid: string; to: string; attempt: number; via?: "link" }
   | { type: "file_retry";  tid: string; to: string; attempt: number }
   | { type: "file_ack";    tid: string; to: string; ok: boolean; sha256?: string; reason?: string }
   | { type: "file_cancel"; tid: string; to: string; reason: string }
+  | { type: "link_offer" | "link_answer"; to: string; sid: string; sealed: string }
+  | { type: "link_close"; to: string; sid: string; reason?: string }
   | { type: "status"; replyTo: string;                                  // activity ≤ 200 chars
       state: "working" | "done" | "input_required" | "completed" | "failed"; activity?: string };
 ```
 
+- `link_offer` and `link_answer` carry pairwise-sealed SDP of at most 16 KiB. All `link_*` bodies are ephemeral only and addressed to one peer.
+- `hello.features` advertises capabilities such as `["p2p-files/1"]`. A hello is also sent when local features change.
+- `file_ready.via: "link"` selects the direct transport; an omitted `via` selects croc.
 - `status`: an ephemeral "working on it" indicator while a Spencer's channel agent prepares a reply to `replyTo`:
   "Thinking…" when the run starts, one update per tool call (`Using t3code · t3 thread read`), and `done` when the
   run ends. Receivers show it live, drop it when it is older than 2 minutes (a catch-up after being offline),
@@ -130,10 +137,10 @@ All frames are JSON text. Requests carry `rid` (a client-chosen string). Replies
 ### 4.1 Handshake
 1. Relay → `{t:"challenge", nonce, server:"spencer-relay/1"}` (nonce: 32 random bytes b64u)
 2. Client → `{t:"auth", id, sig}`, where `sig = Ed25519(I, utf8("spencer/v1/relay-auth:" + nonce))`
-3. Relay → `{t:"welcome", id, croc?: {relay:"host:port", pass}, features?: string[]}`. `croc` is present only if
+3. Relay → `{t:"welcome", id, croc?: {relay:"host:port", pass}, features?: string[], stun?: string}`. `croc` is present only if
    `id` is a member of at least one channel. This keeps the croc relay password away from
    people without an invite. `features` lists optional protocol features the relay supports: `"presence"` (§4.6)
-   and `"ephemeral"` (§4.7). Older relays omit it (treat as `[]`); older clients ignore it.
+   `"ephemeral"` (§4.7), and `"stun"` when the relay advertises a STUN server. `stun` is its public `host:port`. Older relays omit it (treat as `[]`); older clients ignore it.
 
 Before `welcome`, every other frame gets `err code:"unauthenticated"`. A connection that hasn't
 authenticated within 10 s is closed.
@@ -168,7 +175,8 @@ Error codes: `unauthenticated`, `bad_request`, `not_member`, `no_channel`, `full
 
 ### 4.5 Relay config (env)
 `SPENCER_RELAY_HOST` (127.0.0.1), `SPENCER_RELAY_PORT` (8820), `SPENCER_RELAY_DB`,
-`SPENCER_RELAY_TTL_DAYS` (14), `SPENCER_CROC_RELAY` (`spencer.pjalv.com:9009`), `SPENCER_CROC_PASS`.
+`SPENCER_RELAY_TTL_DAYS` (14), `SPENCER_CROC_RELAY` (`spencer.pjalv.com:9009`), `SPENCER_CROC_PASS`. `SPENCER_RELAY_STUN_BIND` sets the UDP listener address and
+`SPENCER_RELAY_STUN_PUBLIC` sets the advertised `host:port`. When the public address is omitted, the listener address is advertised.
 
 ### 4.6 Presence (feature `"presence"`)
 The relay already knows which identities have an authenticated connection; it shares that with co-members only.
@@ -187,7 +195,7 @@ The relay already knows which identities have an authenticated connection; it sh
 `{t:"send", rid, env, ephemeral: true}` gets the same checks as a normal send (membership, `from`, signature,
 size, rate limit) but the relay does not store it, assigns no `seq`, keeps no dedupe record, and replies
 `ok {id}`. It pushes `{t:"eph", ch, env}` once to the other members' *subscribed* connections; members who are
-offline never get it. Spencers send only `status` bodies this way and accept only `status` bodies from `eph` frames
+offline never get it. Spencers send `status` and `link_*` bodies this way and accept those bodies from `eph` frames
 (after the same relay, envelope, signature and membership checks as the inbox; nothing is stored or acked).
 Backward compatible both ways: an older relay ignores the `ephemeral` flag and stores the message (receivers drop a
 stale status), and an older Spencer ignores the unknown `eph` frame (it just doesn't see live status).
@@ -225,9 +233,9 @@ stale status), and an older Spencer ignores the unknown `eph` frame (it just doe
   answer → replace the socket) or, if it is waiting in backoff, an immediate reconnect. The reconnect then catches up
   through `sub` (§5.2) and flushes the outbox (§5.1). Follow-ups (§7.4) use the wall clock for the same reason.
 
-## 6. File transfers (croc)
+## 6. File transfers
 
-Files never go through the message relay. The croc relay address and password come from the relay's
+Files use a direct link or croc, in both direct and group channels. Files never go through the message relay. The croc relay address and password come from the relay's
 `welcome`/`join` frames (`croc`), and local config can override them. Pinned croc: **v10.3.1**.
 
 ### 6.1 Sender states
@@ -239,7 +247,7 @@ Terminal: `completed | denied | declined | failed | expired | cancelled`
    becomes `awaiting_approval`. With `policy.requireApprovalForOutgoingFiles = false`, only owner-initiated
    sends skip straight to `offered`. Peer-initiated sends **always** need approval.
 2. **Approve**: enqueue `file_offer` (expires in 24 h by default) → `offered`. **Deny** → `denied` and delete the staged copy.
-3. On `file_accept`: unseal the code → `sending`, with `attempt = 1`. Spawn
+3. On `file_accept`: unseal the code → `sending`, with `attempt = 1`. Try a direct link when eligible (§6.5). For a croc attempt, spawn
    `croc --yes --overwrite --disable-clipboard --relay R --pass P send --no-local <staged file>` with env
    `CROC_SECRET=CODE`. croc v10 refuses `--code` on Linux, so **both sides pass the code only through
    `CROC_SECRET`**, and it never appears in argv or `ps`. croc prints the receive instructions (its
@@ -247,8 +255,8 @@ Terminal: `completed | denied | declined | failed | expired | cancelled`
    that line** and then enqueues `file_ready {attempt}`. If the line never shows up, it signals ready anyway
    10 s after spawn. The sender's croc exits 0 after a successful transfer. With `croc.throttleUpload` set
    (e.g. `"500k"`), senders also get `--throttleUpload <value>`.
-4. On `file_retry {attempt}` matching the current attempt, or croc exiting with an error before the ack:
-   kill croc, `attempt++`, back off, and spawn again with `file_ready {attempt}`. At most `policy.maxTransferAttempts` (default 5) attempts → `failed` (+ `file_cancel`).
+4. On `file_retry {attempt}` matching the current attempt, or a transfer attempt failing before the ack:
+   stop the attempt, increment `attempt`, back off, and start again with `file_ready {attempt}`. At most `policy.maxTransferAttempts` (default 5) attempts → `failed` (+ `file_cancel`).
 5. On `file_ack ok:true` → `completed`, delete the staged copy. On `ok:false` → `failed`.
 
 ### 6.2 Recipient states
@@ -260,12 +268,12 @@ Terminal: `completed | declined | failed | expired | cancelled`
 2. **Accept**: generate `CODE = dddd-<32 hex>` (4 random digits, a dash, 16 random bytes in hex).
    Enqueue `file_accept {sealed: seal(K_pair, tid, {code})}` → `accepted`. **Decline** → `file_decline`.
 3. On `file_ready {attempt}` with `attempt > current` (strictly greater: a duplicate or stale `file_ready` for the
-   attempt already running is ignored; the first one, attempt 1, is greater than the initial 0): kill any running receive and spawn
+   attempt already running is ignored; the first one, attempt 1, is greater than the initial 0): stop any running receive. For `via: "link"`, receive over the direct link (§6.5). Otherwise spawn
    `croc --yes --overwrite --disable-clipboard --relay R --pass P --out <data>/incoming/<tid>/`
    with env `CROC_SECRET=CODE` → `receiving`.
-4. When croc exits 0: hash the received file. If it matches the offer, move it to
+4. When the transfer finishes: hash the received file. If it matches the offer, move it to
    `<data>/quarantine/<tid>/<sanitized name>` (mode 0600) → `completed`, then enqueue `file_ack ok:true`.
-   If it doesn't match, delete it, `file_ack ok:false reason:"sha256 mismatch"` → `failed`.
+   If it does not match, delete it. A resumed link can retry from zero (§6.5); otherwise send `file_ack ok:false reason:"sha256 mismatch"` → `failed`.
    If croc exits non-zero, enqueue `file_retry {attempt}` and wait.
 
 ### 6.3 Crash recovery and expiry
@@ -273,7 +281,7 @@ Terminal: `completed | declined | failed | expired | cancelled`
   without stopping them (SIGKILL, crash). The croc runner records the pids of its live children in
   `<data>/croc.pids`. A pid is killed only if `/proc/<pid>/cmdline` shows a `croc` binary whose cwd or arguments
   are inside the data dir, so a recycled pid is never hit. Without `/proc`, nothing is killed.
-- Then the sender in `sending` re-spawns croc with `attempt+1` and enqueues `file_ready`.
+- Then the sender in `sending` restarts the transfer with `attempt+1` and enqueues `file_ready`.
   The recipient in `receiving` first checks for a completed file with the right hash
   (→ verify → ack). Otherwise it enqueues `file_retry {attempt}` and waits for the sender's next `file_ready`.
 - A sweeper runs every 30 s. Any non-terminal transfer past `expiresAt` → `expired`: kill croc, delete
@@ -283,6 +291,19 @@ Terminal: `completed | declined | failed | expired | cancelled`
 
 ### 6.4 Sealing
 `seal(key, tid, obj) = b64u(n24 || xchacha20poly1305(key, n24, utf8(JSON(obj)), aad=utf8("spencer/v1/seal:"+tid)))`
+
+`sealLink` and `openLink` use the same construction with `K_pair` and AAD
+`spencer/v1/link:offer:<sid>` or `spencer/v1/link:answer:<sid>`, respectively.
+
+### 6.5 Direct links
+
+Peers advertise `p2p-files/1` in `hello`. The sender establishes a pairwise WebRTC link through
+ephemeral signaling, then sends `file_ready` with `via: "link"`. The receiver opens data channel
+`f:<tid>:<attempt>` and sends its partial-file offset. The sender streams from that offset. The
+receiver verifies the size and hash before quarantine and acknowledgement. A hash mismatch after
+resume causes one retry from zero. A failed link attempt falls back to croc when configured.
+Chat-only hubs can omit croc; they attempt direct transfers at any file size, and transfers fail
+if no usable link is available. See [P2P design](P2P.md) for details.
 
 ## 7. Agent, trust boundary, loop control
 
@@ -427,20 +448,20 @@ that, `schedule_followup` fails and tells the model to report what it has (or as
 
 | Method | Path | Body → Response |
 |---|---|---|
-| GET | `/api/state` | → `{me:{id, name, fingerprint}, relay:{url, connected}, relays: RelayStatus[], channels: Channel[], transfers: Transfer[], mcp: McpServer[], policy, ownerBusy: boolean, requests: OwnerRequest[], followups: Followup[]}`. `relay` is the default relay from config; `connected` is true when every relay in use is connected. `relays` lists each relay in use (one per distinct channel relay, plus the default). |
+| GET | `/api/state` | → `{me:{id, name, fingerprint}, relay:{url, connected}, relays: RelayStatus[], channels: Channel[], transfers: Transfer[], mcp: McpServer[], policy, p2p: {mode, available, error?}, ownerBusy: boolean, requests: OwnerRequest[], followups: Followup[]}`. `relay` is the default relay from config; `connected` is true when every relay in use is connected. `relays` lists each relay in use (one per distinct channel relay, plus the default). |
 | GET | `/api/owner/messages?limit=` | → `{items: OwnerItem[]}` (owner conversation transcript, oldest first; default 200, max 2000) |
 | POST | `/api/owner/messages` | `{text}` → `{submissionId}` |
 | GET | `/api/channels` | → `{items: Channel[]}` |
 | GET | `/api/channels/:ch` | → `Channel` |
 | GET | `/api/channels/:ch/messages?limit=&before=` | → `{items: ChannelMessage[]}`: chat and hello messages, oldest first, default 100, max 1000. `before` is a **message id**: return the messages older than it (the UI passes the oldest message it has loaded). An unknown id → 404. Without `before`, the channel is marked read. |
 | POST | `/api/channels/:ch/messages` | `{text, mentions?}` → `{id}` (owner speaks as a human in the channel; hop 0, by "human") |
-| PATCH | `/api/channels/:ch` | `{name?, autoReply?, allowedMcpTools?: string[], trust?: "standard"\|"full"}` → `Channel` |
+| PATCH | `/api/channels/:ch` | `{name?, autoReply?, allowedMcpTools?: string[], trust?: "standard"\|"full", directLink?: "auto"\|"off", allowLocalAddresses?: boolean}` → `Channel` |
 | GET | `/api/requests` | → `{items: OwnerRequest[]}` (newest first, max 200) |
 | POST | `/api/requests/:id/approve` · `/deny` | → `OwnerRequest` (409 if already decided) |
 | GET | `/api/followups` | → `{items: Followup[]}`: pending and running ones (by `dueAt`), then the 20 most recently finished |
 | POST | `/api/followups/:id/cancel` | → `Followup` (the owner cancels one; 404 unknown, 409 if no longer pending or running) |
 | DELETE | `/api/channels/:ch` | leave the channel → `{}` |
-| POST | `/api/invites` | `{kind:"direct"\|"group", name}` → `{link, channel: Channel}` |
+| POST | `/api/invites` | `{kind:"direct"\|"group", name, relay?: string}` → `{link, channel: Channel}` |
 | POST | `/api/invites/accept` | `{link}` → `{channel: Channel}` |
 | GET | `/api/transfers?ch=` | → `{items: Transfer[]}` (optionally only one channel's) |
 | GET | `/api/transfers/:tid` | → `Transfer` |
@@ -465,7 +486,7 @@ interface ModelStatus { provider?: string; modelId?: string;
     signIn?: { state: "waiting"|"connecting"|"failed"|"cancelled"; userCode?: string; verificationUri?: string;
                expiresAt?: number; error?: string } } }
 interface Channel { id: string; kind: "direct"|"group"; name: string; relayUrl: string;
-  members: ChannelMember[];
+  members: ChannelMember[]; directLink: "auto"|"off"; allowLocalAddresses: boolean;
   autoReply: boolean; allowedMcpTools: string[]; trust: "standard"|"full"; unread: number; lastSeq: number; createdAt: number }
 interface OwnerRequest { id: string;
   kind: "peer" | "continue";   // peer: ask_owner (§7.1); continue: the channel's turn budget ran out (§7.2)
@@ -482,7 +503,7 @@ interface ChannelMessage { id: string; ch: string; from: string; fromName?: stri
                    // "conversation ended", "repeated", "budget exhausted" (paused, see OwnerRequest kind "continue"),
                    // "handled by owner" (it woke an owner follow-up, §7.4)
   origin?: "human"|"owner-agent"|"agent-reply"|"agent-followup"|"peer" }   // agent-followup: §7.4
-interface Transfer { tid: string; ch: string; direction: "out"|"in"; peer: string; peerName?: string;
+interface Transfer { via?: "link"|"croc"; tid: string; ch: string; direction: "out"|"in"; peer: string; peerName?: string;
   name: string; size: number; sha256: string; state: string; attempt: number; initiatedBy: "owner"|"peer-agent"|"owner-agent"|"peer";
   reason?: string;     // free text from whoever initiated it, e.g. the peer agent's justification
   progress?: number;   // fraction 0–1 while sending/receiving, 1 once completed; absent before croc reports any
@@ -491,7 +512,7 @@ interface OwnerItem { id: string; role: "user"|"assistant"|"tool"|"note"; text: 
   toolName?: string; isError?: boolean;
   untrusted?: boolean;    // text written by another person's agent (e.g. a reply to something the owner sent)
   request?: string }      // an ask_owner request card: the OwnerRequest id
-interface ChannelMember { id: string; name?: string; fingerprint: string; me: boolean;
+interface ChannelMember { features?: string[]; id: string; name?: string; fingerprint: string; me: boolean;
   // Is this member's Spencer reachable through the channel's relay right now (§4.6)?
   //  "online" / "offline": what the relay says. "unknown": we are not connected to that relay, or it is an older relay
   //  without presence. For `me`: "online" when we are connected to the relay, else "offline".
@@ -504,7 +525,7 @@ interface RelayStatus { url: string;
   since: number;                              // when `state` last changed (ms)
   lastConnectedAt?: number; retryAt?: number;
   lastError?: string;                         // the last socket error since the last successful connection
-  features: string[] }                        // relay features from `welcome` ("presence", "ephemeral"); [] for older relays
+  stun?: string; features: string[] }          // relay features from `welcome` ("presence", "ephemeral"); [] for older relays
 interface Followup { id: string;
   conversation: "owner"|"channel"; ch?: string;   // ch: the channel, for channel follow-ups
   note: string;                                   // the agent's own words (may be based on untrusted peer input)
@@ -528,6 +549,7 @@ interface McpServer { name: string; transport: "stdio"|"http"; status: "connecti
   "model": { "provider": "anthropic", "modelId": "claude-sonnet-5-5", "apiKeyEnv": "ANTHROPIC_API_KEY" },
   // or: { "provider": "openai-compatible", "baseUrl": "http://localhost:11434/v1", "modelId": "llama3.1", "apiKeyEnv": "OLLAMA_KEY" }
   // or: { "provider": "fake" }   (deterministic, tests)
+  "p2p": { "mode": "files", "hideLocalAddresses": true, "minFileBytes": 4194304, "stun": [] },
   "croc": { "path": "croc", "relay": null, "pass": null, "throttleUpload": null },   // throttleUpload: e.g. "500k"
   "mcpServers": {
     "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] },
@@ -541,7 +563,13 @@ interface McpServer { name: string; transport: "stdio"|"http"; status: "connecti
     "maxTransferAttempts": 5, "maxPendingFollowups": 5, "maxFollowupChain": 12 }
 }
 ```
-Environment variable overrides: `SPENCER_DATA_DIR`, `SPENCER_PORT`.
+The `p2p.mode` is `"files"` or `"off"`. `hideLocalAddresses` controls local ICE candidates;
+`minFileBytes` sets the direct-transfer threshold when croc is available. `stun` lists extra
+STUN `host:port` addresses, after the relay-advertised address.
+
+Environment variable overrides: `SPENCER_DATA_DIR`, `SPENCER_PORT`, `SPENCER_RELAY`.
+`--relay URL` overrides the default relay and is saved on first run. URLs accept HTTP(S) or
+WS(S) and are normalized to the WebSocket endpoint.
 
 The data dir is mode 0700. Secrets and databases in it (`identity.json`, `api-token`, `config.json`,
 `spencer.sqlite`, `pi.sqlite` and their `-wal`/`-shm` files) are mode 0600.
