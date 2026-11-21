@@ -1,9 +1,11 @@
+import { LinkManager, createTransferP2pAdapter, type LinkManagerTuning } from "./p2p/index.ts";
 import { getP2pAddonStatus } from "./p2p/addon.ts";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import {
   MAX_CHAT_TEXT,
+  P2P_FILES_FEATURE,
   fingerprint,
   isB64uId,
   isEnvelope,
@@ -44,6 +46,7 @@ const STATUS_MAX_AGE_MS = 120_000;
 
 export interface DaemonTuning {
   relay?: Partial<RelayTuning>;
+  p2p?: LinkManagerTuning;
   outboxMinBackoffMs?: number;
   outboxMaxBackoffMs?: number;
   inboxRetryMs?: number;
@@ -114,6 +117,8 @@ type Started = {
   outbox: Outbox;
   inbox: Inbox;
   core: CoreServices;
+  links?: LinkManager;
+  p2pAdapter?: ReturnType<typeof createTransferP2pAdapter>;
   transfers?: TransferService;
   agent?: AgentService;
   api?: ApiServer;
@@ -141,6 +146,8 @@ export class Daemon {
     if (v === undefined || v === null) throw new Error(`daemon not started (${String(k)})`);
     return v as NonNullable<Started[K]>;
   }
+
+  get links(): LinkManager | undefined { return this.s.links; }
 
   get running(): boolean {
     return this.state === "running";
@@ -196,6 +203,7 @@ export class Daemon {
     return this.core.sendChat(ch, { text, hop: 0, by: "human", origin: "human", ...(mentions ? { mentions } : {}) });
   }
   leave(ch: string): Promise<void> {
+    this.s.links?.closeChannel(ch, "left channel");
     return this.channels.leave(ch);
   }
 
@@ -241,6 +249,7 @@ export class Daemon {
     s.pool = new RelayPool(
       me,
       {
+        onWake: () => this.s.links?.onWake(),
         onReady: (conn) => this.onRelayReady(conn),
         onDown: (conn) => this.s.channels?.relayChanged(conn.url, false),
         onState: (conn) => this.events.emit({ type: "relay", ...conn.status() }),
@@ -258,6 +267,7 @@ export class Daemon {
       events: this.events,
       log,
       channelChanged,
+      localFeatures: () => this.need("cfg").p2p.mode === "files" && this.s.links?.status().available ? [P2P_FILES_FEATURE] : [],
     }));
     s.outbox = new Outbox({
       sql,
@@ -292,11 +302,28 @@ export class Daemon {
     });
     s.core = this.buildCore();
 
+    const eligible = (ch: string, peerId: string) => {
+      const info = channels.info(ch);
+      const conn = info && s.pool?.peek(info.relayUrl);
+      return cfg.p2p.mode === "files" && !!channels.row(ch) && channels.peers(ch).includes(peerId) && channels.directLinkConfig(ch)?.directLink !== "off" && channels.peerHasFeature(ch, peerId, P2P_FILES_FEATURE) && !!conn?.ready && conn.features.includes("ephemeral");
+    };
+    const linkNotes: Array<{ text: string; options?: { untrusted?: boolean } }> = [];
+    s.links = new LinkManager({
+      dataDir: dir, me, log, tuning: tuning.p2p,
+      sendSignal: (ch, body) => { const info = channels.info(ch); const conn = info && s.pool?.peek(info.relayUrl); if (info && conn?.ready && conn.features.includes("ephemeral")) conn.request({ t: "send", env: sealEnvelope(me, ch, info.encKey, body), ephemeral: true }).catch(() => {}); },
+      pairKey: (ch, peerId) => pairKey(me.secret, peerId, me.id, ch),
+      authorize: (ch, peerId) => ({ ok: eligible(ch, peerId), allowLocalAddresses: !cfg.p2p.hideLocalAddresses || !!channels.directLinkConfig(ch)?.allowLocalAddresses, stunServers: [...(channels.stunFor(ch) ? [channels.stunFor(ch)!] : []), ...cfg.p2p.stun] }),
+      onFileChannel: (ch, peerId, label, dc) => s.p2pAdapter?.onIncomingFileChannel(ch, peerId, label, dc),
+      ownerNote: (text, options) => { const agent = this.s.agent; if (agent) void agent.ownerNote(text, options).catch(e => log(`agent.ownerNote: ${e.message}`)); else linkNotes.push({ text, options }); },
+    });
+    s.p2pAdapter = createTransferP2pAdapter({ links: s.links, canUseLink: (ch, peerId, size, hasCroc) => eligible(ch, peerId) && !!s.links?.status().available && !s.links.isCrashDisabled(ch) && (!hasCroc || size >= cfg.p2p.minFileBytes) });
+    s.links.start();
     const tdeps = this.buildTransferDeps();
     s.transfers = await (this.opts.transferFactory ?? defaultTransferFactory)(tdeps);
     await s.transfers.start();
     s.agent = await (this.opts.agentFactory ?? defaultAgentFactory)(s.core);
     await s.agent.start();
+    for (const note of linkNotes) await s.agent.ownerNote(note.text, note.options);
 
     await s.inbox.rerouteUnrouted();
 
@@ -318,7 +345,7 @@ export class Daemon {
         return items;
       },
       updateChannel: (ch, patch) => channels.update(ch, patch),
-      leaveChannel: (ch) => channels.leave(ch),
+      leaveChannel: (ch) => this.leave(ch),
       acceptInvite: (link) => channels.acceptInvite(link),
       ...(webRoot ? { webRoot } : {}),
     });
@@ -349,6 +376,8 @@ export class Daemon {
     if (s.inbox) await step("inbox", () => s.inbox!.stop());
     if (s.agent) await step("agent", () => s.agent!.stop());
     if (s.transfers) await step("transfers", () => s.transfers!.stop());
+    if (s.p2pAdapter) await step("p2p adapter", () => s.p2pAdapter!.stop());
+    if (s.links) await step("links", () => s.links!.stop());
     if (s.db) await step("db", () => s.db!.close());
     if (s.lock) await step("lock", () => s.lock!.release());
     this.s = {};
@@ -363,6 +392,7 @@ export class Daemon {
     channels.relayChanged(conn.url, true);
     const chs = channels.channelsOnRelay(conn.url);
     void Promise.allSettled(chs.map((ch) => channels.subscribe(conn, ch))).then(() => {
+      channels.recheckHellos();
       this.s.outbox?.connectionReady(chs);
     });
   }
@@ -413,6 +443,7 @@ export class Daemon {
       this.log(`relay ${conn.url}: dropped ephemeral ${env.id}: ${(e as Error).message}`);
       return;
     }
+    if (isLinkBody(body)) { if (body.to === this.need("me").id) void this.s.links?.onSignal(ch, env.from, body); return; }
     if (body.type !== "status" || Date.now() - env.ts >= STATUS_MAX_AGE_MS) return;
     this.events.emit({
       type: "status",
@@ -574,6 +605,7 @@ export class Daemon {
     return {
       db: this.need("db"),
       dataDir: this.dataDir,
+      p2p: this.need("p2pAdapter").adapter,
       me,
       policy: () => this.need("cfg").policy,
       trust: (ch) => channels.get(ch)?.trust ?? "standard",
@@ -629,7 +661,7 @@ export class Daemon {
     const agent = this.s.agent;
     return {
       me: this.identity,
-      p2p: { mode: cfg.p2p.mode, ...getP2pAddonStatus() },
+      p2p: { mode: cfg.p2p.mode, ...(this.s.links?.status() ?? getP2pAddonStatus()) },
       relay: { url: cfg.relay, connected: relays.length > 0 && relays.every((r) => r.connected) },
       relays,
       channels: channels.list(),
