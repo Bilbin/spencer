@@ -151,8 +151,8 @@ export class ChannelManager {
 
   // ------------------------------------------------------------- views
 
-  memberRows(ch: string): { id: string; name: string | null; about: string | null; present: number; features: string }[] {
-    return this.d.sql.all("SELECT id, name, about, present, features FROM members WHERE ch = ? ORDER BY joined_at, rowid", ch);
+  memberRows(ch: string): { id: string; name: string | null; about: string | null; agent: string | null; present: number; features: string }[] {
+    return this.d.sql.all("SELECT id, name, about, agent, present, features FROM members WHERE ch = ? ORDER BY joined_at, rowid", ch);
   }
 
   peers(ch: string): string[] {
@@ -433,7 +433,7 @@ export class ChannelManager {
       this.emitChannel(ch);
       this.d.channelChanged(ch);
     }
-    return { featureOnly: !!previous && previous.name === name && previous.about === (body.about ?? null) };
+    return { featureOnly: !!previous && previous.agent !== null && previous.name === name && previous.about === (body.about ?? null) };
   }
 
   // ------------------------------------------------------------- relay sync

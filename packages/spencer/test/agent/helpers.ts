@@ -62,6 +62,8 @@ export function channel(id: string, kind: "direct" | "group", name: string, extr
     autoReply: true,
     allowedMcpTools: [],
     trust: "standard",
+    directLink: "auto",
+    allowLocalAddresses: false,
     unread: 0,
     lastSeq: 0,
     createdAt: Date.now(),
