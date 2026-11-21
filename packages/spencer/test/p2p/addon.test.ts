@@ -32,7 +32,7 @@ test('native loopback transfers data and exits after cleanup', async () => {
     const b = new rtc.PeerConnection('b', {iceServers: [], disableAutoNegotiation: true, maxMessageSize: 262144});
     const dc = a.createDataChannel('test'); let remote;
     if (a.remoteFingerprint()?.value || b.remoteFingerprint()?.value) throw Error('early fingerprint');
-    a.onLocalDescription((s,t) => { b.setRemoteDescription(s,t); b.setLocalDescription("answer"); });
+    a.onLocalDescription((s,t) => { b.setRemoteDescription(s,t); if (b.remoteFingerprint()?.value) throw Error("fingerprint before DTLS"); b.setLocalDescription("answer"); });
     b.onLocalDescription((s,t) => a.setRemoteDescription(s,t));
     a.onLocalCandidate((c,m) => b.addRemoteCandidate(c,m));
     b.onLocalCandidate((c,m) => a.addRemoteCandidate(c,m));
@@ -42,4 +42,24 @@ test('native loopback transfers data and exits after cleanup', async () => {
   `;
   const result = spawnSync(process.execPath, ['-e', script], { timeout: 8000, encoding: 'utf8' });
   assert.equal(result.status, 0, `${result.error ?? ''} ${result.stderr}`);
+});
+
+
+test("tampered SDP fingerprint prevents the data channel opening", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const script = `
+    const rtc = require('node-datachannel');
+    const a = new rtc.PeerConnection('a', {iceServers: [], disableAutoNegotiation: true});
+    const b = new rtc.PeerConnection('b', {iceServers: [], disableAutoNegotiation: true});
+    const dc = a.createDataChannel('test');
+    dc.onOpen(() => { process.exitCode = 1; });
+    a.onLocalDescription((s,t) => { b.setRemoteDescription(s.replace(/(a=fingerprint:sha-256 )[^\\r\\n]+/i, '$1' + Array(32).fill('00').join(':')),t); b.setLocalDescription('answer'); });
+    b.onLocalDescription((s,t) => a.setRemoteDescription(s,t));
+    a.onLocalCandidate((c,m) => b.addRemoteCandidate(c,m));
+    b.onLocalCandidate((c,m) => a.addRemoteCandidate(c,m));
+    a.setLocalDescription('offer');
+    setTimeout(() => { dc.close(); a.close(); b.close(); rtc.cleanup(); }, 1000);
+  `;
+  const result = spawnSync(process.execPath, ["-e", script], { timeout: 8000, encoding: "utf8" });
+  assert.equal(result.status, 0, `${result.error ?? ""} ${result.stderr}`);
 });
