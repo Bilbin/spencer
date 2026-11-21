@@ -24,6 +24,7 @@ import {
   peers,
   channelTitle,
   applyPresence,
+  setModel,
   channelStatus,
   relaysDown,
   emit,
@@ -34,6 +35,7 @@ import { ownerView } from "./owner.js";
 import { channelView } from "./channel.js";
 import { transfersView } from "./transfers.js";
 import { mcpView } from "./mcp.js";
+import { modelView } from "./model.js";
 import { inboxView } from "./inbox.js";
 import { inviteModal, joinModal } from "./invites.js";
 import { openSwitcher, shortcutsModal } from "./switcher.js";
@@ -124,6 +126,7 @@ function renderSidebar() {
   const pending = actionCount();
   const attention = attentionCount();
   const mcpBad = S.mcp.some((s) => s.status === "error");
+  const modelBad = S.model && !S.model.ready;
   const ownerSub = S.ownerBusy ? h("span.nav-sub.s-working", null, h("span.act.shimmer", null, "Working on it")) : h("span.nav-sub", null, "Your agent");
 
   // Rebuilding the sidebar would drop keyboard focus; remember what had it.
@@ -172,6 +175,7 @@ function renderSidebar() {
       null,
       navItem({ name: "transfers" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("transfer", 16)), h("span.nav-name", null, "Transfers"), badge(pending, "need action", "attn")], { cls: "foot" }),
       navItem({ name: "mcp" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("plug", 16)), h("span.nav-name", null, "MCP servers"), mcpBad ? h("span.pdot.inline.bad", { role: "img", "aria-label": "a server has an error" }) : null], { cls: "foot" }),
+      navItem({ name: "model" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("spark", 16)), h("span.nav-name", null, "Model"), modelBad ? h("span.pdot.inline.bad", { role: "img", "aria-label": "no model is ready" }) : null], { cls: "foot" }),
       h("button.nav-item.foot", { type: "button", dataset: { key: "keys" }, on: { click: shortcutsModal } }, h("span.nav-glyph", { "aria-hidden": "true" }, icon("keyboard", 16)), h("span.nav-name", null, "Shortcuts"), h("kbd", null, "?")),
     ),
   ]);
@@ -224,6 +228,7 @@ function mount() {
   if (view.name === "channel") current = channelView(main, view.ch);
   else if (view.name === "transfers") current = transfersView(main);
   else if (view.name === "mcp") current = mcpView(main);
+  else if (view.name === "model") current = modelView(main);
   else if (view.name === "inbox") current = inboxView(main);
   else current = ownerView(main);
 }
@@ -236,7 +241,7 @@ function onRoute() {
   syncTitle();
 }
 
-const PAGE_TITLES = { mcp: "MCP servers", transfers: "Transfers", inbox: "Needs you" };
+const PAGE_TITLES = { model: "Model", mcp: "MCP servers", transfers: "Transfers", inbox: "Needs you" };
 
 function syncTitle() {
   const c = S.view.name === "channel" ? S.channels.get(S.view.ch) : null;
@@ -316,6 +321,9 @@ function handleEvent(ev) {
         emit("mcp");
       }
       break;
+    case "model":
+      if (ev.model?.copilot) setModel(ev.model);
+      break;
     default:
       break;
   }
@@ -343,7 +351,7 @@ async function refresh(full) {
 
 // ---------------------------------------------------------------- boot
 
-for (const t of ["channels", "transfers", "relay", "mcp", "working", "busy", "requests"]) on(t, queueSidebar);
+for (const t of ["channels", "transfers", "relay", "mcp", "model", "working", "busy", "requests"]) on(t, queueSidebar);
 for (const t of ["transfers", "requests"]) on(t, syncTitle);
 
 // ---------------------------------------------------------------- keyboard

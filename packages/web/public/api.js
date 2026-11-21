@@ -58,6 +58,12 @@ export const api = {
   mcp: () => request("GET", "/api/mcp"),
   cancelFollowup: (id) => request("POST", `/api/followups/${enc(id)}/cancel`),
   decideRequest: (id, approve) => request("POST", `/api/requests/${enc(id)}/${approve ? "approve" : "deny"}`),
+  model: () => request("GET", "/api/model"),
+  setModel: (provider, modelId) => request("PUT", "/api/model", { provider, modelId }),
+  copilotLogin: () => request("POST", "/api/auth/github-copilot/login"),
+  copilotCancel: () => request("POST", "/api/auth/github-copilot/cancel"),
+  copilotGh: (login) => request("POST", "/api/auth/github-copilot/gh", { login }),
+  copilotLogout: () => request("POST", "/api/auth/github-copilot/logout"),
 };
 
 // ---------------------------------------------------------------- toasts

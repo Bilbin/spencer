@@ -18,7 +18,7 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { join, normalize, extname, basename, sep } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { Channel, ChannelMember, ChannelMessage, Transfer, OwnerItem, OwnerRequest, McpServerStatus, DaemonEvent, Followup } from "../../spencer/src/contracts.ts";
+import type { Channel, ChannelMember, ChannelMessage, Transfer, OwnerItem, OwnerRequest, McpServerStatus, DaemonEvent, Followup, ModelStatus } from "../../spencer/src/contracts.ts";
 
 interface Presence {
   online: boolean;
@@ -28,6 +28,37 @@ type MockMember = ChannelMember;
 type MockEvent = DaemonEvent;
 
 const PORT = Number(process.argv[2] ?? process.env.PORT ?? 7421);
+
+// Model page. MOCK_MODEL=none starts signed out with no model (the first-run state).
+const COPILOT_MODELS = [
+  { id: "claude-sonnet-5.5", name: "Claude Sonnet 5.5" },
+  { id: "claude-opus-5.5", name: "Claude Opus 5.5" },
+  { id: "claude-haiku-5.5", name: "Claude Haiku 5.5" },
+  { id: "gpt-6.1-terra", name: "GPT-6.1 Terra" },
+  { id: "grok-4.7", name: "Grok 4.7" },
+];
+const model: ModelStatus =
+  process.env.MOCK_MODEL === "none"
+    ? {
+        provider: "anthropic",
+        modelId: "claude-sonnet-5-5",
+        ready: false,
+        error: "environment variable ANTHROPIC_API_KEY (model.apiKeyEnv) is not set",
+        copilot: { connected: false, models: [], deviceLogin: true, ghAccounts: [{ login: "alice", active: true }, { login: "alice-work", active: false }] },
+      }
+    : {
+        provider: "github-copilot",
+        modelId: "claude-sonnet-5.5",
+        ready: true,
+        copilot: { connected: true, login: "alice", plan: "individual", via: "device", models: COPILOT_MODELS, deviceLogin: true, ghAccounts: [{ login: "alice", active: true }] },
+      };
+let signInTimer: ReturnType<typeof setTimeout> | undefined;
+function copilotConnected(login: string, via: "device" | "gh-cli") {
+  clearTimeout(signInTimer);
+  const { signIn: _s, ...rest } = model.copilot;
+  model.copilot = { ...rest, connected: true, login, plan: "individual", via, models: COPILOT_MODELS };
+  if (!model.ready) Object.assign(model, { provider: "github-copilot", modelId: "claude-sonnet-5.5", ready: true, error: undefined });
+}
 const TOKEN = process.env.SPENCER_TOKEN ?? randomBytes(16).toString("hex");
 const PUBLIC = fileURLToPath(new URL("../public/", import.meta.url));
 const now = () => Date.now();
@@ -591,6 +622,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       ownerBusy,
       requests: [...requests.values()].reverse(),
       followups: [...followups.values()],
+      model,
     };
   }
   if (a === "owner" && b === "messages" && !c) {
@@ -704,6 +736,40 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     if (b && !c && method === "GET") return getTransfer(b);
   }
   if (a === "mcp" && method === "GET" && !b) return { servers: mcp };
+  if (a === "model" && !b) {
+    if (method === "GET") return model;
+    if (method === "PUT") {
+      const body = await readJson(req);
+      if (body.provider !== "github-copilot" || !COPILOT_MODELS.some((m) => m.id === body.modelId)) throw new HttpError(400, "unknown model");
+      if (!model.copilot.connected) throw new HttpError(409, "Sign in to GitHub Copilot first.");
+      Object.assign(model, { provider: "github-copilot", modelId: body.modelId, ready: true, error: undefined });
+      emit({ type: "model", model });
+      return model;
+    }
+  }
+  if (a === "auth" && b === "github-copilot" && method === "POST") {
+    if (c === "login") {
+      // The mock "approves" after 20 s (or cancel it); a real daemon polls GitHub.
+      model.copilot.signIn = { state: "waiting", userCode: "WDJB-MJHT", verificationUri: "https://github.com/login/device", expiresAt: Date.now() + 15 * MIN };
+      clearTimeout(signInTimer);
+      signInTimer = setTimeout(() => {
+        copilotConnected("alice", "device");
+        emit({ type: "model", model });
+      }, 20_000);
+    } else if (c === "cancel") {
+      clearTimeout(signInTimer);
+      model.copilot.signIn = { state: "cancelled" };
+    } else if (c === "gh") {
+      const body = await readJson(req);
+      if (body.login === "alice-work") throw new HttpError(400, "This GitHub account doesn't have GitHub Copilot.");
+      copilotConnected(String(body.login), "gh-cli");
+    } else if (c === "logout") {
+      model.copilot = { connected: false, models: [], deviceLogin: true, ghAccounts: [{ login: "alice", active: true }, { login: "alice-work", active: false }] };
+      Object.assign(model, { ready: false, error: "GitHub Copilot is not connected yet: sign in on the Model page" });
+    } else throw new HttpError(404, "not found");
+    emit({ type: "model", model });
+    return model;
+  }
   if (a === "followups") {
     if (!b && method === "GET") return { items: [...followups.values()] };
     if (b && c === "cancel" && method === "POST") {

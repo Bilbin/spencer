@@ -2,6 +2,7 @@
 import { h, icon, linkify, timeShort, timeFull, selfAvatar } from "./dom.js";
 import { api, attempt } from "./api.js";
 import { S, on, setOwner } from "./state.js";
+import { hashFor } from "./router.js";
 import { viewHeader, composer, SEND_HINT, stage, skeleton, trace, mark, activityNode, followupList } from "./common.js";
 import { markdown } from "./md.js";
 import { scrollKeeper } from "./scroll.js";
@@ -153,7 +154,19 @@ export function ownerView(main) {
   const sub = h("span.subtitle");
   // Reminders Spencer set on itself, docked above the composer so "I'll check back" stays visible.
   const later = h("div.owner-later");
-  const renderLater = () => later.replaceChildren(...[followupList("owner", { compact: true, title: "Spencer will check back" })].filter(Boolean));
+  // No model yet (first run, or the sign-in was revoked): say so where the owner is about to type.
+  const setup = () =>
+    S.model && !S.model.ready
+      ? h(
+          "div.model-nudge",
+          { role: "status" },
+          icon("spark", 16),
+          h("span.model-nudge-text", null, h("strong", null, "Spencer has no model yet. "), "Sign in with GitHub Copilot to give it one."),
+          h("a.btn.sm.primary", { href: hashFor({ name: "model" }) }, "Connect a model"),
+        )
+      : null;
+  const renderLater = () =>
+    later.replaceChildren(...[setup(), followupList("owner", { compact: true, title: "Spencer will check back" })].filter(Boolean));
   main.append(viewHeader([headMark, h("div.title-stack", null, h("h1", null, "Spencer"), sub)]), st.el, later, comp.form);
   renderLater();
 
@@ -238,6 +251,6 @@ export function ownerView(main) {
     comp.input.focus();
   });
 
-  const offs = [on("owner", () => (render(), renderBusy())), on("busy", () => (render(), renderBusy())), on("followups", renderLater)];
+  const offs = [on("owner", () => (render(), renderBusy())), on("busy", () => (render(), renderBusy())), on("followups", renderLater), on("model", renderLater)];
   return { destroy: () => offs.forEach((f) => f()) };
 }

@@ -1,4 +1,4 @@
-// Hash routing: #/ (owner chat), #/inbox, #/c/<channel id>, #/transfers, #/mcp.
+// Hash routing: #/ (owner chat), #/inbox, #/c/<channel id>, #/transfers, #/mcp, #/model.
 
 export function parseHash(hash = location.hash) {
   const parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
@@ -6,6 +6,7 @@ export function parseHash(hash = location.hash) {
   if (parts[0] === "inbox") return { name: "inbox" };
   if (parts[0] === "transfers") return { name: "transfers" };
   if (parts[0] === "mcp") return { name: "mcp" };
+  if (parts[0] === "model") return { name: "model" };
   return { name: "owner" };
 }
 
@@ -19,6 +20,8 @@ export function hashFor(view) {
       return "#/transfers";
     case "mcp":
       return "#/mcp";
+    case "model":
+      return "#/model";
     default:
       return "#/";
   }

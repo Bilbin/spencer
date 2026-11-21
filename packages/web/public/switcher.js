@@ -23,6 +23,7 @@ function destinations() {
     }),
     { label: "Transfers", sub: "files sent and received", view: { name: "transfers" }, mark: () => h("span.switch-icon", null, icon("transfer", 16)) },
     { label: "MCP servers", sub: "tools your Spencer can call", view: { name: "mcp" }, mark: () => h("span.switch-icon", null, icon("plug", 16)) },
+    { label: "Model", sub: "what your Spencer thinks with, GitHub Copilot sign-in", view: { name: "model" }, mark: () => h("span.switch-icon", null, icon("spark", 16)) },
   ];
 }
 

@@ -10,6 +10,7 @@ export const S = {
   channels: new Map(), // id -> Channel
   transfers: new Map(), // tid -> Transfer
   mcp: [], // McpServerStatus[]
+  model: null, // ModelStatus: the model Spencer thinks with and the Copilot sign-in
   requests: new Map(), // id -> OwnerRequest (ask_owner approvals and "continue?" cards)
   followups: new Map(), // id -> Followup (reminders the agents scheduled on themselves)
   working: new Map(), // ch -> Map(memberId -> {replyTo, activity, steps, since, ts}): a Spencer is working on a reply
@@ -19,7 +20,7 @@ export const S = {
   ownerBusySince: 0,
   wsUp: false,
   loaded: false,
-  view: { name: "owner" }, // {name:"owner"} | {name:"channel", ch} | {name:"transfers"} | {name:"mcp"}
+  view: { name: "owner" }, // {name:"owner"} | {name:"channel", ch} | {name:"transfers"} | {name:"mcp"} | {name:"model"}
   /** Server unread count already "seen" per channel (persisted), and locally counted unread. */
   ack: loadAck(),
   local: {},
@@ -98,6 +99,7 @@ export function setState(st) {
   S.channels = new Map((st.channels ?? []).map((c) => [c.id, c]));
   S.transfers = new Map((st.transfers ?? []).map((t) => [t.tid, t]));
   S.mcp = st.mcp ?? [];
+  if (st.model) S.model = st.model;
   S.requests = new Map((st.requests ?? []).map((r) => [r.id, r]));
   S.followups = new Map((st.followups ?? []).map((f) => [f.id, f]));
   for (const ch of Object.keys(S.ack)) {
@@ -113,9 +115,15 @@ export function setState(st) {
   emit("transfers");
   emit("relay");
   emit("mcp");
+  emit("model");
   emit("owner");
   emit("requests");
   emit("followups");
+}
+
+export function setModel(m) {
+  S.model = m;
+  emit("model");
 }
 
 export function setOwnerBusy(busy) {
