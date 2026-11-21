@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateIdentity } from '../../../protocol/src/identity.ts';
@@ -17,3 +17,26 @@ test('loopback links authenticate and open file channels', async () => {
 });
 
 test('crash marker disables the channel', () => { const dir = mkdtempSync(join(tmpdir(), 'links-')); const ch = randomId(); writeFileSync(join(dir, 'p2p-attempt'), JSON.stringify({ ch, ts: 1 })); let notes = 0; const m = new LinkManager({ dataDir: dir, me: generateIdentity(), sendSignal() {}, pairKey: () => new Uint8Array(32), authorize: () => ({ ok: true, allowLocalAddresses: false, stunServers: [] }), onFileChannel() {}, ownerNote: () => { notes++; }, log() {}, tuning: { cleanupOnStop: false } }); try { m.start(); assert.equal(m.isCrashDisabled(ch), true); assert.equal(notes, 1); } finally { m.stop(); rmSync(dir, { recursive: true, force: true }); } });
+
+test('crash disable survives restart and expires after 24 hours', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'links-'));
+  const ch = randomId();
+  let now = 1_000;
+  let notes = 0;
+  writeFileSync(join(dir, 'p2p-attempt'), JSON.stringify({ ch, ts: now }));
+  const make = () => new LinkManager({ dataDir: dir, me: generateIdentity(), sendSignal() {}, pairKey: () => new Uint8Array(32), authorize: () => ({ ok: true, allowLocalAddresses: false, stunServers: [] }), onFileChannel() {}, ownerNote: () => { notes++; }, log() {}, now: () => now, tuning: { cleanupOnStop: false } });
+  const first = make();
+  const second = make();
+  try {
+    first.start();
+    assert.equal(JSON.parse(readFileSync(join(dir, 'p2p-disabled.json'), 'utf8'))[ch], now + 86_400_000);
+    first.stop();
+    second.start();
+    assert.equal(second.isCrashDisabled(ch), true);
+    assert.equal(notes, 1);
+    now += 86_400_000;
+    assert.equal(second.isCrashDisabled(ch), false);
+  } finally {
+    first.stop(); second.stop(); rmSync(dir, { recursive: true, force: true });
+  }
+});
