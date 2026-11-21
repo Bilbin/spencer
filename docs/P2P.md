@@ -1,27 +1,34 @@
-# Direct links between Spencers (design v2, reviewed)
+# Direct links between Spencers (design v3, updated for groups & pluggable hubs)
 
-Status: proposal, 2026-11-20. Nothing here is implemented yet. v1 was reviewed by Fable (verdict: go with
-changes); v2 takes all of its required changes. §15 lists what changed and why.
+Status: approved for implementation, 2026-11-21. v1 was reviewed by Fable (verdict: go with
+changes); v2 took all of its required changes (§15). v3 adds pairwise P2P files inside group
+channels, first-class pluggable chat hubs (`--relay` / per-invite hub URL, chat-only hubs
+without croc), and locks in the §13 defaults.
 
 "Peer to peer" here means **two Spencers moving data over a direct, encrypted network connection** instead of
-through the VPS. The relay stays the mailbox, the presence service, the invite service and the signaling channel.
-A direct link is an extra path, opened **when there is a file to move** and closed when idle. Everything falls back
-to today's paths.
+through the VPS. The relay ("hub") stays the mailbox, the presence service, the invite service and the signaling channel —
+and any channel can point at any self-hosted hub. A direct link is an extra path, opened **when there is a file to move**
+and closed when idle. Everything falls back to croc when the hub provides one.
 
 ## TL;DR
 
-- **Files first.** File bytes are what the VPS actually carries (every croc transfer goes through it). Chat latency
-  over the relay is fine. So phase 1 moves files over direct links, and the outbox and inbox (the durable, exactly-once
+- **Hub for chat, P2P for files.** Chat messages stay on the hub (a small ~220 KiB ciphertext-only relay that handles
+  ordering, fan-out for groups, presence and offline delivery). Any Spencer can pass a custom hub via `--relay` or when
+  creating an invite, and hubs no longer need a `croc-relay` to move files between online peers.
+- **Files first — in both direct and group channels.** File bytes are what the VPS actually carries. Phase 1 moves
+  1-to-1 file transfers over direct links in both direct and group channels (signaling is already pairwise-sealed with
+  `K_pair`, so other group members never see the SDP or IP addresses). The outbox and inbox (the durable, exactly-once
   message paths) **do not change**.
-- **On-demand links.** A link is dialed when a transfer above a size threshold is about to send, and closed after
-  60 s idle. No always-on links: less code, and the peer learns your IP only when you exchange a file.
+- **On-demand links.** A link is dialed when a transfer above `minFileBytes` (default 4 MiB) — or any size when the hub
+  has no croc relay — is about to send, and closed after 60 s idle. No always-on links: less code, and the peer learns
+  your IP only when you exchange a file.
 - **WebRTC data channels via `node-datachannel`** (libdatachannel: ICE + DTLS + SCTP, prebuilt per platform, only
   glibc needed). Measured: 300 MiB/s on loopback, laptop→VPS connected in 1.9 s over the internet.
 - **Signaling over the relay**, sealed per pair and ephemeral. The SDP, including the DTLS fingerprint, is signed by
   the Spencer identity, so the DTLS session is authenticated end to end. **STUN on the relay; no TURN**: if hole
-  punching fails, the transfer uses croc exactly as today.
+  punching fails, the transfer falls back to croc when configured.
 - **Phase 0 comes first** (§14): a packaging and network spike (cross-target `.node` in the SEA binary, Nix, macOS signing, two
-  real NATs) before phase 1 is scheduled.
+  real NATs) before phase 1 is wired up.
 
 ## 1. What happens today
 
@@ -43,10 +50,10 @@ Goals:
 4. The peer learns your IP only when that buys something (a file transfer), and you can turn it off.
 5. It ships in the single binary and the Nix package, and a broken native addon only disables links.
 
-Non-goals: chat over links (deferred, §11), groups, TURN, a DHT or discovery without the relay, UPnP/NAT-PMP,
-own-device links, media. **No Tailscale.** Honest limit: links cannot be set up without the relay, and the relay
-can always drop signaling and force the fallback. Links remove bandwidth and per-byte visibility from the VPS; they do
-not remove the VPS from the trust picture for metadata.
+Non-goals: chat over links (deferred, §11), 1-to-many group file swarming (pairwise transfers in groups ARE supported),
+TURN, a DHT or discovery without the relay, UPnP/NAT-PMP, own-device links, media. **No Tailscale.** Honest limit: links
+cannot be set up without the relay, and the relay can always drop signaling and force the fallback. Links remove bandwidth
+and per-byte visibility from the VPS; they do not remove the VPS from the trust picture for metadata.
 
 ## 3. What was measured (spike, 2026-11-20)
 
@@ -80,14 +87,18 @@ packaging items in §10.
 ## 5. When a link is dialed
 
 Only for files, only when all of these hold:
-- a transfer in a **direct** channel (2 members) reaches the point where the sender would spawn croc
-  (`file_accept` received, or a retry), and its size is ≥ `p2p.minFileBytes` (default 4 MiB);
-- `p2p.mode` is `"files"` on **both** sides (each side advertises it, §8) and the channel's `directLink` is not `off`;
+- a transfer in a **direct or group** channel reaches the point where the sender would spawn croc
+  (`file_accept` received, or a retry), and either its size is ≥ `p2p.minFileBytes` (default 4 MiB) **or** the
+  channel's hub provides no croc relay (chat-only hub);
+- `p2p.mode` is `"files"` on **both** sides (each side advertises `p2p-files/1`, §8) and the channel's `directLink` is not `"off"`;
 - the addon loaded, the crash breaker (§9.3) is not tripped for this channel, and the relay has `ephemeral`.
+
+Links are keyed by `(ch, peerId)` so multiple members in a group channel can have independent pairwise links without
+interfering with each other or exposing SDPs/IPs to other group members (`K_pair(A,B,ch)`).
 
 The **sender dials**; the receiver answers. Roles follow the transfer, so there is no glare rule. If a link to that
 peer is already up (another transfer), it is reused. Dial timeout: 10 s from offer to verified link; then this
-attempt uses croc.
+attempt falls back to croc (if configured).
 
 A link closes after 60 s with no open file channel, on `bye`, when the peer connection goes `failed`/`closed`, on a
 detected suspend/resume, on leaving the channel, and on daemon stop. Losing **our** relay connection does not close
@@ -128,10 +139,11 @@ New bodies, sent **ephemeral** (§4.7), never through the outbox, and **only to 
    `remoteFp` is `remoteFingerprint()`. This is kept **only if phase 0 proves that `remoteFingerprint()` reports the
    certificate seen in the live DTLS handshake**. If it merely echoes the SDP, it adds nothing and is cut.
 3. **Outgoing candidates** (ours, in our SDP): drop host candidates for private IPv4, link-local, ULA **and global
-   IPv6 host addresses** when `p2p.hideLocalAddresses` (default true); zero `raddr`/`rport` on srflx lines.
+   IPv6 host addresses** when local addresses are hidden (`p2p.hideLocalAddresses` is true and the channel's
+   `allowLocalAddresses` is false); zero `raddr`/`rport` on srflx lines.
 4. **Incoming candidates** (the peer's, attacker-controlled): at most 8; drop loopback, unspecified, link-local,
-   multicast and broadcast. Private ranges are allowed only when `hideLocalAddresses` is false on our side (same-LAN
-   mode).
+   multicast and broadcast. Private ranges are allowed only when local addresses are allowed on our side (same-LAN
+   mode: `!p2p.hideLocalAddresses || channel.allowLocalAddresses`).
 5. `p2p.portRange` is not offered (cut, see §14).
 
 ## 8. Protocol changes (all backward compatible)
@@ -219,32 +231,30 @@ first:
 - **Wiring**: a pump kick on link up and down, a path for when the relay is down but the link is up, and
   `rerouteUnrouted` ordering for NULL seq (it sorts them first today).
 
-## 12. Config, API and UI
+## 12. Config, API, Hub Passing and UI
 
 ```jsonc
 "p2p": {
-  "mode": "files",               // "files" | "off"   (default: see §13.1)
+  "mode": "files",               // "files" | "off"   (default: "files")
   "hideLocalAddresses": true,
   "minFileBytes": 4194304,
   "stun": []                     // extra "host:port"; the relay's comes first
 }
 ```
 
-- `PATCH /api/channels/:ch`: `directLink: "auto" | "off"`. `Transfer` gains `via?: "link" | "croc"`. The event
-  `transfer` covers it; no new link API.
-- UI: a transfer row shows "Direct" or "Through the server". Channel settings get the toggle and the sentence: "Send
-  files directly when you're both online. Faster, and the bytes don't go through the server, but Bob's Spencer
-  sees your IP address while a file is moving." The Model-page style "not available" note appears if the addon
-  could not load.
+- **Pluggable hub ergonomics:**
+  - CLI: `--relay URL` (and `SPENCER_RELAY` env var) sets the default hub URL (saved to `config.json` on first run, like `--name`). Accepts `ws://`, `wss://`, `http://`, or `https://` (normalized to `ws(s)://host/ws`).
+  - `POST /api/invites`: accepts optional `relay?: string` so any direct or group channel can be created on any hub. Exposed in the `+ Invite` modal and the agent `create_invite` tool.
+  - Chat-only hubs (no `croc` relay configured): P2P file transfers are attempted for all file sizes (ignoring `minFileBytes`). If a direct link cannot be established and no croc relay is available, the transfer retries/fails with a clear error rather than assuming croc exists.
+- `PATCH /api/channels/:ch`: `directLink?: "auto" | "off"`, `allowLocalAddresses?: boolean`.
+- `Transfer` gains `via?: "link" | "croc"`. `/api/state` includes `p2p: { mode, available, error? }`. The event `transfer` covers `via`; no new link API.
+- UI: a transfer row shows "Direct" or "Through the server". Channel settings show the channel's hub URL, the "Direct file transfers" toggle ("Send files directly when you're both online. Faster, and the bytes don't go through the server, but peers see your IP address while a file is moving."), and an "Allow local network addresses" per-channel toggle for fast same-LAN transfers. A "not available" note appears if the addon could not load.
 
-## 13. Open questions
+## 13. Decisions (locked in)
 
-1. **IP exposure default** (owner decision): `p2p.mode: "files"` on by default, since exposure only happens during
-   transfers, or `"off"` until the owner turns it on? Recommendation: on, with the sentence above in channel settings
-   and the first-transfer toast "Sent directly".
-2. **Same-LAN transfers**: `hideLocalAddresses: true` loses the best case (two machines at home) wherever the router
-   does not hairpin. Offer "allow local network addresses" per channel?
-3. Is 4 MiB the right threshold? Smaller files are not worth a 2 s dial.
+1. **IP exposure default**: `p2p.mode: "files"` is **on by default**, since exposure only happens during transfers, with the channel-settings notice and a first-transfer "Sent directly" toast.
+2. **Same-LAN transfers**: `hideLocalAddresses: true` globally, with a per-channel `allowLocalAddresses` toggle (default `false`) for fast transfers on a shared LAN.
+3. **Size threshold**: `minFileBytes` defaults to 4 MiB when a croc relay is available, and 0 (always try P2P) on chat-only hubs without a croc relay.
 
 ## 14. Plan
 
