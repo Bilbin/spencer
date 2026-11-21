@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 /**
  * Support for running as a single-file binary (Node "single executable application", built by
  * scripts/build-binary.mjs). The binary embeds the web UI and the pinned croc as SEA assets plus a
@@ -22,11 +23,13 @@ export interface SeaManifest {
   build: string;
   files: string[]; // asset keys under "web/"
   croc?: string; // asset key of the croc executable, if embedded
+  addons?: Record<string, string>;
 }
 
 export interface Embedded {
   version: string;
   webRoot: string;
+  addons: Record<string, string>;
   croc?: string;
 }
 
@@ -84,6 +87,20 @@ export function embedded(): Embedded | undefined {
       writeFileSync(join(tmp, exe), Buffer.from(api.getAsset(manifest.croc)), { mode: 0o755 });
       chmodSync(join(tmp, exe), 0o755);
     }
+    for (const key of Object.values(manifest.addons ?? {})) {
+      const target = normalize(join(tmp, key));
+      if (!key.startsWith("addons/") || !target.startsWith(tmp + sep)) throw new Error(`binary manifest has a bad path: ${key}`);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, Buffer.from(api.getAsset(key)), { mode: 0o755 });
+      chmodSync(target, 0o755);
+      if (process.platform === "darwin") {
+        try {
+          execFileSync("codesign", ["--verify", target], { stdio: "ignore" });
+        } catch {
+          try { execFileSync("codesign", ["--force", "--sign", "-", target], { stdio: "ignore" }); } catch { /* best effort */ }
+        }
+      }
+    }
     writeFileSync(join(tmp, ".complete"), manifest.version + "\n");
     try {
       renameSync(tmp, dir);
@@ -93,6 +110,6 @@ export function embedded(): Embedded | undefined {
       if (!existsSync(done)) throw e;
     }
   }
-  cached = { version: manifest.version, webRoot: join(dir, "web"), ...(manifest.croc ? { croc: join(dir, exe) } : {}) };
+  cached = { version: manifest.version, webRoot: join(dir, "web"), addons: Object.fromEntries(Object.entries(manifest.addons ?? {}).map(([name, key]) => [name, join(dir, key)])), ...(manifest.croc ? { croc: join(dir, exe) } : {}) };
   return cached;
 }
