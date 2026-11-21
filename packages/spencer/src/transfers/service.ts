@@ -42,7 +42,7 @@ export class TransferError extends Error {
 const NON_TERMINAL = new Set(["awaiting_approval", "offered", "accepted", "sending", "receiving"]);
 
 interface Running {
-  job: CrocJob;
+  job: { kill(): void; done: Promise<unknown> };
   attempt: number;
   role: "send" | "receive";
   watchdog?: ReturnType<typeof setInterval>;
@@ -94,6 +94,10 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
   const dirs = dirsFor(deps.dataDir);
 
   const jobs = new Map<string, Running>();
+  const linkTried = new Map<string, number>();
+  const linkSendOk = new Map<string, boolean>();
+  const linkZeroRetryUsed = new Set<string>();
+  const resumedRetryUsed = new Set<string>();
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const progress = new Map<string, number>();
   const lastProgressEmit = new Map<string, number>();
@@ -130,6 +134,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
     } catch {
       /* channel gone */
     }
+    if (r.via === "link" || r.via === "croc") t.via = r.via;
     if (peerName) t.peerName = peerName;
     if (r.reason) t.reason = r.reason;
     if (r.error) t.error = r.error;
@@ -203,6 +208,10 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
   /** Kills croc, clears timers, and deletes staged/partial files. Never touches quarantine. */
   function cleanupRuntime(r: TransferRow): void {
     killJob(r.tid);
+    linkTried.delete(r.tid);
+    linkSendOk.delete(r.tid);
+    linkZeroRetryUsed.delete(r.tid);
+    resumedRetryUsed.delete(r.tid);
     clearTimer(r.tid);
     lastProgressEmit.delete(r.tid);
     progress.delete(r.tid);
@@ -293,13 +302,36 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
       return;
     }
     const info = deps.crocInfo(r.ch);
+    const hasCroc = !!info;
+    const zeroRetry = linkSendOk.get(tid) === true && !linkZeroRetryUsed.has(tid);
+    if (deps.p2p?.canTryLink(r.ch, r.peer, r.size, hasCroc) && (!hasCroc || !linkTried.get(tid) || zeroRetry)) {
+      const attempt = r.attempt;
+      if (zeroRetry) linkZeroRetryUsed.add(tid);
+      linkSendOk.delete(tid);
+      linkTried.set(tid, (linkTried.get(tid) ?? 0) + 1);
+      transition(tid, (x) => x.state === "sending" && x.attempt === attempt, { via: "link", error: null, nextAttemptAt: null });
+      const job = deps.p2p.sendOverLink({ tid, ch: r.ch, peerId: r.peer, attempt, filePath: r.path, size: r.size,
+        onReady: () => { if (jobs.get(tid)?.job === job) transition(tid, (x) => x.state === "sending" && x.attempt === attempt, {}, (x) => [body("file_ready", x, { attempt, via: "link" })]); },
+        onProgress: (p) => { if (jobs.get(tid)?.job === job) setProgress(tid, p); },
+      });
+      jobs.set(tid, { job, attempt, role: "send" });
+      void track(job.done.then((res) => {
+        if (jobs.get(tid)?.job !== job) return;
+        jobs.delete(tid);
+        if (res.killed || stopped) return;
+        linkSendOk.set(tid, res.ok);
+        if (res.ok) setProgress(tid, 1);
+        else retrySend(tid, attempt, res.error ?? "direct link failed");
+      }));
+      return;
+    }
     if (!info) {
       transition(tid, (x) => x.state === "sending" && x.attempt === r.attempt && x.error !== NO_RELAY, { error: NO_RELAY });
       schedule(tid, noRelayRetryMs, () => startSend(tid));
       return;
     }
     const attempt = r.attempt;
-    if (r.error || r.nextAttemptAt) transition(tid, (x) => x.state === "sending" && x.attempt === attempt, { error: null, nextAttemptAt: null });
+    transition(tid, (x) => x.state === "sending" && x.attempt === attempt, { via: "croc", error: null, nextAttemptAt: null });
     const job = runner.send({
       file: r.path,
       code: r.code,
@@ -352,11 +384,11 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
 
   // ------------------------------------------------------------ recipient side
 
-  function startReceive(tid: string, attempt: number): void {
+  function startReceive(tid: string, attempt: number, via?: "link"): void {
     const n = transition(
       tid,
       (x) => x.direction === "in" && (x.state === "accepted" || x.state === "receiving") && attempt > x.attempt,
-      { state: "receiving", attempt, error: null },
+      { state: "receiving", attempt, via: via === "link" ? "link" : "croc", error: null },
     );
     if (!n) return;
     killJob(tid);
@@ -371,6 +403,32 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
     if (!r || r.direction !== "in" || r.state !== "receiving" || !r.code) return;
     killJob(tid);
     const attempt = r.attempt;
+    const dir = inDir(tid);
+    ensureDir(dirs.incoming);
+    ensureDir(dir);
+    if (r.via === "link") {
+      if (!deps.p2p) {
+        transition(tid, (x) => x.state === "receiving" && x.attempt === attempt, { error: "direct links not supported" }, (x) => [body("file_retry", x, { attempt })]);
+        return;
+      }
+      const job = deps.p2p.receiveOverLink({ tid, ch: r.ch, peerId: r.peer, attempt, partPath: join(dir, `${r.name}.part`), finalPath: join(dir, r.name), size: r.size,
+        onProgress: (p) => { if (jobs.get(tid)?.job === job) setProgress(tid, p); },
+      });
+      jobs.set(tid, { job, attempt, role: "receive" });
+      void track(job.done.then(async (res) => {
+        if (jobs.get(tid)?.job !== job) return;
+        jobs.delete(tid);
+        if (res.killed || stopped) return;
+        const guard = (x: TransferRow) => x.state === "receiving" && x.attempt === attempt;
+        if (res.ok) await verifyReceived(tid, attempt, false, (res.resumedFrom ?? 0) > 0);
+        else if (res.error?.includes("exceeds") || res.error?.includes("more data than offered") || (res as { oversize?: boolean }).oversize) {
+          rmrf(dir);
+          transition(tid, guard, { state: "failed", error: res.error ?? "size exceeds offer" }, (x) => [body("file_ack", x, { ok: false, reason: "size exceeds offer" })]);
+        } else transition(tid, guard, { error: clip(res.error ?? "direct link failed") ?? null }, (x) => [body("file_retry", x, { attempt })]);
+      }));
+      return;
+    }
+    for (const name of readdirSync(dir)) if (name.endsWith(".part")) rmrf(join(dir, name));
     const info = deps.crocInfo(r.ch);
     if (!info) {
       transition(tid, (x) => x.state === "receiving" && x.attempt === attempt && x.error !== NO_RELAY, { error: NO_RELAY });
@@ -381,9 +439,6 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
       return;
     }
     if (r.error) transition(tid, (x) => x.state === "receiving" && x.attempt === attempt, { error: null });
-    const dir = inDir(tid);
-    ensureDir(dirs.incoming);
-    ensureDir(dir);
     const job = runner.receive({
       outDir: dir,
       code: r.code,
@@ -434,12 +489,20 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
    * partial write from before the crash): the caller asks for a retry instead. Returns true if it settled
    * the transfer (completed or failed).
    */
-  async function verifyReceived(tid: string, attempt: number, recovery: boolean): Promise<boolean> {
+  async function verifyReceived(tid: string, attempt: number, recovery: boolean, resumed = false): Promise<boolean> {
     const guard = (x: TransferRow) => x.direction === "in" && x.state === "receiving" && x.attempt === attempt;
     const r = store.get(tid);
     if (!r || !guard(r)) return true;
     const dir = inDir(tid);
+    if (recovery && existsSync(dir) && readdirSync(dir).some((name) => name.endsWith(".part"))) return false;
     const found = findReceived(dir);
+    const retryFromZero = () => {
+      if (recovery || !resumed || resumedRetryUsed.has(tid)) return false;
+      resumedRetryUsed.add(tid);
+      rmrf(dir);
+      transition(tid, guard, { error: "checksum mismatch after resume; retrying from start" }, (x) => [body("file_retry", x, { attempt })]);
+      return true;
+    };
     const fail = (reason: string, error: string) => {
       rmrf(dir);
       transition(tid, guard, { state: "failed", error }, (x) => [body("file_ack", x, { ok: false, reason })]);
@@ -455,11 +518,11 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
       rmrf(dir);
       return false;
     }
-    if (found.size !== r.size) return recovery ? false : fail("size mismatch", `size mismatch: got ${found.size}, expected ${r.size}`);
+    if (found.size !== r.size) return recovery ? false : retryFromZero() || fail("size mismatch", `size mismatch: got ${found.size}, expected ${r.size}`);
     const hash = await sha256File(found.path);
     const cur = store.get(tid);
     if (!cur || !guard(cur)) return true; // cancelled/expired/newer attempt while hashing
-    if (hash !== r.sha256) return recovery ? false : fail("sha256 mismatch", "sha256 mismatch");
+    if (hash !== r.sha256) return recovery ? false : retryFromZero() || fail("sha256 mismatch", "sha256 mismatch");
     // Synchronous from here on: nothing can interleave between the move and the state change.
     const qdir = join(dirs.quarantine, tid);
     ensureDir(dirs.quarantine);
@@ -502,6 +565,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
       state: "offered",
       attempt: 0,
       code: null,
+      via: null,
       initiatedBy: "peer",
       reason: null,
       error: null,
@@ -703,6 +767,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
         state: needsApproval ? "awaiting_approval" : "offered",
         attempt: 0,
         code: null,
+        via: null,
         initiatedBy: req.initiatedBy,
         reason: clip(req.reason, 1000) ?? null,
         error: null,
@@ -791,7 +856,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
           return;
         case "file_ready":
           if (r.direction !== "in") return;
-          startReceive(r.tid, b.attempt);
+          startReceive(r.tid, b.attempt, b.via);
           return;
         case "file_retry":
           if (r.direction !== "out") return;

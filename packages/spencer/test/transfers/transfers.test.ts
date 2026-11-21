@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { TransferStore } from "../../src/transfers/store.ts";
 import { generateIdentity, randomId } from "@spencer/protocol";
 import type { FileBody } from "@spencer/protocol";
 import { fakeCrocRunner, TransferError } from "../../src/transfers/index.ts";
@@ -471,4 +473,19 @@ describe("transfers (fake croc)", () => {
     assert.deepEqual(states(B), ["accepted", "receiving", "completed"]);
     assert.equal(B.events.at(-1)!.peerName, "alice");
   });
+});
+
+
+it("migrates existing transfer tables without losing rows", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec(`CREATE TABLE transfers (tid TEXT PRIMARY KEY, ch TEXT NOT NULL, direction TEXT NOT NULL, peer TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL, state TEXT NOT NULL, attempt INTEGER NOT NULL, code TEXT, initiated_by TEXT NOT NULL, reason TEXT, error TEXT, path TEXT, peer_knows INTEGER NOT NULL, next_attempt_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+      INSERT INTO transfers VALUES ('id','channel','out','peer','file',1,'hash','offered',0,NULL,'owner',NULL,NULL,NULL,1,NULL,1,1,2)`);
+    const store = new TransferStore(db);
+    assert.equal(store.get("id")?.via, null);
+    store.update("id", { via: "link" });
+    assert.equal(store.get("id")?.via, "link");
+    assert.equal(store.get("id")?.name, "file");
+    new TransferStore(db);
+  } finally { db.close(); }
 });
