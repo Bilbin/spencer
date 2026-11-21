@@ -1,3 +1,4 @@
+import { getP2pAddonStatus } from "./p2p/addon.ts";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -96,6 +97,7 @@ export function loadMergedConfig(dataDir: string, override: Partial<SpencerConfi
     http: { ...(raw.http ?? {}), ...(override.http ?? {}) },
     croc: { ...(raw.croc ?? {}), ...(override.croc ?? {}) },
     policy: { ...(raw.policy ?? {}), ...(override.policy ?? {}) },
+    p2p: { ...(raw.p2p ?? {}), ...(override.p2p ?? {}) },
   } as Partial<SpencerConfig> & Record<string, unknown>;
   return resolveConfig(merged);
 }
@@ -183,8 +185,8 @@ export class Daemon {
 
   // ------------------------------------------------------------- convenience (tests, CLI)
 
-  createInvite(kind: "direct" | "group", name: string): Promise<{ link: string; channel: Channel }> {
-    return this.channels.createInvite(kind, name);
+  createInvite(kind: "direct" | "group", name: string, relay?: string): Promise<{ link: string; channel: Channel }> {
+    return this.channels.createInvite(kind, name, relay);
   }
   acceptInvite(link: string): Promise<Channel> {
     return this.channels.acceptInvite(link);
@@ -265,7 +267,7 @@ export class Daemon {
       connection: (url) => this.s.pool?.peek(url),
       messageChanged: (id) => {
         const m = channels.message(id);
-        if (m) this.events.emit({ type: "message", ch: m.ch, message: m });
+        if (m && m.origin !== "feature-hello") this.events.emit({ type: "message", ch: m.ch, message: m });
       },
       ...(tuning.outboxMinBackoffMs !== undefined ? { minBackoffMs: tuning.outboxMinBackoffMs } : {}),
       ...(tuning.outboxMaxBackoffMs !== undefined ? { maxBackoffMs: tuning.outboxMaxBackoffMs } : {}),
@@ -279,7 +281,7 @@ export class Daemon {
       routed: (msg, body) => {
         if (body.type === "chat" || body.type === "hello") {
           const m = channels.message(msg.id);
-          if (m) this.events.emit({ type: "message", ch: msg.ch, message: m });
+          if (m && m.origin !== "feature-hello") this.events.emit({ type: "message", ch: msg.ch, message: m });
           if (body.type === "chat") channels.emitChannel(msg.ch); // unread changed
         }
       },
@@ -355,6 +357,7 @@ export class Daemon {
   // ------------------------------------------------------------- relay events
 
   private onRelayReady(conn: RelayConnection): void {
+    this.need("channels").setStun(conn.url, conn.stun);
     const channels = this.need("channels");
     channels.setCroc(conn.url, conn.croc);
     channels.relayChanged(conn.url, true);
@@ -428,7 +431,7 @@ export class Daemon {
     const channels = this.need("channels");
     switch (body.type) {
       case "hello":
-        channels.onHello(msg.ch, msg.from_id, body);
+        if (channels.onHello(msg.ch, msg.from_id, body).featureOnly) this.need("sql").run("UPDATE messages SET origin = ? WHERE id = ?", "feature-hello", msg.id);
         return;
       case "chat":
         await this.routeChat(msg, body);
@@ -559,7 +562,7 @@ export class Daemon {
         }
       },
       listTransfers: (ch) => this.need("transfers").list(ch),
-      createInvite: (kind, name) => channels.createInvite(kind, name),
+      createInvite: (kind, name, relay) => channels.createInvite(kind, name, relay),
       events: this.events,
     };
   }
@@ -626,6 +629,7 @@ export class Daemon {
     const agent = this.s.agent;
     return {
       me: this.identity,
+      p2p: { mode: cfg.p2p.mode, ...getP2pAddonStatus() },
       relay: { url: cfg.relay, connected: relays.length > 0 && relays.every((r) => r.connected) },
       relays,
       channels: channels.list(),

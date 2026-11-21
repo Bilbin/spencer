@@ -70,6 +70,10 @@ const MIGRATIONS: string[] = [
   `,
   // 2: per-channel trust level
   `ALTER TABLE channels ADD COLUMN trust TEXT NOT NULL DEFAULT 'standard'`,
+  `ALTER TABLE members ADD COLUMN features TEXT NOT NULL DEFAULT '[]';
+   ALTER TABLE channels ADD COLUMN last_hello_features TEXT NOT NULL DEFAULT '[]';
+   ALTER TABLE channels ADD COLUMN direct_link TEXT NOT NULL DEFAULT 'auto';
+   ALTER TABLE channels ADD COLUMN allow_local_addresses INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

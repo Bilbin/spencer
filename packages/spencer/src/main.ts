@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { normalizeRelayUrl } from "@spencer/protocol";
 import { parseArgs } from "node:util";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -10,12 +11,13 @@ import { isBinary } from "./sea.ts";
 import { serviceCommand } from "./service.ts";
 
 const SELF = isBinary() ? "spencer" : "node packages/spencer/src/main.ts";
-const USAGE = `usage: ${SELF} [--data-dir DIR] [--port N] [--name NAME] [--no-open]
+const USAGE = `usage: ${SELF} [--data-dir DIR] [--port N] [--name NAME] [--relay URL] [--no-open]
        ${SELF} service install|uninstall|status   (optional: start Spencer at login)
 
   --data-dir DIR  data directory (env SPENCER_DATA_DIR; default ~/.local/share/spencer)
   --port N        local UI/API port on 127.0.0.1 (env SPENCER_PORT; 0 = random)
   --name NAME     display name; saved to config.json on first run
+  --relay URL     relay URL (env SPENCER_RELAY; saved on first run)
   --open          open the web UI in a browser once started (default when run from a terminal)
   --no-open       don't
   --version       print the version
@@ -42,6 +44,7 @@ async function main(): Promise<void> {
         "data-dir": { type: "string" },
         port: { type: "string" },
         name: { type: "string" },
+        relay: { type: "string" },
         open: { type: "boolean" },
         "no-open": { type: "boolean" },
         version: { type: "boolean", short: "v" },
@@ -80,6 +83,19 @@ async function main(): Promise<void> {
     process.env.SPENCER_PORT = String(p); // CLI wins over env and config.json
   }
 
+  if (opts.relay !== undefined) {
+    try { process.env.SPENCER_RELAY = normalizeRelayUrl(opts.relay); }
+    catch { process.stderr.write(`invalid --relay ${opts.relay}\n`); process.exit(2); }
+  }
+  const firstRun = !existsSync(join(dataDir, "config.json"));
+  if (firstRun && opts.relay !== undefined) {
+    loadConfig(dataDir);
+    const file = join(dataDir, "config.json");
+    const raw = JSON.parse(readFileSync(file, "utf8"));
+    raw.relay = process.env.SPENCER_RELAY;
+    if (opts.name !== undefined) raw.name = opts.name;
+    writeSecretFile(file, JSON.stringify(raw, null, 2) + "\n");
+  }
   const override: Partial<SpencerConfig> = {};
   if (opts.name !== undefined) {
     const file = join(dataDir, "config.json");
