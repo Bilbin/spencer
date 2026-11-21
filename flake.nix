@@ -126,6 +126,7 @@
                       enable = true;
                       environmentFile = "/run/secrets/spencer-relay.env";
                       croc.enable = true;
+                      stun.enable = true;
                     };
                     services.spencer = {
                       enable = true;

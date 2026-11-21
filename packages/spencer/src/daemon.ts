@@ -344,7 +344,11 @@ export class Daemon {
         if (!before) channels.markRead(ch);
         return items;
       },
-      updateChannel: (ch, patch) => channels.update(ch, patch),
+      updateChannel: (ch, patch) => {
+        const updated = channels.update(ch, patch);
+        if (updated.directLink === "off") this.s.links?.closeChannel(ch, "direct links disabled");
+        return updated;
+      },
       leaveChannel: (ch) => this.leave(ch),
       acceptInvite: (link) => channels.acceptInvite(link),
       ...(webRoot ? { webRoot } : {}),
