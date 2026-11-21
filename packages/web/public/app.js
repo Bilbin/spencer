@@ -418,3 +418,12 @@ setTimeout(() => {
     renderSidebar();
   }
 }, 2500);
+
+let directNoticeSeen = false;
+on("direct_transfer", () => {
+  try { directNoticeSeen ||= !!localStorage.getItem("spencer.seenDirectTransfer"); } catch {}
+  if (directNoticeSeen) return;
+  directNoticeSeen = true;
+  try { localStorage.setItem("spencer.seenDirectTransfer", "1"); } catch {}
+  toast("Sent directly", "info");
+});

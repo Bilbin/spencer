@@ -6,6 +6,7 @@ export const S = {
   me: null, // {id, name, fingerprint}
   relay: { url: "", connected: false },
   relays: [], // {url, connected}[] when the daemon reports each relay in use
+  p2p: null,
   policy: {},
   channels: new Map(), // id -> Channel
   transfers: new Map(), // tid -> Transfer
@@ -95,6 +96,7 @@ export function setState(st) {
   S.relay = st.relay ?? S.relay;
   S.relays = Array.isArray(st.relays) ? st.relays : [];
   if (typeof st.ownerBusy === "boolean") setOwnerBusy(st.ownerBusy);
+  S.p2p = st.p2p ?? null;
   S.policy = st.policy ?? {};
   S.channels = new Map((st.channels ?? []).map((c) => [c.id, c]));
   S.transfers = new Map((st.transfers ?? []).map((t) => [t.tid, t]));
@@ -220,6 +222,7 @@ export function setTransfers(items) {
 
 export function upsertTransfer(t) {
   S.transfers.set(t.tid, t);
+  if (t.direction === "out" && t.via === "link" && (t.state === "sending" || t.state === "completed")) emit("direct_transfer", t);
   emit("transfers", t);
 }
 

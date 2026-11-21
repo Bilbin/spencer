@@ -86,6 +86,7 @@ export function transferCard(t, opts = {}) {
   const ch = S.channels.get(t.ch);
   const meta = [
     humanSize(t.size),
+    t.via === "link" ? "Direct" : t.via === "croc" ? "Through the server" : null,
     `${out ? "to" : "from"} ${peerLabel(t)}`,
     opts.showChannel && ch ? `in ${channelTitle(ch)}` : null,
     moving && frac !== undefined ? `${Math.round(frac * 100)}%` : null,
@@ -133,7 +134,7 @@ export function transfersView(main) {
   const list = h("div.xfer-list");
   const tabs = h("div.tabs", { role: "tablist", "aria-label": "Filter transfers" });
   const body = h("div.page-body", null, tabs, list);
-  main.append(viewHeader([h("span.title-icon", { "aria-hidden": "true" }, icon("transfer", 18)), h("div.title-stack", null, h("h1", null, "Transfers"), h("span.subtitle", null, "Files sent and received over croc, end-to-end encrypted"))]), h("div.page", null, body));
+  main.append(viewHeader([h("span.title-icon", { "aria-hidden": "true" }, icon("transfer", 18)), h("div.title-stack", null, h("h1", null, "Transfers"), h("span.subtitle", null, "Files sent directly (P2P) or through the server, end-to-end encrypted"))]), h("div.page", null, body));
 
   const render = () => {
     const all = [...S.transfers.values()].sort((a, b) => b.updatedAt - a.updatedAt);

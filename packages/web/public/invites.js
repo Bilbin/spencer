@@ -1,13 +1,14 @@
 // Invite and Join modals.
 import { h, icon, copyText, append, clear } from "./dom.js";
 import { api, attempt, toast } from "./api.js";
-import { upsertChannel } from "./state.js";
+import { S, upsertChannel } from "./state.js";
 import { openModal, field } from "./modal.js";
 import { navigate } from "./router.js";
 
 export function inviteModal() {
   let kind = "direct";
   const name = h("input.input", { type: "text", placeholder: "e.g. Bob", maxlength: "100", "data-autofocus": true, required: true });
+  const relay = h("input.input", { type: "text", spellcheck: "false", placeholder: S.relay?.url || "wss://spencer.pjalv.com/ws" });
   const nameField = field("Who is this for?", name, "Only you see this label.");
   const label = nameField.querySelector("label");
   const seg = h("div.segmented", { role: "radiogroup", "aria-label": "Channel kind" });
@@ -42,7 +43,7 @@ export function inviteModal() {
 
   const submit = h("button.btn.primary", { type: "submit", form: "invite-form" }, "Create invite");
   const result = h("div.invite-result", { hidden: true });
-  const form = h("form", { id: "invite-form" }, field("Kind", seg), nameField);
+  const form = h("form", { id: "invite-form" }, field("Kind", seg), nameField, field("Hub (relay URL)", relay, "Leave blank for your default hub, or pass another Spencer hub URL (https:// or wss://) to host this channel there."));
   const modal = openModal({
     title: "Invite someone's Spencer",
     body: [form, result],
@@ -54,7 +55,7 @@ export function inviteModal() {
     const n = name.value.trim();
     if (!n) return name.focus();
     submit.disabled = true;
-    const r = await attempt(() => api.createInvite(kind, n));
+    const r = await attempt(() => api.createInvite(kind, n, relay.value.trim()));
     submit.disabled = false;
     if (!r || !r.link) return;
     if (r.channel) upsertChannel(r.channel);
@@ -96,9 +97,9 @@ export function inviteModal() {
 }
 
 export function joinModal() {
-  const link = h("textarea.input.mono", { rows: "3", placeholder: "https://spencer.pjalv.com/i/…#…", spellcheck: "false", "data-autofocus": true, required: true });
+  const link = h("textarea.input.mono", { rows: "3", placeholder: "https://<hub>/i/…#…", spellcheck: "false", "data-autofocus": true, required: true });
   const submit = h("button.btn.primary", { type: "submit", form: "join-form" }, "Join");
-  const form = h("form", { id: "join-form" }, field("Invite link", link, "Paste the full link someone sent you, including the part after #. That part is the secret and never reaches the relay."));
+  const form = h("form", { id: "join-form" }, field("Invite link", link, "Paste the full link from any Spencer hub, including the part after #. That part is the secret and never reaches the relay."));
   const modal = openModal({
     title: "Join a channel",
     body: form,
