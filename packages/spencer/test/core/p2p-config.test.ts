@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { defaultConfig, resolveConfig } from "../../src/config.ts";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../../src/store/db.ts";
@@ -46,4 +46,62 @@ test("P2P defaults, validation and relay normalization", () => {
   } finally {
     if (old === undefined) delete process.env.SPENCER_RELAY; else process.env.SPENCER_RELAY = old;
   }
+});
+
+import { startRelay } from "../../../relay/src/index.ts";
+import { http, quietLog, relayAt, startNode, tempDir, waitFor } from "./helpers.ts";
+
+test("custom invite uses its relay and channel link settings are validated", async () => {
+  const dir = tempDir();
+  mkdirSync(join(dir.dir, "a")); mkdirSync(join(dir.dir, "b"));
+  const relayA = await relayAt(join(dir.dir, "a"));
+  const relayB = await relayAt(join(dir.dir, "b"));
+  const alice = await startNode(join(dir.dir, "alice"), relayA.url, "Alice");
+  const bob = await startNode(join(dir.dir, "bob"), relayA.url, "Bob");
+  try {
+    const ah = { "X-Spencer-Token": alice.daemon.token };
+    const bh = { "X-Spencer-Token": bob.daemon.token };
+    const invite = await http(alice.daemon.port, "POST", "/api/invites", { headers: ah, body: { kind: "direct", name: "Bob", relay: relayB.httpUrl } });
+    assert.equal(invite.status, 200);
+    const { link, channel } = invite.json();
+    assert.equal((await http(bob.daemon.port, "POST", "/api/invites/accept", { headers: bh, body: { link } })).status, 200);
+    await waitFor(() => alice.daemon.pool.status(relayB.url)?.connected && bob.daemon.pool.status(relayB.url)?.connected, "both connected to custom relay");
+    await waitFor(() => alice.daemon.core.getChannel(channel.id)?.members.length === 2, "members joined");
+    assert.equal(alice.daemon.core.getChannel(channel.id)?.relayUrl, relayB.url);
+    assert.equal(bob.daemon.core.getChannel(channel.id)?.relayUrl, relayB.url);
+    const before = bob.daemon.channels.messages(channel.id, 50, undefined, ["chat", "hello"]).length;
+    alice.daemon.channels["d"].localFeatures = () => ["p2p-files/1"];
+    alice.daemon.channels.recheckHellos();
+    await waitFor(() => bob.daemon.core.getChannel(channel.id)?.members.some((m) => m.id === alice.daemon.identity.id && m.features?.includes("p2p-files/1")), "feature hello");
+    assert.equal(bob.daemon.channels.messages(channel.id, 50, undefined, ["chat", "hello"]).length, before);
+    assert.deepEqual(JSON.parse(String(bob.daemon.db.prepare("SELECT features FROM members WHERE ch = ? AND id = ?").get(channel.id, alice.daemon.identity.id)?.features)), ["p2p-files/1"]);
+    alice.daemon.sendHuman(channel.id, "from Alice");
+    bob.daemon.sendHuman(channel.id, "from Bob");
+    await waitFor(() => alice.agent().peerChats.some((m) => m.body.text === "from Bob") && bob.agent().peerChats.some((m) => m.body.text === "from Alice"), "chat exchange");
+    const path = `/api/channels/${channel.id}`;
+    for (const settings of [{ directLink: "off", allowLocalAddresses: true }, { directLink: "auto", allowLocalAddresses: false }]) {
+      assert.equal((await http(alice.daemon.port, "PATCH", path, { headers: ah, body: settings })).status, 200);
+      const result = (await http(alice.daemon.port, "GET", path, { headers: ah })).json();
+      assert.equal(result.directLink, settings.directLink);
+      assert.equal(result.allowLocalAddresses, settings.allowLocalAddresses);
+    }
+    for (const body of [{ directLink: "always" }, { allowLocalAddresses: "true" }]) {
+      assert.equal((await http(alice.daemon.port, "PATCH", path, { headers: ah, body })).status, 400);
+    }
+  } finally {
+    await alice.daemon.stop(); await bob.daemon.stop(); await relayA.close(); await relayB.close(); dir.cleanup();
+  }
+});
+
+test("relay welcome exposes STUN status", async () => {
+  const dir = tempDir();
+  const relay = await startRelay({ host: "127.0.0.1", port: 0, dbPath: join(dir.dir, "relay.sqlite"), stunBind: "127.0.0.1:0", log: quietLog });
+  const node = await startNode(join(dir.dir, "node"), relay.url, "Alice");
+  try {
+    node.daemon.pool.get(relay.url);
+    const status = await waitFor(() => { const s = node.daemon.pool.status(relay.url); return s?.connected ? s : undefined; }, "relay welcome");
+    assert.ok(status.features.includes("stun"));
+    assert.equal(status.stun, relay.stunAddress);
+    assert.ok(status.stun);
+  } finally { await node.daemon.stop(); await relay.close(); dir.cleanup(); }
 });

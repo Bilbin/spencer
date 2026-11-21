@@ -5,11 +5,12 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { TransferStore } from "../../src/transfers/store.ts";
-import { generateIdentity, randomId } from "@spencer/protocol";
+import { generateIdentity, pairKey, randomId } from "@spencer/protocol";
 import type { FileBody } from "@spencer/protocol";
-import { fakeCrocRunner, TransferError } from "../../src/transfers/index.ts";
+import { createTransferService, fakeCrocRunner, TransferError } from "../../src/transfers/index.ts";
 import type { FakeCrocRunner } from "../../src/transfers/index.ts";
 import { pair, sleep, waitFor } from "./harness.ts";
+import type { TransferP2pAdapter } from "../../src/contracts.ts";
 import type { TNode } from "./harness.ts";
 
 type Pair = Awaited<ReturnType<typeof pair>>;
@@ -488,4 +489,140 @@ it("migrates existing transfer tables without losing rows", () => {
     assert.equal(store.get("id")?.name, "file");
     new TransferStore(db);
   } finally { db.close(); }
+});
+
+
+type LinkMode = "success" | "drop" | "resumed-corrupt" | "corrupt" | "oversize";
+
+async function setupLink(mode: LinkMode, noCroc = false) {
+  const hasCroc: boolean[] = [];
+  const sources = new Map<number, { path: string; finish: (ok: boolean) => void }>();
+  const adapter: TransferP2pAdapter = {
+    canTryLink(_ch, _peer, _size, has) { hasCroc.push(has); return true; },
+    sendOverLink(o) {
+      let finish!: (ok: boolean) => void;
+      const done = new Promise<{ ok: boolean }>((resolve) => { finish = (ok) => resolve({ ok }); });
+      sources.set(o.attempt, { path: o.filePath, finish });
+      setImmediate(() => o.onReady());
+      return { done, kill() {} };
+    },
+    receiveOverLink(o) {
+      const done = new Promise<{ ok: boolean; resumedFrom: number; error?: string }>((resolve) => setImmediate(() => {
+        const source = sources.get(o.attempt)!;
+        if (mode === "resumed-corrupt" && o.attempt === 2) {
+          assert.equal(existsSync(o.finalPath), false);
+          assert.equal(existsSync(o.partPath), false);
+        }
+        if (mode === "drop" && o.attempt === 1) {
+          writeFileSync(o.partPath, "partial");
+          source.finish(false);
+          resolve({ ok: false, resumedFrom: 0, error: "dropped" });
+        } else if (mode === "oversize") {
+          source.finish(true);
+          resolve({ ok: false, resumedFrom: 0, error: "sender sent more data than offered" });
+        } else {
+          const data = readFileSync(source.path);
+          if ((mode === "resumed-corrupt" && o.attempt === 1) || mode === "corrupt") data[0] ^= 255;
+          writeFileSync(o.finalPath, data);
+          o.onProgress(1);
+          source.finish(true);
+          resolve({ ok: true, resumedFrom: mode === "resumed-corrupt" && o.attempt === 1 ? 10 : 0 });
+        }
+      }));
+      return { done, kill() {} };
+    },
+  };
+  const p = await setup({ a: noApproval });
+  for (const node of [p.A, p.B]) {
+    await node.stop();
+    node.start = async () => {
+      node.db = new DatabaseSync(node.dbPath);
+      node.svc = createTransferService({
+        db: node.db, dataDir: node.dataDir, me: node.id, p2p: adapter,
+        policy: () => node.policy, trust: () => "standard",
+        enqueue: (ch, body) => { node.enqueued.push(body); p.bus.send(node.id.id, ch, body); },
+        crocInfo: () => noCroc ? undefined : node.info,
+        pairKey: (ch, peer) => pairKey(node.id.secret, peer, node.id.id, ch),
+        peers: (ch) => node.peersOf.get(ch) ?? [], peerName: (_ch, peer) => p.bus.nodes.get(peer)?.name,
+        crocPath: "/nonexistent/croc", events: { emit: (e) => { if (e.type === "transfer") node.events.push(e.transfer); } },
+        ownerNote: (note) => node.notes.push(note), now: () => node.now(),
+      }, { runner: fake, backoffMs: () => 5, sweepIntervalMs: 20, watchdogMs: 20 });
+      await node.svc.start();
+    };
+    await node.start();
+  }
+  return { ...p, hasCroc };
+}
+
+for (const group of [false, true]) {
+  it(`direct link completes in ${group ? "group" : "direct"} channel`, async () => {
+    const { A, B, ch, bus } = await setupLink("success");
+    if (group) {
+      const third = generateIdentity().id;
+      A.peersOf.set(ch, [B.id.id, third]);
+      B.peersOf.set(ch, [A.id.id, third]);
+    }
+    const { path, data } = makeFile(A, "link.bin");
+    const t = await A.s.request(ch, { path, to: B.id.id, initiatedBy: "owner" });
+    await waitFor(() => A.state(t.tid) === "completed" && B.state(t.tid) === "completed", "link completed");
+    assert.equal(A.s.get(t.tid)?.via, "link"); assert.equal(B.s.get(t.tid)?.via, "link");
+    assert.equal(sha(readFileSync(B.s.get(t.tid)!.path!)), sha(data));
+    assert.ok(bus.log.some((d) => d.body.type === "file_ready" && d.body.via === "link"));
+    assert.ok(bus.log.some((d) => d.body.type === "file_ack" && d.body.ok));
+    assert.equal(fake.spawned.length, 0);
+  });
+}
+
+it("resumed corrupt link retries from zero", async () => {
+  const { A, B, ch, bus } = await setupLink("resumed-corrupt");
+  const { path, data } = makeFile(A, "link.bin");
+  const t = await A.s.request(ch, { path, initiatedBy: "owner" });
+  await waitFor(() => A.state(t.tid) === "completed" && B.state(t.tid) === "completed", "retry completed");
+  assert.equal(A.s.get(t.tid)?.attempt, 2);
+  assert.ok(bus.log.some((d) => d.body.type === "file_retry"));
+  assert.equal(B.events.some((e) => e.state === "failed"), false);
+  assert.equal(sha(readFileSync(B.s.get(t.tid)!.path!)), sha(data));
+  assert.equal(fake.spawned.length, 0);
+});
+
+for (const mode of ["corrupt", "oversize"] as const) {
+  it(`link ${mode} fails terminally`, async () => {
+    const { A, B, ch, bus } = await setupLink(mode);
+    const { path } = makeFile(A, "link.bin");
+    const t = await A.s.request(ch, { path, initiatedBy: "owner" });
+    await waitFor(() => A.state(t.tid) === "failed" && B.state(t.tid) === "failed", "failed");
+    const ack = bus.log.find((d) => d.body.type === "file_ack")?.body;
+    assert.ok(ack?.type === "file_ack" && !ack.ok);
+    if (mode === "oversize") assert.equal(ack.reason, "size exceeds offer");
+  });
+}
+
+it("chat-only relay transfers a small file over link", async () => {
+  const { A, B, ch, hasCroc } = await setupLink("success", true);
+  const { path, data } = makeFile(A, "small.bin", 1024);
+  const t = await A.s.request(ch, { path, initiatedBy: "owner" });
+  await waitFor(() => A.state(t.tid) === "completed" && B.state(t.tid) === "completed", "completed");
+  assert.deepEqual(hasCroc, [false]);
+  assert.equal(B.s.get(t.tid)?.via, "link");
+  assert.equal(sha(readFileSync(B.s.get(t.tid)!.path!)), sha(data));
+});
+
+
+it("link failure falls back to croc after deleting partial file", async () => {
+  const { A, B, ch, bus } = await setupLink("drop");
+  const receive = fake.receive.bind(fake);
+  let checked = false;
+  fake.receive = (opts) => {
+    assert.equal(readdirSync(opts.outDir).some((name) => name.endsWith(".part")), false);
+    checked = true;
+    return receive(opts);
+  };
+  const { path, data } = makeFile(A, "link.bin");
+  const t = await A.s.request(ch, { path, initiatedBy: "owner" });
+  await waitFor(() => A.state(t.tid) === "completed" && B.state(t.tid) === "completed", "croc fallback");
+  assert.equal(checked, true);
+  assert.equal(A.s.get(t.tid)?.attempt, 2);
+  assert.equal(A.s.get(t.tid)?.via, "croc"); assert.equal(B.s.get(t.tid)?.via, "croc");
+  assert.ok(bus.log.some((d) => d.body.type === "file_ready" && d.body.attempt === 1 && d.body.via === "link"));
+  assert.equal(sha(readFileSync(B.s.get(t.tid)!.path!)), sha(data));
 });
