@@ -14,6 +14,7 @@ export interface TransferRow {
   attempt: number;
   /** croc code (secret). Cleared once the transfer is terminal. */
   code: string | null;
+  via: "link" | "croc" | null;
   initiatedBy: TransferInitiator;
   reason: string | null;
   error: string | null;
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS transfers (
   state TEXT NOT NULL,
   attempt INTEGER NOT NULL DEFAULT 0,
   code TEXT,
+  via TEXT,
   initiated_by TEXT NOT NULL,
   reason TEXT,
   error TEXT,
@@ -64,6 +66,7 @@ const COLS: Record<keyof TransferRow, string> = {
   state: "state",
   attempt: "attempt",
   code: "code",
+  via: "via",
   initiatedBy: "initiated_by",
   reason: "reason",
   error: "error",
@@ -95,6 +98,7 @@ function fromSql(r: Record<string, unknown>): TransferRow {
     state: r.state as Transfer["state"],
     attempt: Number(r.attempt),
     code: (r.code as string | null) ?? null,
+    via: (r.via as TransferRow["via"]) ?? null,
     initiatedBy: r.initiated_by as TransferInitiator,
     reason: (r.reason as string | null) ?? null,
     error: (r.error as string | null) ?? null,
@@ -116,6 +120,7 @@ export class TransferStore {
   constructor(db: DatabaseSync) {
     this.db = db;
     db.exec(SCHEMA);
+    if (!db.prepare("PRAGMA table_info(transfers)").all().some((column) => column.name === "via")) db.exec("ALTER TABLE transfers ADD COLUMN via TEXT");
   }
 
   /**
