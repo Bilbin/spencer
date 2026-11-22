@@ -1927,8 +1927,19 @@ details[open] > summary > .icon:last-child,
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.xfer-top .pill {
+.xfer-top-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
   margin-left: auto;
+}
+.xfer-time {
+  font-size: 12px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.xfer-top .pill {
   flex: none;
 }
 .xfer-meta {

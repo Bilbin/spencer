@@ -1,5 +1,5 @@
 // Transfer cards (used inline in channels and in the Transfers view) and the Transfers view.
-import { h, icon, humanSize, relTime, timeFull, copyText, iconButton } from "./dom.js";
+import { h, icon, humanSize, relTime, timeShort, timeFull, copyText, iconButton } from "./dom.js";
 import { api, attempt, toast } from "./api.js";
 import { S, TERMINAL, on, needsAction, upsertTransfer, channelTitle, setTransfers } from "./state.js";
 import { viewHeader, emptyState } from "./common.js";
@@ -84,6 +84,10 @@ export function transferCard(t, opts = {}) {
   }
 
   const ch = S.channels.get(t.ch);
+  const finishedLater =
+    TERMINAL.has(t.state) &&
+    Number.isFinite(t.updatedAt) &&
+    (!Number.isFinite(t.createdAt) || Math.abs(t.updatedAt - t.createdAt) >= 60_000);
   const meta = [
     humanSize(t.size),
     t.via === "link" ? "Direct" : t.via === "croc" ? "Through the server" : null,
@@ -92,7 +96,27 @@ export function transferCard(t, opts = {}) {
     moving && frac !== undefined ? `${Math.round(frac * 100)}%` : null,
     t.attempt > 1 && !TERMINAL.has(t.state) ? `attempt ${t.attempt}` : null,
     !TERMINAL.has(t.state) && t.expiresAt ? `expires ${relTime(t.expiresAt)}` : null,
+    finishedLater
+      ? h(
+          "time",
+          { datetime: new Date(t.updatedAt).toISOString(), title: `${STATE_LABEL[t.state] ?? t.state} ${timeFull(t.updatedAt)}` },
+          `${STATE_LABEL[t.state] ?? t.state} ${timeShort(t.updatedAt)}`,
+        )
+      : null,
   ].filter(Boolean);
+
+  const createdTs = Number.isFinite(t.createdAt) ? t.createdAt : Number.isFinite(t.updatedAt) ? t.updatedAt : null;
+  const timeTitle =
+    createdTs !== null
+      ? [
+          `Created ${timeFull(createdTs)}`,
+          Number.isFinite(t.updatedAt) && t.updatedAt !== createdTs ? `Updated ${timeFull(t.updatedAt)}` : null,
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : "";
+  const timeBadge =
+    createdTs !== null ? h("time.xfer-time", { datetime: new Date(createdTs).toISOString(), title: timeTitle }, timeShort(createdTs)) : null;
 
   let quarantine = null;
   if (!out && t.state === "completed" && t.path) {
@@ -114,10 +138,14 @@ export function transferCard(t, opts = {}) {
       h(
         "div.xfer-top",
         null,
-        h("span.xfer-name", { title: `${t.name}\nsha256 ${t.sha256}\ncreated ${timeFull(t.createdAt)}` }, t.name),
-        h(`span.pill.${stateTone(t)}`, null, STATE_LABEL[t.state] ?? t.state),
+        h(
+          "span.xfer-name",
+          { title: [t.name, `sha256 ${t.sha256}`, timeTitle].filter(Boolean).join("\n") },
+          t.name,
+        ),
+        h("span.xfer-top-meta", null, timeBadge, h(`span.pill.${stateTone(t)}`, null, STATE_LABEL[t.state] ?? t.state)),
       ),
-      h("div.xfer-meta", null, meta.map((x) => h("span", null, x))),
+      h("div.xfer-meta", null, meta.map((x) => (x instanceof Node ? x : h("span", null, x)))),
       bar,
       initiatorLine(t),
       t.error ? h("p.xfer-error", null, t.error) : null,

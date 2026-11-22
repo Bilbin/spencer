@@ -237,6 +237,9 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
           size: t.size,
           state: t.state,
           initiatedBy: t.initiatedBy,
+          createdAt: new Date(t.createdAt).toISOString(),
+          updatedAt: new Date(t.updatedAt).toISOString(),
+          ...(t.via ? { via: t.via } : {}),
           ...(t.error ? { error: t.error } : {}),
           ...(t.path && t.direction === "in" ? { path: t.path } : {}),
         }));

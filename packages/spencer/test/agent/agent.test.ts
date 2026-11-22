@@ -840,3 +840,46 @@ test("task states: ask_owner shows the peer input_required; approve → working 
     assert.equal(states(ask2.id).at(-1), "failed: Declined by its owner");
   });
 });
+
+test("list_transfers includes ISO createdAt, updatedAt, and via", async () => {
+  const { ownerTools } = await import("../../src/agent/tools.ts");
+  const core = makeCore();
+  try {
+    const createdAt = Date.UTC(2026, 10, 21, 14, 0, 0);
+    const updatedAt = Date.UTC(2026, 10, 21, 14, 5, 30);
+    core.listTransfers = () => [
+      {
+        tid: "t1",
+        ch: "chDirect",
+        direction: "in",
+        peer: BOB.id,
+        peerName: BOB.name,
+        name: "report.pdf",
+        size: 1024,
+        sha256: "00",
+        state: "completed",
+        attempt: 1,
+        initiatedBy: "peer",
+        via: "link",
+        createdAt,
+        updatedAt,
+        expiresAt: createdAt + 86_400_000,
+      },
+    ];
+    const tool = ownerTools({
+      core,
+      ownerNote: async () => {},
+      askOwner: async () => ({} as never),
+      currentAsker: async () => undefined,
+      followups: { schedule: () => ({} as never), cancel: () => ({} as never) },
+    }).find((t) => t.name === "list_transfers")!;
+    const out = await tool.execute({}, { conversationKey: "owner", callId: "c1" });
+    const parsed = JSON.parse(typeof out === "string" ? out : out.text) as Record<string, unknown>[];
+    assert.equal(parsed.length, 1);
+    assert.equal(parsed[0]!.createdAt, "2026-11-21T14:00:00.000Z");
+    assert.equal(parsed[0]!.updatedAt, "2026-11-21T14:05:30.000Z");
+    assert.equal(parsed[0]!.via, "link");
+  } finally {
+    core.cleanup();
+  }
+});
