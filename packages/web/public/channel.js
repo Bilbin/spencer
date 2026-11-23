@@ -8,6 +8,7 @@ import { transferCard } from "./transfers.js";
 import { openModal, field } from "./modal.js";
 import { scrollKeeper } from "./scroll.js";
 import { navigate } from "./router.js";
+import { uploadDraftBatch } from "./draft-batch.js";
 
 const NOTE_LABEL = {
   "not addressed": "Your Spencer stayed quiet: it was not addressed.",
@@ -538,33 +539,36 @@ export function channelView(main, chId) {
         recipientSelect?.focus();
         return false;
       }
-      for (const draft of drafts) {
-        if (draft.status === "sent") continue;
-        if (c.kind === "group") batchRecipient = recipient;
-        draft.status = "uploading";
-        draft.progress = 0;
-        renderDrafts();
-        try {
-          const transfer = await api.uploadFile(c.id, draft.file, recipient, (fraction) => {
+      const batchOk = await uploadDraftBatch(drafts, {
+        isPresent: (draft) => drafts.includes(draft),
+        upload: async (draft) => {
+          if (c.kind === "group") batchRecipient = recipient;
+          draft.status = "uploading";
+          draft.progress = 0;
+          renderDrafts();
+          return api.uploadFile(c.id, draft.file, recipient, draft.uploadId, (fraction) => {
             const progress = Math.floor(fraction * 10) * 10;
             if (progress !== draft.progress) {
               draft.progress = progress;
               renderDrafts();
             }
           });
+        },
+        onSuccess: (draft, transfer) => {
           draft.status = "sent";
           draft.error = "";
           draft.transfer = transfer;
           upsertTransfer(transfer);
           renderDrafts();
-        } catch (error) {
+        },
+        onFailure: (draft, error) => {
           draft.status = "failed";
           draft.error = error instanceof Error ? error.message : String(error);
           renderDrafts();
           toast(`Could not send ${draft.file.name}: ${draft.error}`);
-          return false;
-        }
-      }
+        },
+      });
+      if (!batchOk) return false;
       drafts = drafts.filter((d) => d.status !== "sent");
       if (!drafts.length) batchRecipient = null;
       renderDrafts();
@@ -634,7 +638,7 @@ export function channelView(main, chId) {
       const key = `${file.name}\0${file.size}\0${file.lastModified}`;
       if (drafts.some((d) => d.key === key)) continue;
       if (drafts.length >= MAX_DRAFT_FILES || total + file.size > MAX_DRAFT_BYTES) { toast("The composer allows up to 10 files and 50 MiB at a time"); break; }
-      drafts.push({ file, key, status: "draft", progress: 0, error: "" });
+      drafts.push({ file, key, uploadId: crypto.randomUUID(), status: "draft", progress: 0, error: "" });
       total += file.size;
     }
     renderDrafts();

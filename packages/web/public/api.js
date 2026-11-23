@@ -54,8 +54,8 @@ export const api = {
   acceptInvite: (link) => request("POST", "/api/invites/accept", { link }),
   transfers: () => request("GET", "/api/transfers"),
   sendFile: (ch, path, to) => request("POST", "/api/transfers", to ? { ch, path, to } : { ch, path }),
-  uploadFile: (ch, file, to, onProgress) => new Promise((resolve, reject) => {
-    const params = new URLSearchParams({ ch, name: file.name });
+  uploadFile: (ch, file, to, uploadId, onProgress) => new Promise((resolve, reject) => {
+    const params = new URLSearchParams({ ch, name: file.name, uploadId });
     if (to) params.set("to", to);
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `/api/transfers/upload?${params}`);

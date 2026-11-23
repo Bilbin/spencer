@@ -107,6 +107,20 @@ function tokenEq(a: string | undefined, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
+async function* boundedUpload(req: IncomingMessage): AsyncGenerator<Uint8Array> {
+  let size = 0;
+  let tooLarge = false;
+  for await (const chunk of req) {
+    size += chunk.byteLength;
+    if (size > MAX_UPLOAD_BYTES) {
+      tooLarge = true;
+      continue; // Drain the request without staging more bytes so the daemon can return a useful 413.
+    }
+    yield chunk;
+  }
+  if (tooLarge) throw new Error("file exceeds the 25 MiB upload limit");
+}
+
 function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolvePromise, reject) => {
     const chunks: Buffer[] = [];
@@ -374,7 +388,9 @@ export class ApiServer {
       const ch = q.get("ch");
       const name = q.get("name");
       const to = q.get("to") ?? undefined;
+      const uploadId = q.get("uploadId");
       if (!ch || !b.core.getChannel(ch)) throw new HttpError(400, "ch must be a known channel");
+      if (!uploadId || !/^[A-Za-z0-9_-]{16,64}$/.test(uploadId)) throw new HttpError(400, "uploadId must be a valid retry id");
       if (!name?.trim() || Buffer.byteLength(name, "utf8") > 255) throw new HttpError(400, "filename must be between 1 and 255 bytes");
       if (to !== undefined && !/^[A-Za-z0-9_-]{1,128}$/.test(to)) throw new HttpError(400, "to must be an identity id");
       if (!/^application\/octet-stream(?:\s*;|$)/i.test(req.headers["content-type"] ?? "")) {
@@ -387,7 +403,7 @@ export class ApiServer {
       if (this.activeUploads >= MAX_CONCURRENT_UPLOADS) throw new HttpError(429, "too many active uploads; try again shortly");
       this.activeUploads++;
       try {
-        return await b.transfers().requestUpload(ch, { name, bytes: req, ...(to ? { to } : {}) });
+        return await b.transfers().requestUpload(ch, { name, uploadId, bytes: boundedUpload(req), ...(to ? { to } : {}) });
       } finally {
         this.activeUploads--;
       }

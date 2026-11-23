@@ -290,10 +290,14 @@ export interface TransferRequest {
   to?: string;
   initiatedBy: "owner" | "owner-agent" | "peer-agent";
   reason?: string;
+  /** Local-only upload retry key; never sent to peers. */
+  uploadId?: string;
 }
 
 export interface TransferUpload {
   name: string;
+  /** Stable across retries after an ambiguous HTTP response. */
+  uploadId: string;
   /** Recipient identity; optional for direct channels. */
   to?: string;
   /** Bounded by the transfer service before the existing owner-initiated request path is entered. */

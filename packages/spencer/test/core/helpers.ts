@@ -113,7 +113,7 @@ export class StubTransfers implements TransferService {
   deps: TransferDeps;
   bodies: { ch: string; from: string; body: FileBody }[] = [];
   requests: { ch: string; req: TransferRequest }[] = [];
-  uploads: { ch: string; name: string; to?: string; data: Buffer }[] = [];
+  uploads: { ch: string; name: string; to?: string; uploadId: string; data: Buffer }[] = [];
   constructor(deps: TransferDeps) {
     this.deps = deps;
   }
@@ -127,8 +127,8 @@ export class StubTransfers implements TransferService {
     const chunks: Uint8Array[] = [];
     for await (const chunk of upload.bytes) chunks.push(chunk);
     const data = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
-    this.uploads.push({ ch, name: upload.name, to: upload.to, data });
-    const req = { path: upload.name, to: upload.to, initiatedBy: "owner" as const };
+    this.uploads.push({ ch, name: upload.name, to: upload.to, uploadId: upload.uploadId, data });
+    const req = { path: upload.name, to: upload.to, uploadId: upload.uploadId, initiatedBy: "owner" as const };
     this.requests.push({ ch, req });
     return this.transfer(ch, upload.name, upload.to, "owner");
   }
