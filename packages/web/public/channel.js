@@ -21,6 +21,20 @@ const NOTE_LABEL = {
 };
 /** Consecutive turns by the same speaker within this window share one header. */
 const GROUP_MS = 5 * 60_000;
+const MAX_DRAFT_FILES = 10;
+const MAX_DRAFT_BYTES = 50 * 1024 * 1024;
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
+
+function hasDraggedFiles(e) {
+  return Array.from(e.dataTransfer?.types ?? []).includes("Files");
+}
+
+// A file dropped anywhere in the document must never be interpreted by the browser as navigation.
+for (const type of ["dragover", "drop"]) {
+  document.addEventListener(type, (e) => {
+    if (hasDraggedFiles(e)) e.preventDefault();
+  }, true);
+}
 
 // ---------------------------------------------------------------- message rendering
 
@@ -516,20 +530,127 @@ export function channelView(main, chId) {
 
   const send = async (text) => {
     const c = getC();
-    if (!c) return false;
+    if (!c || c.id !== chId) return false;
+    if (drafts.some((d) => d.status !== "sent")) {
+      const recipient = c.kind === "group" ? (batchRecipient ?? recipientSelect?.value) : undefined;
+      if (c.kind === "group" && !recipient) {
+        toast("Choose who gets the files");
+        recipientSelect?.focus();
+        return false;
+      }
+      for (const draft of drafts) {
+        if (draft.status === "sent") continue;
+        if (c.kind === "group") batchRecipient = recipient;
+        draft.status = "uploading";
+        draft.progress = 0;
+        renderDrafts();
+        try {
+          const transfer = await api.uploadFile(c.id, draft.file, recipient, (fraction) => {
+            const progress = Math.floor(fraction * 10) * 10;
+            if (progress !== draft.progress) {
+              draft.progress = progress;
+              renderDrafts();
+            }
+          });
+          draft.status = "sent";
+          draft.error = "";
+          draft.transfer = transfer;
+          upsertTransfer(transfer);
+          renderDrafts();
+        } catch (error) {
+          draft.status = "failed";
+          draft.error = error instanceof Error ? error.message : String(error);
+          renderDrafts();
+          toast(`Could not send ${draft.file.name}: ${draft.error}`);
+          return false;
+        }
+      }
+      drafts = drafts.filter((d) => d.status !== "sent");
+      if (!drafts.length) batchRecipient = null;
+      renderDrafts();
+      comp.sync();
+    }
+    if (!text) return true;
     const res = await attempt(() => api.channelSend(c.id, text, mentionIds(c, text)));
     if (res) keeper.toBottom();
     return !!res;
   };
   const completerHolder = { onKey: () => false };
   const fileBtn = h("button.icon-btn.attach", { type: "button", "aria-label": "Send file", title: "Send file", on: { click: () => getC() && sendFileModal(getC()) } }, icon("paperclip", 18));
+  const draftBox = h("div.draft-attachments", { hidden: true, "aria-live": "polite" });
+  let drafts = [];
+  const cAtCreation = getC();
+  const ps = cAtCreation ? peers(cAtCreation) : [];
+  let batchRecipient = null;
+  const recipientSelect = cAtCreation?.kind === "group" ? h(
+    "select.draft-recipient.input",
+    { "aria-label": "Choose who gets the attached files" },
+    h("option", { value: "" }, "Choose a member…"),
+    ps.map((m) => h("option", { value: m.id }, `${m.name || m.id.slice(0, 8)} (${shortFp(m.fingerprint)})`)),
+  ) : null;
+  const renderDrafts = () => {
+    draftBox.hidden = drafts.length === 0;
+    if (recipientSelect) recipientSelect.disabled = !!batchRecipient;
+    const nodes = drafts.map((d) => h("div.draft-attachment", null,
+      icon("file", 16),
+      h("span.draft-name", { title: d.file.name }, d.file.name),
+      h("span.draft-state", { title: d.error || "" }, d.status === "uploading" ? `Uploading ${d.progress ?? 0}%` : d.status === "failed" ? "Failed · Send to retry" : d.status === "sent" ? (d.transfer?.state === "awaiting_approval" ? "Waiting for approval" : "Offered") : "Ready to send"),
+      h("button.draft-remove", { type: "button", "aria-label": `Remove ${d.file.name}`, disabled: d.status === "uploading", on: { click: () => { drafts = drafts.filter((x) => x !== d); if (!drafts.length) batchRecipient = null; renderDrafts(); comp.sync(); } } }, "×"),
+    ));
+    if (recipientSelect) nodes.push(recipientSelect);
+    draftBox.replaceChildren(...nodes);
+  };
   const comp = composer({
     placeholder: "Write as yourself…",
     label: "Message as yourself",
     hint: ["You write here as a person; your Spencer answers on its own. ", h("kbd", null, "@"), " mentions. ", SEND_HINT()],
     left: fileBtn,
+    drafts: draftBox,
+    canSend: () => drafts.length > 0,
     onKey: (e) => completerHolder.onKey(e),
     onSend: send,
+  });
+  const addDroppedFiles = (e) => {
+    if (!hasDraggedFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const items = Array.from(e.dataTransfer.items ?? []);
+    let folderDropped = false;
+    const files = [];
+    if (items.length) {
+      for (const item of items) {
+        if (item.kind !== "file") continue;
+        const entry = item.webkitGetAsEntry?.();
+        if (entry?.isDirectory) { folderDropped = true; continue; }
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+    } else files.push(...Array.from(e.dataTransfer.files ?? []));
+    if (folderDropped) toast("Folders can’t be attached; drop regular files instead");
+    let total = drafts.reduce((n, d) => n + d.file.size, 0);
+    for (const file of files) {
+      if (!file.name || file.size > MAX_FILE_BYTES) { toast(`${file.name || "File"} exceeds the 25 MiB limit`); continue; }
+      if (new TextEncoder().encode(file.name).length > 255) { toast("File names must be 255 bytes or shorter"); continue; }
+      const key = `${file.name}\0${file.size}\0${file.lastModified}`;
+      if (drafts.some((d) => d.key === key)) continue;
+      if (drafts.length >= MAX_DRAFT_FILES || total + file.size > MAX_DRAFT_BYTES) { toast("The composer allows up to 10 files and 50 MiB at a time"); break; }
+      drafts.push({ file, key, status: "draft", progress: 0, error: "" });
+      total += file.size;
+    }
+    renderDrafts();
+    comp.sync();
+  };
+  comp.form.addEventListener("dragover", (e) => {
+    if (!hasDraggedFiles(e)) return;
+    e.preventDefault();
+    comp.form.classList.add("file-drop-target");
+  });
+  comp.form.addEventListener("dragleave", (e) => {
+    if (!comp.form.contains(e.relatedTarget)) comp.form.classList.remove("file-drop-target");
+  });
+  comp.form.addEventListener("drop", (e) => {
+    comp.form.classList.remove("file-drop-target");
+    addDroppedFiles(e);
   });
   const completer = mentionCompleter(comp.input, getC);
   completerHolder.onKey = completer.onKey;

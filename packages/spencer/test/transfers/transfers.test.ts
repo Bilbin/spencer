@@ -82,6 +82,38 @@ describe("transfers (fake croc)", () => {
     assert.equal(A.s.list(randomId()).length, 0);
   });
 
+  it("uploaded bytes enter the owner transfer path and partial staging is cleaned", async () => {
+    const { A, B, ch } = await setup();
+    const data = Buffer.from("small synthetic upload");
+    const t = await A.s.requestUpload(ch, { name: "../notes <draft>.txt", bytes: (async function* () { yield data; })() });
+    assert.equal(t.initiatedBy, "owner");
+    assert.equal(t.peer, B.id.id);
+    assert.equal(t.size, data.length);
+    assert.equal(t.sha256, sha(data));
+    assert.equal(t.name.includes("/"), false);
+    assert.equal(readFileSync(t.path!).toString(), data.toString());
+    assert.equal(existsSync(join(A.dataDir, "upload-staging")), true);
+    assert.deepEqual(readdirSync(join(A.dataDir, "upload-staging")), []);
+
+    const secondPeer = generateIdentity().id;
+    A.peersOf.set(ch, [...A.peersOf.get(ch)!, secondPeer]);
+    const groupUpload = await A.s.requestUpload(ch, { name: "group.bin", to: secondPeer, bytes: (async function* () { yield Buffer.from("group"); })() });
+    assert.equal(groupUpload.peer, secondPeer, "group upload keeps the explicit single recipient");
+
+    await assert.rejects(A.s.requestUpload(ch, {
+      name: "broken.txt",
+      bytes: (async function* () { yield Buffer.from("partial"); throw new Error("synthetic stream failure"); })(),
+    }), /cannot stage uploaded file/);
+    assert.equal(existsSync(t.path!), true, "failed staging must not remove an active transfer file");
+    assert.deepEqual(readdirSync(join(A.dataDir, "upload-staging")), []);
+    await assert.rejects(A.s.requestUpload(ch, {
+      name: "too-large.bin",
+      bytes: (async function* () { yield Buffer.alloc(25 * 1024 * 1024); yield Buffer.from("x"); })(),
+    }), /25 MiB upload limit/);
+    assert.deepEqual(readdirSync(join(A.dataDir, "upload-staging")), []);
+    assert.equal(A.s.list(ch).length, 2, "failed uploads must not create transfers");
+  });
+
   it("outgoing approval: awaiting_approval → approve → completed", async () => {
     const { A, B, ch, bus } = await setup();
     const { path } = makeFile(A, "a.txt");

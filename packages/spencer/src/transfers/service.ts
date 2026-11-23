@@ -3,12 +3,12 @@
  * (deps.enqueue, always in the same SQLite transaction as the state change); bytes go through croc.
  */
 import { chmodSync, existsSync, readdirSync, renameSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { open, stat } from "node:fs/promises";
 import { basename, isAbsolute, join } from "node:path";
 import { openFrom, random, randomId, sanitizeFileName, sealFor } from "@spencer/protocol";
 import type { FileBody } from "@spencer/protocol";
 import { TERMINAL_STATES } from "../contracts.ts";
-import type { Transfer, TransferDeps, TransferRequest, TransferService } from "../contracts.ts";
+import type { Transfer, TransferDeps, TransferRequest, TransferService, TransferUpload } from "../contracts.ts";
 import { CROC_CODE_RE, realCrocRunner } from "./croc.ts";
 import type { CrocExit, CrocJob, CrocRunner } from "./croc.ts";
 import { dirBytes, dirsFor, ensureDir, ensureDirAsync, findReceived, rmrf, sha256File, stageCopy } from "./files.ts";
@@ -88,10 +88,12 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
     });
   const backoff = options.backoffMs ?? defaultBackoff;
   const sweepIntervalMs = options.sweepIntervalMs ?? 30_000;
+  const maxUploadBytes = 25 * 1024 * 1024;
   const noRelayRetryMs = options.noRelayRetryMs ?? 5000;
   const watchdogMs = options.watchdogMs ?? 1000;
   const store = new TransferStore(deps.db);
   const dirs = dirsFor(deps.dataDir);
+  const uploadStagingDir = join(deps.dataDir, "upload-staging");
 
   const jobs = new Map<string, Running>();
   const linkTried = new Map<string, number>();
@@ -633,6 +635,17 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
     }
   }
 
+  function clearStaleUploadStaging(): void {
+    ensureDir(uploadStagingDir);
+    let names: string[];
+    try {
+      names = readdirSync(uploadStagingDir);
+    } catch {
+      return;
+    }
+    for (const name of names) rmrf(join(uploadStagingDir, name));
+  }
+
   function removeOrphanDirs(): void {
     const live = new Set(store.nonTerminal().map((r) => r.tid));
     for (const base of [dirs.outgoing, dirs.incoming]) {
@@ -684,6 +697,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
         /* best effort */
       }
       for (const d of [dirs.outgoing, dirs.incoming, dirs.quarantine]) ensureDir(d);
+      clearStaleUploadStaging();
       sweep();
       removeOrphanDirs();
       await recover();
@@ -797,6 +811,38 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
         );
       }
       return toApi(row);
+    },
+
+    async requestUpload(this: TransferService, ch: string, upload: TransferUpload) {
+      if (stopped) throw new TransferError("stopped", "transfer service is stopped");
+      if (typeof upload.name !== "string" || !upload.name.trim() || Buffer.byteLength(upload.name, "utf8") > 255) {
+        throw new TransferError("bad_request", "filename must be between 1 and 255 bytes");
+      }
+      const dir = join(uploadStagingDir, randomId());
+      const name = sanitizeFileName(upload.name);
+      const path = join(dir, name);
+      let handle: Awaited<ReturnType<typeof open>> | undefined;
+      let size = 0;
+      try {
+        await ensureDirAsync(dir);
+        handle = await open(path, "wx", 0o600);
+        for await (const chunk of upload.bytes) {
+          if (!(chunk instanceof Uint8Array)) throw new TransferError("bad_request", "upload contains invalid data");
+          size += chunk.byteLength;
+          if (size > maxUploadBytes) throw new TransferError("bad_request", "file exceeds the 25 MiB upload limit");
+          await handle.write(chunk);
+        }
+        await handle.close();
+        handle = undefined;
+        if (stopped) throw new TransferError("stopped", "transfer service is stopped");
+        return await this.request(ch, { path, to: upload.to, initiatedBy: "owner" });
+      } catch (e) {
+        if (e instanceof TransferError) throw e;
+        throw new TransferError("bad_request", `cannot stage uploaded file: ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        await handle?.close().catch(() => {});
+        rmrf(dir);
+      }
     },
 
     approve(tid) {

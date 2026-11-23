@@ -292,10 +292,19 @@ export interface TransferRequest {
   reason?: string;
 }
 
+export interface TransferUpload {
+  name: string;
+  /** Recipient identity; optional for direct channels. */
+  to?: string;
+  /** Bounded by the transfer service before the existing owner-initiated request path is entered. */
+  bytes: AsyncIterable<Uint8Array>;
+}
+
 export interface TransferService {
   start(): Promise<void>;
   stop(): Promise<void>;
   request(ch: string, req: TransferRequest): Promise<Transfer>;
+  requestUpload(ch: string, upload: TransferUpload): Promise<Transfer>;
   approve(tid: string): Transfer;
   deny(tid: string): Transfer;
   accept(tid: string): Transfer;
