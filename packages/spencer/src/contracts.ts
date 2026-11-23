@@ -410,6 +410,18 @@ export interface AgentService {
   /** Re-fetch the signed-in GitHub Copilot account's live model list. */
   refreshCopilotModels?(): Promise<ModelStatus>;
   copilotLogout?(): Promise<ModelStatus>;
+  /** The owner's SOUL.md (Spencer's personality), added to every conversation's instructions. */
+  soul?(): SoulStatus;
+  /** Save SOUL.md (empty text removes it); applies to every conversation right away. */
+  setSoul?(text: string): Promise<SoulStatus>;
+}
+
+/** `<dataDir>/SOUL.md`: who the owner's Spencer is (personality, values, boundaries, voice). */
+export interface SoulStatus {
+  /** Trimmed; "" when there is none. */
+  text: string;
+  /** Size limit in UTF-8 bytes. */
+  maxBytes: number;
 }
 
 /** A sign-in in progress ("Sign in with GitHub"), or how the last one ended. */

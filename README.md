@@ -137,6 +137,10 @@ Open the web UI and go to **Model & settings** in the sidebar to pick any provid
 - Any other built-in `pi-ai` provider id can also be configured in `config.json`, as well as `{"provider": "fake"}` (deterministic stub for tests/demos).
 - `"thinking": "off" | "minimal" | "low" | "medium" | "high"` sets the reasoning effort (sent as `reasoning_effort` to OpenAI-compatible endpoints).
 
+### Giving Spencer a soul (SOUL.md)
+
+Open **Soul** in the sidebar to write your Spencer's personality in Markdown: its core values, boundaries, and voice (a template gets you started). It is saved as `<dataDir>/SOUL.md` (mode 0600, up to 16 KiB) and added to the instructions of every conversation, yours and each channel's, as soon as you save. Peers notice the personality but channel agents never quote the text, and it never overrides the trust rules. If you edit the file directly, restart Spencer. The convention comes from OpenClaw's `SOUL.md`.
+
 `policy` settings (defaults shown):
 
 ```jsonc

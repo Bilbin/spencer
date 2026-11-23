@@ -164,6 +164,7 @@ const working = new Map<string, Extract<DaemonEvent, { type: "status" }>>();
 let ownerBusy = false;
 const people = new Map<string, Person>([me, bob, carol, dave].map((p) => [p.id, p]));
 
+let soul = "# Soul\n\n## Vibe\n- Warm, direct and concise. A little dry humor is welcome.";
 const mcp: McpServerStatus[] = [
   {
     name: "t3code",
@@ -802,6 +803,16 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     if (b && !c && method === "GET") return getTransfer(b);
   }
   if (a === "mcp" && method === "GET" && !b) return { servers: mcp };
+  if (a === "soul" && !b) {
+    if (method === "GET") return { text: soul, maxBytes: 16 * 1024 };
+    if (method === "PUT") {
+      const body = await readJson(req);
+      if (typeof body.text !== "string") throw new HttpError(400, "text must be a string");
+      if (Buffer.byteLength(body.text.trim(), "utf8") > 16 * 1024) throw new HttpError(400, "SOUL.md is limited to 16 KiB");
+      soul = body.text.trim();
+      return { text: soul, maxBytes: 16 * 1024 };
+    }
+  }
   if (a === "model" && !b) {
     if (method === "GET") return model;
     if (method === "PUT") {

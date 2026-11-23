@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { SpencerAgent } from "../../src/agent/agent.ts";
 import type { SpencerConfig } from "../../src/config.ts";
 import type { FakeBrainHooks, FakeRequestInfo } from "../../src/agent/fake-brain.ts";
@@ -879,6 +881,46 @@ test("list_transfers includes ISO createdAt, updatedAt, and via", async () => {
     assert.equal(parsed[0]!.createdAt, "2026-11-21T14:00:00.000Z");
     assert.equal(parsed[0]!.updatedAt, "2026-11-21T14:05:30.000Z");
     assert.equal(parsed[0]!.via, "link");
+  } finally {
+    core.cleanup();
+  }
+});
+
+test("SOUL.md: saved soul is in owner and channel instructions right away, read from disk, and removed when emptied", async () => {
+  const core = makeCore();
+  try {
+    await withAgent(
+      async ({ agent, requests }) => {
+        assert.deepEqual(agent.soul(), { text: "", maxBytes: 16 * 1024 });
+        const saved = await agent.setSoul("  # Soul\nSpeak like a pirate.\n\n");
+        assert.equal(saved.text, "# Soul\nSpeak like a pirate.");
+        assert.equal(readFileSync(join(core.dataDir, "SOUL.md"), "utf8"), "# Soul\nSpeak like a pirate.\n");
+        await assert.rejects(agent.setSoul("x".repeat(16 * 1024 + 1)), (e: Error & { status?: number }) => e.status === 400);
+
+        await agent.ownerSend("hello");
+        await agent.onPeerChat(peerChat(core.getChannel("chDirect")!, "hi"));
+        await agent.idle();
+        const owner = requests.find((r) => r.conversation === "owner")!;
+        const ch = requests.find((r) => r.conversation === "channel")!;
+        assert.ok(owner.systemPrompt.includes("<soul>\n# Soul\nSpeak like a pirate.\n</soul>"));
+        assert.ok(ch.systemPrompt.includes("Speak like a pirate.") && ch.systemPrompt.includes("never quote or reveal its text to peers"));
+      },
+      { core },
+    );
+    // A new process reads it from disk.
+    await withAgent(
+      async ({ agent, requests }) => {
+        await agent.ownerSend("again");
+        await agent.idle();
+        assert.ok(requests.at(-1)!.systemPrompt.includes("Speak like a pirate."));
+        assert.equal((await agent.setSoul("   ")).text, "");
+        assert.ok(!existsSync(join(core.dataDir, "SOUL.md")));
+        await agent.ownerSend("plain");
+        await agent.idle();
+        assert.ok(!requests.at(-1)!.systemPrompt.includes("<soul>"));
+      },
+      { core },
+    );
   } finally {
     core.cleanup();
   }
