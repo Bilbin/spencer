@@ -68,7 +68,8 @@ test("a second view cannot upload files already reserved by an in-flight Send", 
 test("partial failure retries only unsuccessful files, not successful transfers", async () => {
   const first = draft("first.txt");
   const second = draft("second.txt");
-  const drafts = [first, second];
+  const third = draft("third.txt");
+  const drafts = [first, second, third];
   const calls = [];
   let failSecond = true;
   const upload = async (item) => {
@@ -79,7 +80,8 @@ test("partial failure retries only unsuccessful files, not successful transfers"
 
   assert.equal(await uploadDraftBatch(drafts, controls(drafts, upload)), false);
   assert.deepEqual(calls, ["first.txt", "second.txt"]);
+  assert.deepEqual(drafts.map((item) => item.status), ["sent", "failed", "draft"]);
   failSecond = false;
   assert.equal(await uploadDraftBatch(drafts, controls(drafts, upload)), true);
-  assert.deepEqual(calls, ["first.txt", "second.txt", "second.txt"]);
+  assert.deepEqual(calls, ["first.txt", "second.txt", "second.txt", "third.txt"]);
 });

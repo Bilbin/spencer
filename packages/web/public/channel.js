@@ -542,9 +542,12 @@ export function channelView(main, chId) {
       }
       const batchOk = await uploadDraftBatch(drafts, {
         isPresent: (draft) => draftState.drafts.includes(draft),
-        onQueued: () => renderDrafts(),
+        onUpdate: () => renderDrafts(),
         upload: async (draft) => {
-          if (c.kind === "group") draftState.recipient = recipient;
+          if (c.kind === "group") {
+            draftState.recipient = recipient;
+            draftState.recipientLocked = true;
+          }
           draft.status = "uploading";
           draft.progress = 0;
           renderDrafts();
@@ -572,7 +575,10 @@ export function channelView(main, chId) {
       });
       if (!batchOk) return false;
       for (let i = drafts.length - 1; i >= 0; i--) if (drafts[i].status === "sent") drafts.splice(i, 1);
-      if (!drafts.length) draftState.recipient = null;
+      if (!drafts.length) {
+        draftState.recipient = null;
+        draftState.recipientLocked = false;
+      }
       renderDrafts();
       comp.sync();
     }
@@ -584,7 +590,7 @@ export function channelView(main, chId) {
   const completerHolder = { onKey: () => false };
   const fileBtn = h("button.icon-btn.attach", { type: "button", "aria-label": "Send file", title: "Send file", on: { click: () => getC() && sendFileModal(getC()) } }, icon("paperclip", 18));
   const draftBox = h("div.draft-attachments", { hidden: true, "aria-live": "polite" });
-  const draftState = attachmentDraftsByChannel.get(chId) ?? { drafts: [], recipient: null, renderers: new Set() };
+  const draftState = attachmentDraftsByChannel.get(chId) ?? { drafts: [], recipient: null, recipientLocked: false, renderers: new Set() };
   attachmentDraftsByChannel.set(chId, draftState);
   const drafts = draftState.drafts;
   const cAtCreation = getC();
@@ -595,15 +601,20 @@ export function channelView(main, chId) {
     h("option", { value: "" }, "Choose a member…"),
     ps.map((m) => h("option", { value: m.id }, `${m.name || m.id.slice(0, 8)} (${shortFp(m.fingerprint)})`)),
   ) : null;
-  if (recipientSelect) recipientSelect.value = draftState.recipient ?? "";
+  if (recipientSelect) {
+    recipientSelect.value = draftState.recipient ?? "";
+    recipientSelect.addEventListener("change", () => {
+      if (!draftState.recipientLocked) draftState.recipient = recipientSelect.value || null;
+    });
+  }
   const drawDrafts = () => {
     draftBox.hidden = drafts.length === 0;
-    if (recipientSelect) recipientSelect.disabled = !!draftState.recipient;
+    if (recipientSelect) recipientSelect.disabled = draftState.recipientLocked;
     const nodes = drafts.map((d) => h("div.draft-attachment", null,
       icon("file", 16),
       h("span.draft-name", { title: d.file.name }, d.file.name),
       h("span.draft-state", { title: d.error || "" }, d.status === "uploading" ? `Uploading ${d.progress ?? 0}%` : d.status === "queued" ? "Waiting to upload" : d.status === "failed" ? "Failed · Send to retry" : d.status === "sent" ? (d.transfer?.state === "awaiting_approval" ? "Waiting for approval" : "Offered") : "Ready to send"),
-      h("button.draft-remove", { type: "button", "aria-label": `Remove ${d.file.name}`, disabled: d.status === "uploading", on: { click: () => { const i = drafts.indexOf(d); if (i >= 0) drafts.splice(i, 1); if (!drafts.length) draftState.recipient = null; renderDrafts(); } } }, "×"),
+      h("button.draft-remove", { type: "button", "aria-label": `Remove ${d.file.name}`, disabled: d.status === "uploading", on: { click: () => { const i = drafts.indexOf(d); if (i >= 0) drafts.splice(i, 1); if (!drafts.length) { draftState.recipient = null; draftState.recipientLocked = false; } renderDrafts(); } } }, "×"),
     ));
     if (recipientSelect) nodes.push(recipientSelect);
     draftBox.replaceChildren(...nodes);
