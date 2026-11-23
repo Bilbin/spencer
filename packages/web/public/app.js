@@ -35,7 +35,7 @@ import { ownerView } from "./owner.js";
 import { channelView } from "./channel.js";
 import { transfersView } from "./transfers.js";
 import { mcpView } from "./mcp.js";
-import { modelView } from "./model.js";
+import { modelView, modelName } from "./model.js";
 import { inboxView } from "./inbox.js";
 import { inviteModal, joinModal } from "./invites.js";
 import { openSwitcher, shortcutsModal } from "./switcher.js";
@@ -175,7 +175,15 @@ function renderSidebar() {
       null,
       navItem({ name: "transfers" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("transfer", 16)), h("span.nav-name", null, "Transfers"), badge(pending, "need action", "attn")], { cls: "foot" }),
       navItem({ name: "mcp" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("plug", 16)), h("span.nav-name", null, "MCP servers"), mcpBad ? h("span.pdot.inline.bad", { role: "img", "aria-label": "a server has an error" }) : null], { cls: "foot" }),
-      navItem({ name: "model" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("spark", 16)), h("span.nav-name", null, "Model"), modelBad ? h("span.pdot.inline.bad", { role: "img", "aria-label": "no model is ready" }) : null], { cls: "foot" }),
+      navItem(
+        { name: "model" },
+        [
+          h("span.nav-glyph", { "aria-hidden": "true" }, icon("gear", 16)),
+          h("span.nav-text", null, h("span.nav-name", null, "Model & settings"), S.model ? h("span.nav-sub", null, modelName(S.model) ?? "Not configured") : null),
+          modelBad ? h("span.pdot.inline.bad", { role: "img", "aria-label": "no model is ready" }) : null,
+        ],
+        { cls: "foot" },
+      ),
       h("button.nav-item.foot", { type: "button", dataset: { key: "keys" }, on: { click: shortcutsModal } }, h("span.nav-glyph", { "aria-hidden": "true" }, icon("keyboard", 16)), h("span.nav-name", null, "Shortcuts"), h("kbd", null, "?")),
     ),
   ]);

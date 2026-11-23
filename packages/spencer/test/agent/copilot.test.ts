@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileCredentialStore } from "../../src/agent/credentials.ts";
 import { COPILOT_PROVIDER, copilotOAuth, githubClientId, isCopilotCredential, pickCopilotModel, type CopilotCredential } from "../../src/agent/copilot.ts";
+import { ModelManager } from "../../src/agent/model-manager.ts";
 import { setupModels } from "../../src/agent/models.ts";
-import { resolveConfig } from "../../src/config.ts";
+import { resolveConfig, type ModelConfig } from "../../src/config.ts";
+import type { CoreServices, DaemonEvent } from "../../src/contracts.ts";
 
 const cred = (over: Partial<CopilotCredential> = {}): CopilotCredential => ({
   type: "oauth",
@@ -93,4 +95,117 @@ test("model picked after sign-in", () => {
   assert.equal(pickCopilotModel(["claude-sonnet-9", "gpt-x"]), "claude-sonnet-9");
   assert.equal(pickCopilotModel(["gpt-x"]), "gpt-x");
   assert.equal(pickCopilotModel([]), undefined);
+});
+
+function makeModelManager(dir: string, initialModel: ModelConfig) {
+  let cfg = resolveConfig({ model: initialModel } as never);
+  const saved: ModelConfig[] = [];
+  const events: DaemonEvent[] = [];
+  let reloads = 0;
+  const core = {
+    dataDir: dir,
+    config: () => cfg,
+    saveModel: (m: ModelConfig) => {
+      cfg = { ...cfg, model: m };
+      saved.push(m);
+    },
+    events: { emit: (e: DaemonEvent) => events.push(e) },
+  } as unknown as CoreServices;
+  const mm = new ModelManager({
+    core,
+    name: () => "Spencer",
+    log: () => {},
+    onReload: async () => {
+      reloads++;
+    },
+  });
+  return { mm, saved, events, getReloads: () => reloads, getConfig: () => cfg };
+}
+
+test("ModelManager: lists providers, switches live with saved API key, and clears key", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spencer-mm-"));
+  const prevAnt = process.env.ANTHROPIC_API_KEY;
+  const prevOai = process.env.OPENAI_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  const { mm, saved, getReloads } = makeModelManager(dir, {
+    provider: "anthropic",
+    modelId: "claude-sonnet-5-5",
+    apiKeyEnv: "ANTHROPIC_API_KEY",
+  });
+  try {
+    await mm.init();
+    const initial = mm.status();
+    assert.equal(initial.ready, false);
+    const providerIds = initial.providers?.map((p) => p.id) ?? [];
+    assert.ok(providerIds.includes("github-copilot"));
+    assert.ok(providerIds.includes("anthropic"));
+    assert.ok(providerIds.includes("openai"));
+    assert.ok(providerIds.includes("google"));
+    assert.ok(providerIds.includes("openai-compatible"));
+    const antCatalog = initial.providers?.find((p) => p.id === "anthropic");
+    assert.ok((antCatalog?.models.length ?? 0) > 0);
+    const antModelId = antCatalog!.models[0].id;
+
+    // Save an API key via setModel: stored in secrets/credentials.json (0600), never in config.json.
+    const st1 = await mm.setModel("anthropic", antModelId, { apiKey: "sk-ant-test-123", thinking: "high" });
+    assert.equal(st1.ready, true);
+    assert.equal(st1.provider, "anthropic");
+    assert.equal(st1.modelId, antModelId);
+    assert.equal(st1.thinking, "high");
+    assert.equal(st1.providers?.find((p) => p.id === "anthropic")?.hasSavedKey, true);
+    assert.equal(getReloads(), 1);
+    assert.equal((saved.at(-1) as { apiKey?: string }).apiKey, undefined);
+    assert.equal(statSync(mm.credentials.file).mode & 0o777, 0o600);
+    assert.deepEqual(await mm.credentials.read("anthropic"), { type: "api_key", key: "sk-ant-test-123" });
+
+    // Switch to another built-in provider (OpenAI) with its own saved key.
+    const oaiModelId = initial.providers!.find((p) => p.id === "openai")!.models[0].id;
+    const st2 = await mm.setModel("openai", oaiModelId, { apiKey: "sk-oai-test-456", thinking: "off" });
+    assert.equal(st2.ready, true);
+    assert.equal(st2.provider, "openai");
+    assert.equal(st2.modelId, oaiModelId);
+    assert.equal(st2.thinking, undefined);
+    assert.equal(st2.providers?.find((p) => p.id === "openai")?.hasSavedKey, true);
+
+    // Clear the saved key: credentials removed and status drops to not ready (no env var).
+    const st3 = await mm.setModel("openai", oaiModelId, { clearApiKey: true });
+    assert.equal(st3.ready, false);
+    assert.equal(st3.providers?.find((p) => p.id === "openai")?.hasSavedKey, false);
+    assert.equal(await mm.credentials.read("openai"), undefined);
+
+    // Switch to openai-compatible (no key required for local servers like Ollama).
+    const st4 = await mm.setModel("openai-compatible", "llama3.1", {
+      baseUrl: "http://localhost:11434/v1/",
+      thinking: "low",
+    });
+    assert.equal(st4.ready, true);
+    assert.equal(st4.provider, "openai-compatible");
+    assert.equal(st4.modelId, "llama3.1");
+    assert.equal(st4.baseUrl, "http://localhost:11434/v1");
+    assert.equal(st4.thinking, "low");
+
+    // Validation errors.
+    await assert.rejects(() => mm.setModel("no-such-provider", "m"), /unknown model provider/);
+    await assert.rejects(() => mm.setModel("openai", "no-such-model"), /has no model/);
+    await assert.rejects(() => mm.setModel("openai", oaiModelId, { thinking: "ultra" as never }), /thinking must be/);
+    await assert.rejects(() => mm.setModel("openai-compatible", "llama3.1", { baseUrl: "ftp://bad" }), /http/);
+  } finally {
+    mm.stop();
+    if (prevAnt === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = prevAnt;
+    if (prevOai === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = prevOai;
+  }
+});
+
+test("ModelManager: openai-compatible requires baseUrl when switching from another provider", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spencer-mm-"));
+  const { mm } = makeModelManager(dir, { provider: "fake" });
+  try {
+    await mm.init();
+    await assert.rejects(() => mm.setModel("openai-compatible", "llama3.1"), /baseUrl is required/);
+  } finally {
+    mm.stop();
+  }
 });

@@ -402,8 +402,8 @@ export interface AgentService {
   modelStatus?(): ModelStatus | undefined;
   /** The same, after re-reading the GitHub CLI accounts. */
   refreshModelStatus?(): Promise<ModelStatus>;
-  /** Switch the model (persisted to config.json). */
-  setModel?(provider: string, modelId: string): Promise<ModelStatus>;
+  /** Switch the model (persisted to config.json; optional API key saved in secrets/credentials.json mode 0600). */
+  setModel?(provider: string, modelId: string, opts?: SetModelOptions): Promise<ModelStatus>;
   /** Start "Sign in with GitHub" for Copilot; progress arrives as `model` events. */
   startCopilotLogin?(): Promise<ModelStatus>;
   cancelCopilotLogin?(): ModelStatus;
@@ -421,13 +421,40 @@ export interface LoginState {
   error?: string;
 }
 
+export interface SetModelOptions {
+  thinking?: "off" | "minimal" | "low" | "medium" | "high";
+  /** Optional API key saved in `<dataDir>/secrets/credentials.json` (mode 0600; never written to config.json). */
+  apiKey?: string;
+  /** Delete any saved API key for this provider. */
+  clearApiKey?: boolean;
+  /** Optional env var name for the API key (saved in config.json). */
+  apiKeyEnv?: string;
+  /** Optional base URL (required for `openai-compatible`). */
+  baseUrl?: string;
+}
+
+export interface ModelProviderOption {
+  id: string;
+  name: string;
+  defaultApiKeyEnv?: string;
+  hasEnvKey?: boolean;
+  hasSavedKey?: boolean;
+  custom?: boolean;
+  models: { id: string; name: string; reasoning?: boolean }[];
+}
+
 export interface ModelStatus {
   provider?: string;
   modelId?: string;
+  thinking?: "off" | "minimal" | "low" | "medium" | "high";
+  baseUrl?: string;
+  apiKeyEnv?: string;
   /** A model is set up and signed in. */
   ready: boolean;
   /** Why not (never contains a secret). */
   error?: string;
+  /** Providers and model catalogs available in the UI picker. */
+  providers?: ModelProviderOption[];
   copilot: {
     connected: boolean;
     login?: string;

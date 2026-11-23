@@ -28,21 +28,28 @@ TypeScript runs directly on Node ≥ 22.18 through type stripping. There is no b
 
 ## Install
 
-### Single binary (no Node, no npm, no systemd)
-
-Download `spencer-<os>-<arch>` from the [releases](https://github.com/PJalv/spencer/releases) (or build it,
-below), make it executable and run it:
+### Quick install (Linux & macOS)
 
 ```sh
-chmod +x spencer-linux-x64 && ./spencer-linux-x64     # opens the web UI in your browser
-./spencer-linux-x64 --no-open --port 7420 --name "Alice's Spencer" --relay wss://hub.example.com/ws
-./spencer-linux-x64 service install                     # optional: start at login (systemd user unit / launchd)
-./spencer-linux-x64 service uninstall
+curl -fsSL https://raw.githubusercontent.com/PJalv/spencer/main/install.sh | sh
 ```
 
-The binary is Node 24 plus Spencer, its web UI and the pinned croc v10.3.1. On first start it unpacks the UI and
-croc into `~/.cache/spencer/<build>/` (macOS: `~/Library/Caches/spencer/`); data lives in `~/.local/share/spencer`
-as usual. Builds exist for `linux-x64`, `linux-arm64`, `darwin-arm64` and `darwin-x64`.
+This downloads the prebuilt binary for your OS/architecture from [GitHub Releases](https://github.com/PJalv/spencer/releases), verifies its SHA-256 checksum against `SHA256SUMS`, and installs it to `~/.local/bin/spencer` (override with `SPENCER_INSTALL_DIR` or `SPENCER_VERSION=v0.1.0`).
+
+Then run it:
+
+```sh
+spencer                                                               # opens the web UI in your browser
+spencer --no-open --port 7420 --name "Alice's Spencer" --relay wss://hub.example.com/ws
+spencer service install                                               # optional: start at login (systemd user unit / launchd)
+spencer service uninstall
+```
+
+### Single binary (manual download or build)
+
+You can also download `spencer-<os>-<arch>` directly from [Releases](https://github.com/PJalv/spencer/releases), `chmod +x` it, and run it.
+
+The binary bundles Node 24, Spencer, its web UI, the pinned `node-datachannel` native addon (for direct P2P file transfers), and pinned `croc` v10.3.1. On first start it unpacks them into `~/.cache/spencer/<build>/` (macOS: `~/Library/Caches/spencer/`); data lives in `~/.local/share/spencer` as usual. Builds exist for `linux-x64`, `linux-arm64`, `darwin-arm64`, and `darwin-x64`.
 
 Build them yourself (needs Node 24.12.0, the version embedded in the binary):
 
@@ -123,23 +130,17 @@ Direct file transfer settings and their defaults:
 
 Chat-only hubs attempt direct transfers at any size. See [the direct link design](docs/P2P.md) for details.
 
-### GitHub Copilot (no API key)
+### Picking a model & GitHub Copilot
 
-If you have GitHub Copilot (Pro, Pro+, Business or Enterprise), Spencer can think with it. Open the web UI, go to **Model**, and either:
+Open the web UI and go to **Model & settings** in the sidebar to pick any provider, model, and thinking level live (no restart needed):
 
-- **Sign in with GitHub**: Spencer shows a short code; enter it at github.com/login/device. This needs Spencer's GitHub OAuth app id in config.json, `"auth": {"githubClientId": "Ov23…"}` (or `SPENCER_GITHUB_CLIENT_ID`). To register one: GitHub → Settings → Developer settings → OAuth Apps → New OAuth App, then tick *Enable Device Flow*. No client secret is needed.
-- **Reuse your GitHub CLI login**: if `gh auth login` is done on this machine, pick the account.
-
-Spencer then talks to Copilot's API directly with that GitHub token, identifying as Spencer (the flow follows OpenCode's). The sign-in is saved in `<dataDir>/secrets/credentials.json` (mode 0600), and you can switch Copilot models on the same page without restarting. In config.json it shows up as `"model": {"provider": "github-copilot", "modelId": "claude-sonnet-5.5", "thinking": "medium"}`.
-
-Other model options:
-
-- Any built-in `pi-ai` provider id (`openai`, `openrouter`, `google`, `xai`, `groq`, …) with `modelId` and `apiKeyEnv`.
-- `{"provider": "openai-compatible", "baseUrl": "http://localhost:11434/v1", "modelId": "llama3.1"}` for Ollama, vLLM, LM Studio, or a proxy.
-- `{"provider": "fake"}`, a deterministic stub used in tests and offline demos.
-- `"thinking": "off" | "minimal" | "low" | "medium" | "high"` on any model sets the reasoning effort (sent as `reasoning_effort` to OpenAI-compatible endpoints).
-
-Keys are read from the environment variable you name in `apiKeyEnv`. Put the key in the environment, not in the file.
+- **GitHub Copilot (no API key):** if you have GitHub Copilot (Pro, Pro+, Business or Enterprise), click **Model & settings** and either:
+  - **Reuse your GitHub CLI login:** if `gh auth login` is done on this machine, click your `@account` button.
+  - **Sign in with GitHub:** Spencer shows a short code to enter at `github.com/login/device`. This needs a GitHub OAuth App client id in `config.json`, `"auth": {"githubClientId": "Ov23…"}` (or `SPENCER_GITHUB_CLIENT_ID`). To register one: GitHub → Settings → Developer settings → OAuth Apps → New OAuth App, then tick *Enable Device Flow* (no client secret needed).
+  - Spencer talks to Copilot's API directly with that GitHub token, identifying as Spencer (following OpenCode's flow), and saves the sign-in in `<dataDir>/secrets/credentials.json` (mode 0600).
+- **API-key providers & local servers:** pick Anthropic, OpenAI, Google Gemini, OpenRouter, xAI, Groq, DeepSeek, or an OpenAI-compatible server (Ollama, vLLM, LM Studio) right in the **Model picker**. You can either provide the key via its environment variable (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`) or paste it into the UI (saved in `<dataDir>/secrets/credentials.json`, mode 0600—never in `config.json`).
+- Any other built-in `pi-ai` provider id can also be configured in `config.json`, as well as `{"provider": "fake"}` (deterministic stub for tests/demos).
+- `"thinking": "off" | "minimal" | "low" | "medium" | "high"` sets the reasoning effort (sent as `reasoning_effort` to OpenAI-compatible endpoints).
 
 `policy` settings (defaults shown):
 

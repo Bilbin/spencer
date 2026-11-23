@@ -40,11 +40,48 @@ const COPILOT_MODELS = [
   { id: "gpt-6.1-terra", name: "GPT-6.1 Terra" },
   { id: "grok-4.7", name: "Grok 4.7" },
 ];
+const MOCK_PROVIDERS = () => [
+  { id: "github-copilot", name: "GitHub Copilot", models: model.copilot.connected ? COPILOT_MODELS : [] },
+  {
+    id: "anthropic",
+    name: "Anthropic",
+    defaultApiKeyEnv: "ANTHROPIC_API_KEY",
+    hasEnvKey: false,
+    hasSavedKey: mockSavedKeys.has("anthropic"),
+    models: [
+      { id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", reasoning: true },
+      { id: "claude-opus-5-5", name: "Claude Opus 5.5", reasoning: true },
+      { id: "claude-haiku-5-5", name: "Claude Haiku 5.5" },
+    ],
+  },
+  {
+    id: "openai",
+    name: "OpenAI",
+    defaultApiKeyEnv: "OPENAI_API_KEY",
+    hasEnvKey: true,
+    hasSavedKey: mockSavedKeys.has("openai"),
+    models: [
+      { id: "gpt-6.1-terra", name: "GPT-6.1 Terra", reasoning: true },
+      { id: "gpt-5.4", name: "GPT-5.4", reasoning: true },
+    ],
+  },
+  {
+    id: "google",
+    name: "Google Gemini",
+    defaultApiKeyEnv: "GEMINI_API_KEY",
+    hasEnvKey: false,
+    hasSavedKey: mockSavedKeys.has("google"),
+    models: [{ id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", reasoning: true }],
+  },
+  { id: "openai-compatible", name: "OpenAI-compatible (Ollama / vLLM / local)", custom: true, hasSavedKey: mockSavedKeys.has("openai-compatible"), models: [] },
+];
+const mockSavedKeys = new Set<string>();
 const model: ModelStatus =
   process.env.MOCK_MODEL === "none"
     ? {
         provider: "anthropic",
         modelId: "claude-sonnet-5-5",
+        apiKeyEnv: "ANTHROPIC_API_KEY",
         ready: false,
         error: "environment variable ANTHROPIC_API_KEY (model.apiKeyEnv) is not set",
         copilot: { connected: false, models: [], deviceLogin: true, ghAccounts: [{ login: "alice", active: true }, { login: "alice-work", active: false }] },
@@ -52,15 +89,21 @@ const model: ModelStatus =
     : {
         provider: "github-copilot",
         modelId: "claude-sonnet-5.5",
+        thinking: "medium",
         ready: true,
         copilot: { connected: true, login: "alice", plan: "individual", via: "device", models: COPILOT_MODELS, deviceLogin: true, ghAccounts: [{ login: "alice", active: true }] },
       };
+model.providers = MOCK_PROVIDERS();
+function syncMockProviders() {
+  model.providers = MOCK_PROVIDERS();
+}
 let signInTimer: ReturnType<typeof setTimeout> | undefined;
 function copilotConnected(login: string, via: "device" | "gh-cli") {
   clearTimeout(signInTimer);
   const { signIn: _s, ...rest } = model.copilot;
   model.copilot = { ...rest, connected: true, login, plan: "individual", via, models: COPILOT_MODELS };
-  if (!model.ready) Object.assign(model, { provider: "github-copilot", modelId: "claude-sonnet-5.5", ready: true, error: undefined });
+  if (!model.ready) Object.assign(model, { provider: "github-copilot", modelId: "claude-sonnet-5.5", thinking: "medium", ready: true, error: undefined });
+  syncMockProviders();
 }
 const TOKEN = process.env.SPENCER_TOKEN ?? randomBytes(16).toString("hex");
 const PUBLIC = fileURLToPath(new URL("../public/", import.meta.url));
@@ -763,9 +806,32 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     if (method === "GET") return model;
     if (method === "PUT") {
       const body = await readJson(req);
-      if (body.provider !== "github-copilot" || !COPILOT_MODELS.some((m) => m.id === body.modelId)) throw new HttpError(400, "unknown model");
-      if (!model.copilot.connected) throw new HttpError(409, "Sign in to GitHub Copilot first.");
-      Object.assign(model, { provider: "github-copilot", modelId: body.modelId, ready: true, error: undefined });
+      const provId = typeof body.provider === "string" ? body.provider.trim() : "";
+      const modelId = typeof body.modelId === "string" ? body.modelId.trim() : "";
+      const prov = MOCK_PROVIDERS().find((p) => p.id === provId);
+      if (!prov || !modelId) throw new HttpError(400, "unknown provider or model");
+      if (provId === "github-copilot") {
+        if (!model.copilot.connected) throw new HttpError(409, "Sign in to GitHub Copilot first.");
+        if (!COPILOT_MODELS.some((m) => m.id === modelId)) throw new HttpError(400, "unknown model");
+      } else if (provId === "openai-compatible") {
+        if (!body.baseUrl && !model.baseUrl) throw new HttpError(400, 'baseUrl is required for "openai-compatible"');
+      } else if (!prov.models.some((m) => m.id === modelId)) {
+        throw new HttpError(400, "unknown model");
+      }
+      if (body.clearApiKey) mockSavedKeys.delete(provId);
+      else if (typeof body.apiKey === "string" && body.apiKey.trim()) mockSavedKeys.add(provId);
+      syncMockProviders();
+      const updatedProv = model.providers?.find((p) => p.id === provId);
+      const ready = provId === "github-copilot" ? model.copilot.connected : provId === "openai-compatible" ? true : Boolean(updatedProv?.hasEnvKey || updatedProv?.hasSavedKey);
+      Object.assign(model, {
+        provider: provId,
+        modelId,
+        thinking: typeof body.thinking === "string" && body.thinking !== "off" ? body.thinking : provId === "github-copilot" ? "medium" : undefined,
+        baseUrl: provId === "openai-compatible" ? String(body.baseUrl ?? model.baseUrl) : undefined,
+        apiKeyEnv: updatedProv?.defaultApiKeyEnv,
+        ready,
+        error: ready ? undefined : `environment variable ${updatedProv?.defaultApiKeyEnv ?? "API_KEY"} is not set`,
+      });
       emit({ type: "model", model });
       return model;
     }
@@ -788,7 +854,10 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       copilotConnected(String(body.login), "gh-cli");
     } else if (c === "logout") {
       model.copilot = { connected: false, models: [], deviceLogin: true, ghAccounts: [{ login: "alice", active: true }, { login: "alice-work", active: false }] };
-      Object.assign(model, { ready: false, error: "GitHub Copilot is not connected yet: sign in on the Model page" });
+      syncMockProviders();
+      if (model.provider === "github-copilot") {
+        Object.assign(model, { ready: false, error: "GitHub Copilot is not connected yet: sign in on the Model page" });
+      }
     } else throw new HttpError(404, "not found");
     emit({ type: "model", model });
     return model;

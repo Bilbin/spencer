@@ -412,7 +412,28 @@ export class ApiServer {
       if (method === "PUT") {
         const body = await readJson(req);
         if (typeof body.provider !== "string" || typeof body.modelId !== "string") throw new HttpError(400, "provider and modelId are required");
-        return await agent.setModel(body.provider, body.modelId);
+        const opts: import("../contracts.ts").SetModelOptions = {};
+        if (body.thinking !== undefined) {
+          if (typeof body.thinking !== "string") throw new HttpError(400, "thinking must be a string");
+          opts.thinking = body.thinking as import("../contracts.ts").SetModelOptions["thinking"];
+        }
+        if (body.apiKey !== undefined) {
+          if (typeof body.apiKey !== "string") throw new HttpError(400, "apiKey must be a string");
+          opts.apiKey = body.apiKey;
+        }
+        if (body.clearApiKey !== undefined) {
+          if (typeof body.clearApiKey !== "boolean") throw new HttpError(400, "clearApiKey must be a boolean");
+          opts.clearApiKey = body.clearApiKey;
+        }
+        if (body.apiKeyEnv !== undefined) {
+          if (typeof body.apiKeyEnv !== "string") throw new HttpError(400, "apiKeyEnv must be a string");
+          opts.apiKeyEnv = body.apiKeyEnv;
+        }
+        if (body.baseUrl !== undefined) {
+          if (typeof body.baseUrl !== "string") throw new HttpError(400, "baseUrl must be a string");
+          opts.baseUrl = body.baseUrl;
+        }
+        return await agent.setModel(body.provider, body.modelId, opts);
       }
     }
     if ((m = /^\/api\/auth\/github-copilot\/(login|cancel|gh|logout)$/.exec(p)) && method === "POST") {

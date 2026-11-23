@@ -1,4 +1,4 @@
-// Model view: which model Spencer thinks with, and signing in to GitHub Copilot.
+// Model & settings view: pick any provider/model/thinking effort live, and sign in to GitHub Copilot.
 import { h, icon, copyText } from "./dom.js";
 import { api, attempt, toast } from "./api.js";
 import { S, on, setModel } from "./state.js";
@@ -7,13 +7,33 @@ import { viewHeader } from "./common.js";
 const PLAN = { individual: "Copilot Pro", individual_pro: "Copilot Pro+", business: "Copilot Business", enterprise: "Copilot Enterprise", free: "Copilot Free" };
 const planName = (p) => PLAN[p] ?? (p ? `Copilot ${p}` : "Copilot");
 
-/** "claude-sonnet-5.5" → the catalog's display name, when known. */
+const PROVIDER = {
+  "github-copilot": "GitHub Copilot",
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  google: "Google Gemini",
+  openrouter: "OpenRouter",
+  xai: "xAI",
+  groq: "Groq",
+  deepseek: "DeepSeek",
+  "openai-compatible": "OpenAI-compatible server",
+  fake: "Test model",
+};
+
+const THINKING_OPTIONS = [
+  ["off", "Off"],
+  ["minimal", "Minimal"],
+  ["low", "Low"],
+  ["medium", "Medium"],
+  ["high", "High"],
+];
+
+/** Model id → display name from the active provider's catalog, when known. */
 export function modelName(status = S.model) {
   if (!status?.modelId) return null;
-  return status.copilot?.models?.find((m) => m.id === status.modelId)?.name ?? status.modelId;
+  const prov = status.providers?.find((p) => p.id === status.provider);
+  return prov?.models?.find((m) => m.id === status.modelId)?.name ?? status.copilot?.models?.find((m) => m.id === status.modelId)?.name ?? status.modelId;
 }
-
-const PROVIDER = { "github-copilot": "GitHub Copilot", anthropic: "Anthropic", openai: "OpenAI", openrouter: "OpenRouter", google: "Google", "openai-compatible": "OpenAI-compatible server", fake: "Test model" };
 
 function mmss(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -22,9 +42,13 @@ function mmss(ms) {
 
 export function modelView(main) {
   const now = h("section.model-now", { "aria-live": "polite" });
+  const picker = h("section.model-card", { "aria-labelledby": "picker-title" });
   const copilot = h("section.model-card", { "aria-labelledby": "copilot-title" });
   main.append(
-    viewHeader([h("span.title-icon", { "aria-hidden": "true" }, icon("spark", 18)), h("div.title-stack", null, h("h1", null, "Model"), h("span.subtitle", null, "What your Spencer thinks with"))]),
+    viewHeader([
+      h("span.title-icon", { "aria-hidden": "true" }, icon("spark", 18)),
+      h("div.title-stack", null, h("h1", null, "Model & settings"), h("span.subtitle", null, "Pick a provider, model, and thinking level")),
+    ]),
     h(
       "div.page",
       null,
@@ -32,39 +56,275 @@ export function modelView(main) {
         "div.page-body",
         null,
         now,
+        h("h2.section-title", { id: "picker-title" }, "Model picker"),
+        picker,
         h("h2.section-title", { id: "copilot-title" }, "GitHub Copilot"),
         copilot,
-        h("p.model-foot", null, "Anthropic, OpenAI, OpenRouter and local servers are set under ", h("code", null, "model"), " in Spencer's config.json."),
+        h("p.model-foot", null, "Changes take effect immediately without restarting Spencer. Saved API keys live in ", h("code", null, "secrets/credentials.json"), " (mode 0600), never in config.json."),
       ),
     ),
   );
 
   let busy = false;
   let tick = null;
-  const act = async (fn) => {
+  // Draft picker state so background model events don't wipe what the user is typing.
+  const draft = { provider: "", modelId: "", filter: "", thinking: "off", baseUrl: "", apiKey: "", initialized: false, lastKey: "" };
+
+  const syncDraftFromModel = (m, force = false) => {
+    if (!m) return;
+    const key = `${m.provider ?? ""}|${m.modelId ?? ""}|${m.thinking ?? ""}|${m.baseUrl ?? ""}|${m.copilot?.connected ? "1" : "0"}`;
+    if (!force && draft.initialized && draft.lastKey === key) return;
+    const providers = m.providers ?? [];
+    const fallbackProv = m.copilot?.connected ? "github-copilot" : (providers[0]?.id ?? "anthropic");
+    draft.provider = providers.some((p) => p.id === m.provider) ? m.provider : fallbackProv;
+    const prov = providers.find((p) => p.id === draft.provider);
+    if (draft.provider === m.provider && m.modelId) draft.modelId = m.modelId;
+    else draft.modelId = prov?.models?.[0]?.id ?? "";
+    draft.thinking = m.thinking ?? (draft.provider === "github-copilot" ? "medium" : "off");
+    draft.baseUrl = m.baseUrl ?? "";
+    draft.apiKey = "";
+    draft.filter = "";
+    draft.initialized = true;
+    draft.lastKey = key;
+  };
+
+  const act = async (fn, successMsg) => {
     if (busy) return;
     busy = true;
     render();
     const r = await attempt(fn);
     busy = false;
-    if (r && typeof r === "object" && "copilot" in r) setModel(r);
-    else render();
+    if (r && typeof r === "object" && "copilot" in r) {
+      setModel(r);
+      syncDraftFromModel(r, true);
+      if (successMsg) toast(successMsg, "info");
+    } else render();
     return r;
   };
 
   const renderNow = (m) => {
     if (!m) return now.replaceChildren(h("p.muted", null, "Loading…"));
     const name = modelName(m);
+    const provName = m.providers?.find((p) => p.id === m.provider)?.name ?? PROVIDER[m.provider] ?? m.provider;
     now.replaceChildren(
       h(`span.dot.${m.ready ? "connected" : "error"}`, { "aria-hidden": "true" }),
       h(
         "div.model-now-text",
         null,
         h("div.model-now-name", null, name ?? "No model"),
-        h("div.model-now-sub", null, m.provider ? `via ${PROVIDER[m.provider] ?? m.provider}` : null, m.ready ? h("span.pill.ok", null, "Ready") : h("span.pill.bad", null, "Not ready")),
+        h(
+          "div.model-now-sub",
+          null,
+          provName ? `via ${provName}` : null,
+          m.thinking && m.thinking !== "off" ? h("span.pill.muted", null, `thinking: ${m.thinking}`) : null,
+          m.ready ? h("span.pill.ok", null, "Ready") : h("span.pill.bad", null, "Not ready"),
+        ),
         !m.ready && m.error ? h("p.model-error", null, m.error.replace(/^./, (c) => c.toUpperCase())) : null,
       ),
     );
+  };
+
+  const renderPicker = (m) => {
+    const providers = m.providers ?? [];
+    if (!providers.length) {
+      picker.replaceChildren(h("p.muted", null, "No model providers available."));
+      return;
+    }
+    if (!providers.some((p) => p.id === draft.provider)) draft.provider = providers[0].id;
+    const prov = providers.find((p) => p.id === draft.provider) ?? providers[0];
+    const isCopilot = prov.id === "github-copilot";
+    const isCustom = !!prov.custom;
+
+    const providerSelect = h(
+      "select.input.model-select",
+      {
+        "aria-label": "Provider",
+        disabled: busy,
+        on: {
+          change: (e) => {
+            draft.provider = e.target.value;
+            draft.filter = "";
+            draft.apiKey = "";
+            const nextProv = providers.find((p) => p.id === draft.provider);
+            if (draft.provider === m.provider && m.modelId) draft.modelId = m.modelId;
+            else draft.modelId = nextProv?.models?.[0]?.id ?? "";
+            if (draft.provider === "github-copilot" && draft.thinking === "off") draft.thinking = "medium";
+            if (draft.provider === "openai-compatible" && !draft.baseUrl) draft.baseUrl = m.baseUrl ?? "http://localhost:11434/v1";
+            renderPicker(m);
+          },
+        },
+      },
+      providers.map((p) => {
+        const tag =
+          p.id === "github-copilot"
+            ? m.copilot?.connected
+              ? " (connected)"
+              : ""
+            : p.hasEnvKey || p.hasSavedKey
+              ? " (key ready)"
+              : "";
+        return h("option", { value: p.id, selected: p.id === prov.id }, `${p.name}${tag}`);
+      }),
+    );
+
+    const thinkingSelect = h(
+      "select.input.model-select",
+      {
+        "aria-label": "Thinking effort",
+        disabled: busy,
+        on: { change: (e) => (draft.thinking = e.target.value) },
+      },
+      THINKING_OPTIONS.filter(([v]) => !isCopilot || v !== "off").map(([v, label]) =>
+        h("option", { value: v, selected: draft.thinking === v || (isCopilot && draft.thinking === "off" && v === "medium") }, label),
+      ),
+    );
+
+    let modelField;
+    let extraFields = [];
+    let canSave = true;
+
+    if (isCustom) {
+      const urlInput = h("input.input.mono", {
+        type: "url",
+        placeholder: "http://localhost:11434/v1",
+        value: draft.baseUrl,
+        disabled: busy,
+        on: { input: (e) => (draft.baseUrl = e.target.value) },
+      });
+      const idInput = h("input.input.mono", {
+        type: "text",
+        placeholder: "e.g. llama3.1",
+        value: draft.modelId,
+        disabled: busy,
+        on: { input: (e) => (draft.modelId = e.target.value) },
+      });
+      modelField = h("label.model-pick-label", null, "Model ID", idInput);
+      extraFields.push(h("label.model-pick-label", null, "Base URL", urlInput));
+    } else if (isCopilot && !m.copilot?.connected) {
+      canSave = false;
+      modelField = h("p.signin-note", null, "Sign in to GitHub Copilot below to see and pick your Copilot models.");
+    } else {
+      const allModels = prov.models ?? [];
+      const q = draft.filter.trim().toLowerCase();
+      const filtered = q ? allModels.filter((x) => x.id.toLowerCase().includes(q) || x.name.toLowerCase().includes(q)) : allModels;
+      if (filtered.length && !filtered.some((x) => x.id === draft.modelId)) draft.modelId = filtered[0].id;
+
+      const modelSelect = h(
+        "select.input.model-select",
+        {
+          "aria-label": "Model",
+          disabled: busy || !filtered.length,
+          on: { change: (e) => (draft.modelId = e.target.value) },
+        },
+        filtered.length
+          ? filtered.map((x) => h("option", { value: x.id, selected: x.id === draft.modelId }, x.name === x.id ? x.id : `${x.name} (${x.id})`))
+          : [h("option", { value: "" }, q ? "No matching models" : "No models available")],
+      );
+
+      if (allModels.length > 15) {
+        const filterInput = h("input.input.model-filter", {
+          type: "search",
+          placeholder: `Filter ${allModels.length} models…`,
+          value: draft.filter,
+          disabled: busy,
+          on: {
+            input: (e) => {
+              draft.filter = e.target.value;
+              const pos = e.target.selectionStart;
+              renderPicker(m);
+              const again = picker.querySelector(".model-filter");
+              if (again) {
+                again.focus();
+                if (pos !== null) again.setSelectionRange(pos, pos);
+              }
+            },
+          },
+        });
+        modelField = h("div.model-pick-stack", null, h("label.model-pick-label", null, "Model", filterInput, modelSelect));
+      } else {
+        modelField = h("label.model-pick-label", null, "Model", modelSelect);
+      }
+      if (!filtered.length) canSave = false;
+    }
+
+    if (!isCopilot) {
+      const envName = (m.provider === prov.id && m.apiKeyEnv) || prov.defaultApiKeyEnv;
+      const keyStatus = prov.hasSavedKey
+        ? "API key saved locally (mode 0600)."
+        : prov.hasEnvKey && envName
+          ? `Using ${envName} from environment.`
+          : isCustom
+            ? "Optional for local servers like Ollama."
+            : envName
+              ? `No key found in ${envName}. Paste one below or set ${envName} in the environment.`
+              : "Paste an API key below if required.";
+      const keyInput = h("input.input.mono", {
+        type: "password",
+        autocomplete: "off",
+        placeholder: prov.hasSavedKey ? "Enter a new key to replace saved key…" : "Paste API key…",
+        value: draft.apiKey,
+        disabled: busy,
+        on: { input: (e) => (draft.apiKey = e.target.value) },
+      });
+      const clearBtn = prov.hasSavedKey
+        ? h(
+            "button.btn.sm.ghost",
+            {
+              type: "button",
+              disabled: busy,
+              on: {
+                click: () => {
+                  const id = draft.modelId.trim() || prov.models?.[0]?.id || m.modelId || "";
+                  if (!id) return toast("Pick a model first");
+                  void act(
+                    () =>
+                      api.setModel(prov.id, id, {
+                        clearApiKey: true,
+                        ...(isCustom ? { baseUrl: draft.baseUrl.trim() || m.baseUrl || "http://localhost:11434/v1" } : {}),
+                      }),
+                    "Saved API key removed",
+                  );
+                },
+              },
+            },
+            "Remove saved key",
+          )
+        : null;
+      extraFields.push(
+        h(
+          "div.model-key-block",
+          null,
+          h("label.model-pick-label", null, isCustom ? "API key (optional)" : "API key", keyInput),
+          h("div.model-key-status", null, h("span", null, keyStatus), clearBtn),
+        ),
+      );
+    }
+
+    const saveBtn = h("button.btn.primary", { type: "submit", disabled: busy || !canSave }, "Save & switch");
+    const form = h(
+      "form.model-form",
+      {
+        on: {
+          submit: (e) => {
+            e.preventDefault();
+            const mid = draft.modelId.trim();
+            if (!mid) return toast("Pick or enter a model ID");
+            if (isCustom && !draft.baseUrl.trim()) return toast("Base URL is required for OpenAI-compatible servers");
+            const opts = {
+              thinking: isCopilot && draft.thinking === "off" ? "medium" : draft.thinking,
+              ...(draft.apiKey.trim() ? { apiKey: draft.apiKey.trim() } : {}),
+              ...(isCustom ? { baseUrl: draft.baseUrl.trim() } : {}),
+            };
+            void act(() => api.setModel(prov.id, mid, opts), `Switched model to ${mid}`);
+          },
+        },
+      },
+      h("div.model-row", null, h("label.model-pick-label", null, "Provider", providerSelect), h("label.model-pick-label.sm", null, "Thinking", thinkingSelect)),
+      modelField,
+      ...extraFields,
+      h("div.model-actions", null, saveBtn),
+    );
+    picker.replaceChildren(form);
   };
 
   const signInBox = (c) => {
@@ -127,7 +387,7 @@ export function modelView(main) {
               c.ghAccounts.map((a) =>
                 h(
                   "button.btn.sm",
-                  { type: "button", disabled: busy, on: { click: () => act(() => api.copilotGh(a.login)) } },
+                  { type: "button", disabled: busy, on: { click: () => act(() => api.copilotGh(a.login), `Connected GitHub Copilot as @${a.login}`) } },
                   icon("terminal", 14),
                   `@${a.login}`,
                   a.active ? h("span.muted", null, " (active)") : null,
@@ -144,17 +404,6 @@ export function modelView(main) {
   const connectedBox = (m) => {
     const c = m.copilot;
     const onCopilot = m.provider === "github-copilot";
-    const select = h(
-      "select.input.model-select",
-      { "aria-label": "Copilot model", disabled: busy },
-      c.models.map((x) => h("option", { value: x.id, selected: onCopilot && x.id === m.modelId }, x.name)),
-    );
-    if (!onCopilot && !select.value) select.selectedIndex = 0;
-    const use = h("button.btn.primary", { type: "button", disabled: busy }, onCopilot ? "Switch" : "Use Copilot");
-    const sync = () => (use.disabled = busy || (onCopilot && select.value === m.modelId));
-    select.addEventListener("change", sync);
-    use.addEventListener("click", () => act(() => api.setModel("github-copilot", select.value)));
-    sync();
     return h(
       "div.connected",
       null,
@@ -165,18 +414,43 @@ export function modelView(main) {
         h("span.account-name", null, `@${c.login}`),
         h("span.pill.muted", null, planName(c.plan)),
         c.via === "gh-cli" ? h("span.account-via", null, "via GitHub CLI") : null,
-        h("button.btn.sm.ghost.account-out", { type: "button", disabled: busy, on: { click: () => act(() => api.copilotLogout()) } }, "Sign out"),
+        h("button.btn.sm.ghost.account-out", { type: "button", disabled: busy, on: { click: () => act(() => api.copilotLogout(), "Signed out of GitHub Copilot") } }, "Sign out"),
       ),
-      c.models.length
-        ? h("div.model-pick", null, h("label.model-pick-label", null, "Model", select), use)
-        : h("p.model-error", null, "Copilot lists no models for this account."),
+      !onCopilot && c.models.length
+        ? h(
+            "div.signin-actions",
+            null,
+            h(
+              "button.btn.sm",
+              {
+                type: "button",
+                disabled: busy,
+                on: {
+                  click: () => {
+                    draft.provider = "github-copilot";
+                    draft.modelId = c.models[0].id;
+                    if (draft.thinking === "off") draft.thinking = "medium";
+                    renderPicker(m);
+                  },
+                },
+              },
+              "Select Copilot in picker above",
+            ),
+          )
+        : null,
     );
   };
 
   const render = () => {
     const m = S.model;
     renderNow(m);
-    if (!m) return copilot.replaceChildren();
+    if (!m) {
+      picker.replaceChildren();
+      copilot.replaceChildren();
+      return;
+    }
+    syncDraftFromModel(m);
+    renderPicker(m);
     copilot.replaceChildren(m.copilot.connected ? connectedBox(m) : signInBox(m.copilot));
   };
 

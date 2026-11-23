@@ -903,8 +903,8 @@ export class SpencerAgent implements AgentService {
     await this.mm().refreshGh();
     return this.mm().status();
   }
-  setModel(provider: string, modelId: string): Promise<ModelStatus> {
-    return this.mm().setModel(provider, modelId);
+  setModel(provider: string, modelId: string, opts?: import("../contracts.ts").SetModelOptions): Promise<ModelStatus> {
+    return this.mm().setModel(provider, modelId, opts);
   }
   startCopilotLogin(): Promise<ModelStatus> {
     return this.mm().startCopilotLogin();

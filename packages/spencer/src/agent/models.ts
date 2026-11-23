@@ -39,12 +39,29 @@ export const FAKE_PROVIDER = "spencer-fake";
 export const FAKE_MODEL = "fake";
 const PROVIDER_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
 
+/** Curated providers shown in the UI model picker, in display order, with default API-key env vars. */
+export const PICKER_PROVIDERS: readonly { id: string; name: string; defaultApiKeyEnv?: string; custom?: boolean }[] = [
+  { id: COPILOT_PROVIDER, name: "GitHub Copilot" },
+  { id: "anthropic", name: "Anthropic", defaultApiKeyEnv: "ANTHROPIC_API_KEY" },
+  { id: "openai", name: "OpenAI", defaultApiKeyEnv: "OPENAI_API_KEY" },
+  { id: "google", name: "Google Gemini", defaultApiKeyEnv: "GEMINI_API_KEY" },
+  { id: "openrouter", name: "OpenRouter", defaultApiKeyEnv: "OPENROUTER_API_KEY" },
+  { id: "xai", name: "xAI", defaultApiKeyEnv: "XAI_API_KEY" },
+  { id: "groq", name: "Groq", defaultApiKeyEnv: "GROQ_API_KEY" },
+  { id: "deepseek", name: "DeepSeek", defaultApiKeyEnv: "DEEPSEEK_API_KEY" },
+  { id: "openai-compatible", name: "OpenAI-compatible (Ollama / vLLM / local)", custom: true },
+];
+
+export function defaultApiKeyEnvFor(providerId: string): string | undefined {
+  return PICKER_PROVIDERS.find((p) => p.id === providerId)?.defaultApiKeyEnv;
+}
+
 export async function setupModels(
   cfg: ModelConfig,
   opts: {
     name: () => string;
     fakeHooks?: FakeBrainHooks;
-    /** Saved sign-ins (OAuth providers). */
+    /** Saved sign-ins (OAuth credentials and UI-saved API keys). */
     credentials?: CredentialStore;
     /** Spencer's GitHub OAuth app id, if any. */
     githubClientId?: () => string | undefined;
@@ -55,7 +72,7 @@ export async function setupModels(
     if (cfg.provider === COPILOT_PROVIDER) return await copilotSetup(cfg as { modelId?: string }, opts);
     const c = cfg as { provider: string; modelId?: string; apiKeyEnv?: string; apiKey?: string; baseUrl?: string };
     if (!c.modelId || typeof c.modelId !== "string") return fail(`model.modelId is required for provider "${c.provider}"`);
-    const key = resolveKey(c);
+    const key = await resolveKey(c, opts.credentials);
     if (key.error) return fail(key.error);
     const credentials = new InMemoryCredentialStore();
     const models = createModels({ credentials });
@@ -101,12 +118,25 @@ function fail(error: string): ModelSetup {
   return { models: createModels(), error };
 }
 
-function resolveKey(c: { apiKeyEnv?: string; apiKey?: string }): { value?: string; error?: string } {
+async function resolveKey(
+  c: { provider: string; apiKeyEnv?: string; apiKey?: string },
+  credentials?: CredentialStore,
+): Promise<{ value?: string; error?: string }> {
   if (c.apiKey) return { value: c.apiKey };
+  if (credentials) {
+    const saved = await credentials.read(c.provider);
+    if (saved && saved.type === "api_key" && typeof saved.key === "string" && saved.key) return { value: saved.key };
+  }
   if (c.apiKeyEnv) {
     const v = process.env[c.apiKeyEnv];
-    if (!v) return { error: `environment variable ${c.apiKeyEnv} (model.apiKeyEnv) is not set` };
-    return { value: v };
+    if (v) return { value: v };
+    return { error: `environment variable ${c.apiKeyEnv} (model.apiKeyEnv) is not set` };
+  }
+  const defEnv = defaultApiKeyEnvFor(c.provider);
+  if (defEnv) {
+    const v = process.env[defEnv];
+    if (v) return { value: v };
+    return { error: `environment variable ${defEnv} is not set (set it or save an API key on the Model page)` };
   }
   return {};
 }

@@ -59,7 +59,7 @@ export const api = {
   cancelFollowup: (id) => request("POST", `/api/followups/${enc(id)}/cancel`),
   decideRequest: (id, approve) => request("POST", `/api/requests/${enc(id)}/${approve ? "approve" : "deny"}`),
   model: () => request("GET", "/api/model"),
-  setModel: (provider, modelId) => request("PUT", "/api/model", { provider, modelId }),
+  setModel: (provider, modelId, opts = {}) => request("PUT", "/api/model", { provider, modelId, ...opts }),
   copilotLogin: () => request("POST", "/api/auth/github-copilot/login"),
   copilotCancel: () => request("POST", "/api/auth/github-copilot/cancel"),
   copilotGh: (login) => request("POST", "/api/auth/github-copilot/gh", { login }),
