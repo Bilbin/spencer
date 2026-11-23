@@ -57,6 +57,20 @@ export interface Policy {
   ownerCodingTools: boolean;
   transferTtlHours: number;
   maxTransferAttempts: number;
+  /**
+   * Conversations channels: each agent's timer is a random number of minutes in [min, max]; when it goes off and no
+   * conversation is going on, the agent opens one. Every agent may send at most `conversationMessages` messages in it.
+   */
+  conversationMinMinutes: number;
+  conversationMaxMinutes: number;
+  conversationMessages: number;
+  /**
+   * Timers only open conversations from `conversationStartHour` to `conversationEndHour` (0–24, end exclusive), local
+   * time in `conversationTimeZone` (an IANA zone). People can still start one any time by writing in the channel.
+   */
+  conversationStartHour: number;
+  conversationEndHour: number;
+  conversationTimeZone: string;
 }
 
 export interface SpencerConfig {
@@ -65,6 +79,8 @@ export interface SpencerConfig {
   p2p: P2pConfig;
   http: { host: "127.0.0.1"; port: number };
   model: ModelConfig;
+  /** The model Conversations channels use (they run often and can use many tokens). Absent: the main model. */
+  conversationModel?: ModelConfig;
   /** `throttleUpload`: croc's --throttleUpload for sends (e.g. "500k"), null = unlimited. */
   croc: { path: string; relay: string | null; pass: string | null; allowLocal: boolean; throttleUpload: string | null };
   mcpServers: Record<string, McpServerConfig>;
@@ -92,6 +108,12 @@ export const DEFAULT_POLICY: Policy = {
   ownerCodingTools: true,
   transferTtlHours: 24,
   maxTransferAttempts: 5,
+  conversationMinMinutes: 30,
+  conversationMaxMinutes: 60,
+  conversationMessages: 10,
+  conversationStartHour: 8,
+  conversationEndHour: 18,
+  conversationTimeZone: "America/Los_Angeles",
 };
 
 export function defaultConfig(): SpencerConfig {
@@ -126,6 +148,7 @@ export function resolveConfig(raw: Partial<SpencerConfig> & Record<string, unkno
     policy: { ...d.policy, ...(raw.policy ?? {}) },
     auth: {},
   };
+  if (raw.conversationModel && typeof raw.conversationModel === "object") cfg.conversationModel = raw.conversationModel as ModelConfig;
   const auth = raw.auth as Record<string, unknown> | undefined;
   if (auth && typeof auth.githubClientId === "string" && auth.githubClientId.trim()) {
     if (!/^[A-Za-z0-9._-]{1,64}$/.test(auth.githubClientId.trim())) throw new Error("auth.githubClientId does not look like a GitHub OAuth client id");
@@ -154,6 +177,21 @@ export function resolveConfig(raw: Partial<SpencerConfig> & Record<string, unkno
     "maxFollowupChain",
   ] as const) {
     if (!Number.isSafeInteger(cfg.policy[k]) || cfg.policy[k] < 0) throw new Error(`policy.${k} must be a non-negative integer`);
+  }
+  for (const k of ["conversationMinMinutes", "conversationMaxMinutes", "conversationMessages"] as const) {
+    if (!Number.isSafeInteger(cfg.policy[k]) || cfg.policy[k] < 1) throw new Error(`policy.${k} must be a positive integer`);
+  }
+  if (cfg.policy.conversationMaxMinutes < cfg.policy.conversationMinMinutes) {
+    throw new Error("policy.conversationMaxMinutes must be at least policy.conversationMinMinutes");
+  }
+  const { conversationStartHour: start, conversationEndHour: end, conversationTimeZone: tz } = cfg.policy;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end > 24 || start >= end) {
+    throw new Error("policy.conversationStartHour and conversationEndHour must be whole hours with 0 <= start < end <= 24");
+  }
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+  } catch {
+    throw new Error(`policy.conversationTimeZone: unknown time zone ${JSON.stringify(tz)}`);
   }
   for (const [name, s] of Object.entries(cfg.mcpServers)) {
     if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) throw new Error(`invalid MCP server name: ${name}`);

@@ -2386,7 +2386,7 @@ details[open] > summary > .icon:last-child,
 }
 .segmented {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 8px;
 }
 .seg {
@@ -3221,4 +3221,12 @@ details[open] > summary > .icon:last-child,
   .device-wait-text {
     animation: none;
   }
+}
+.model-convo-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 14px;
+  font-size: 13.5px;
 }

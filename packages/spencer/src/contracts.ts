@@ -10,7 +10,7 @@
  * JSON the local HTTP API returns; see docs/PROTOCOL.md §8.
  */
 import type { DatabaseSync } from "node:sqlite";
-import type { ChatBody, CrocInfo, FileBody, Identity, StatusState } from "@spencer/protocol";
+import type { ChatBody, ConvoRef, CrocInfo, FileBody, Identity, StatusState } from "@spencer/protocol";
 import type { ModelConfig, SpencerConfig, Policy } from "./config.ts";
 
 // ---------------------------------------------------------------- API shapes
@@ -39,8 +39,12 @@ export type P2pStatus = { mode: "files" | "off"; available: boolean; error?: str
 export interface Channel {
   directLink: ChannelDirectLink;
   allowLocalAddresses: boolean;
+  /** Conversations channels only: heated mode (spicy debates with a moderator) for the conversations I open. */
+  heated?: boolean;
   id: string;
   kind: "direct" | "group";
+  /** "conversation": a Conversations channel (a group whose agents start debates on their own timers). */
+  mode: "chat" | "conversation";
   name: string;
   relayUrl: string;
   members: ChannelMember[];
@@ -62,7 +66,7 @@ export interface Channel {
  * agent answered a peer ("agent-reply"), or the channel agent reported back on its own after a follow-up it had
  * scheduled ("agent-followup"). Incoming messages are "peer".
  */
-export type MessageOrigin = "human" | "owner-agent" | "agent-reply" | "agent-followup" | "peer" | "feature-hello";
+export type MessageOrigin = "human" | "owner-agent" | "agent-reply" | "agent-followup" | "agent-conversation" | "peer" | "feature-hello";
 
 export interface ChannelMessage {
   id: string;
@@ -80,6 +84,8 @@ export interface ChannelMessage {
   mentions?: string[];
   /** The sender marked the message as the end of the exchange (no answer expected). */
   final?: boolean;
+  /** Conversations channels: the conversation it belongs to (`start`: it opened one; `heated`; `mod`: the moderator). */
+  convo?: ConvoRef;
   /** "failed": the relay permanently rejected our message (see `note`); it will not be retried. */
   status: "pending" | "sent" | "received" | "failed";
   /**
@@ -234,7 +240,8 @@ export type DaemonEvent =
   /** A member's Spencer came online or went offline (relay "presence" feature). */
   | { type: "presence"; ch: string; id: string; presence: Presence; lastSeen?: number }
   | { type: "mcp"; servers: McpServerStatus[] }
-  | { type: "model"; model: ModelStatus };
+  | { type: "model"; model: ModelStatus }
+  | { type: "conversation"; conversation: ConversationStatus };
 
 export interface EventSink {
   emit(e: DaemonEvent): void;
@@ -340,6 +347,8 @@ export interface CoreServices {
   config: () => SpencerConfig;
   /** Persist a new model choice to config.json (the model page). */
   saveModel?(model: ModelConfig): void;
+  /** Persist the Conversations model (`undefined`: use the main model). */
+  saveConversationModel?(model: ModelConfig | undefined): void;
   me(): { id: string; name: string; fingerprint: string };
   listChannels(): Channel[];
   getChannel(ch: string): Channel | undefined;
@@ -359,6 +368,8 @@ export interface CoreServices {
       mentions?: string[];
       /** End of the exchange: the peer's agent should not answer (`chat.final`). */
       final?: boolean;
+      /** Conversations channels: the conversation this message belongs to (`chat.convo`). */
+      convo?: ConvoRef;
       idempotencyKey?: string;
     },
   ): { id: string };
@@ -366,7 +377,7 @@ export interface CoreServices {
   /** Tell the channel (and the local UI) that my agent is working on a reply to `replyTo`. Best effort. */
   sendStatus?(ch: string, s: { replyTo: string; state: StatusState; activity?: string }): void;
   listTransfers(ch?: string): Transfer[];
-  createInvite(kind: "direct" | "group", name: string, relay?: string): Promise<{ link: string; channel: Channel }>;
+  createInvite(kind: "direct" | "group" | "conversation", name: string, relay?: string): Promise<{ link: string; channel: Channel }>;
   events: EventSink;
 }
 
@@ -416,6 +427,17 @@ export interface AgentService {
   soul?(): SoulStatus;
   /** Save SOUL.md (empty text removes it); applies to every conversation right away. */
   setSoul?(text: string): Promise<SoulStatus>;
+  /** The model Conversations channels think with (`provider: null`: the main model). */
+  setConversationModel?(provider: string | null, modelId: string, opts?: SetModelOptions): Promise<ModelStatus>;
+  /** A Conversations channel's timer and current conversation. */
+  conversationStatus?(ch: string): ConversationStatus;
+  /** Start a conversation in a Conversations channel now (instead of waiting for the timer). */
+  startConversation?(ch: string): Promise<ConversationStatus>;
+  /**
+   * My owner is about to write in Conversations channel `ch`: the conversation reference that message carries (a new
+   * conversation everyone may answer). Undefined: send it without one.
+   */
+  humanConversationRef?(ch: string): ConvoRef | undefined;
 }
 
 /** `<dataDir>/SOUL.md`: who the owner's Spencer is (personality, values, boundaries, voice). */
@@ -424,6 +446,19 @@ export interface SoulStatus {
   text: string;
   /** Size limit in UTF-8 bytes. */
   maxBytes: number;
+}
+
+/** My side of a Conversations channel (each Spencer keeps its own timer and message count). */
+export interface ConversationStatus {
+  ch: string;
+  /** When my timer goes off and I open a new conversation (if none is going on then). */
+  nextAt: number;
+  /** I am writing an opening message right now. */
+  opening: boolean;
+  /** The conversation going on now, if any (`heated`: heated mode; `moderating`: my Spencer moderates it). */
+  active?: { id: string; startedAt: number; lastAt: number; used: number; max: number; heated?: true; moderating?: true };
+  /** Timers only open conversations between these hours (local time in `timeZone`; `end` exclusive). */
+  hours: { start: number; end: number; timeZone: string };
 }
 
 /** A sign-in in progress ("Sign in with GitHub"), or how the last one ended. */
@@ -485,5 +520,16 @@ export interface ModelStatus {
     /** GitHub accounts the Copilot CLI is signed in to on this machine, whose sign-in Spencer can reuse. */
     cliAccounts: string[];
     signIn?: LoginState;
+  };
+  /** The model Conversations channels use. Absent: they use the main model. */
+  conversation?: {
+    provider: string;
+    modelId?: string;
+    thinking?: "off" | "minimal" | "low" | "medium" | "high";
+    baseUrl?: string;
+    apiKeyEnv?: string;
+    ready: boolean;
+    /** Why not; Conversations then fall back to the main model. */
+    error?: string;
   };
 }

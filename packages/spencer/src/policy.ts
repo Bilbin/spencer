@@ -24,7 +24,9 @@ export type ReplyNote =
   | "rate limited"
   | "budget exhausted"
   | "repeated"
-  | "handled by owner";
+  | "handled by owner"
+  | "out of messages"
+  | "not in this conversation";
 
 export interface ReplyInput {
   channelKind: "direct" | "group";
@@ -49,6 +51,28 @@ export function decideReply(input: ReplyInput): ReplyDecision {
   if (input.final && input.by === "agent") return { reply: false, note: "conversation ended" };
   if (input.maxHops > 0 && !(input.hop < input.maxHops)) return { reply: false, note: "hop cap" };
   if (input.channelKind === "group" && !isAddressed(input)) return { reply: false, note: "not addressed" };
+  return { reply: true };
+}
+
+/**
+ * Conversations channels (PROTOCOL.md §7.5): an agent message of the running conversation (`chat.convo.id`) gets an
+ * answer from every member that still has messages left, without a mention and without the hop cap (the message
+ * count is the cap). `final` (`[END]`) from an agent ends it. Other messages follow `decideReply`.
+ */
+export function decideConversationReply(input: {
+  autoReply: boolean;
+  by?: "human" | "agent";
+  final?: boolean;
+  /** The message's conversation id, and the one this Spencer is in (if any). */
+  convoId: string;
+  activeId: string | undefined;
+  /** My messages left in the active conversation. */
+  left: number;
+}): { reply: true } | { reply: false; note: "auto-reply off" | "conversation ended" | "out of messages" | "not in this conversation" } {
+  if (!input.autoReply) return { reply: false, note: "auto-reply off" };
+  if (input.final && input.by === "agent") return { reply: false, note: "conversation ended" };
+  if (input.activeId === undefined || input.convoId !== input.activeId) return { reply: false, note: "not in this conversation" };
+  if (input.left <= 0) return { reply: false, note: "out of messages" };
   return { reply: true };
 }
 

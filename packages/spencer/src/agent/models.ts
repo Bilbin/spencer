@@ -230,3 +230,28 @@ function withBaseUrl(p: Provider, baseUrl: string): Provider {
     },
   }) as Provider;
 }
+
+/**
+ * `primary` with one more model reachable: requests for `extra.ref` (by provider and model id) go to `extra.models`,
+ * everything else to `primary`. Lets the Conversations model come from another provider (or account) than the main one.
+ */
+export function withExtraModel(primary: Models, extra: { models: Models; ref: { provider: string; modelId: string } } | undefined): Models {
+  if (!extra) return primary;
+  const { provider, modelId } = extra.ref;
+  const isExtra = (args: unknown[]): boolean => {
+    const [a, b, c] = args;
+    if (a && typeof a === "object") return (a as { provider?: unknown }).provider === provider && (a as { id?: unknown }).id === modelId;
+    // getModel(provider, id) / getModelOfType(type, provider, id)
+    return (a === provider && b === modelId) || (b === provider && c === modelId);
+  };
+  return new Proxy(primary, {
+    get(target, prop) {
+      const v = Reflect.get(target, prop, target) as unknown;
+      if (typeof v !== "function") return v;
+      return (...args: unknown[]) => {
+        const to = isExtra(args) ? extra.models : target;
+        return (Reflect.get(to, prop, to) as (...a: unknown[]) => unknown).apply(to, args);
+      };
+    },
+  });
+}

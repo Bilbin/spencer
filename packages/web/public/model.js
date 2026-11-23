@@ -45,6 +45,7 @@ export function modelView(main) {
   const picker = h("section.model-card", { "aria-labelledby": "picker-title" });
   const copilot = h("section.model-card", { "aria-labelledby": "copilot-title" });
   const about = h("section.model-card", { "aria-labelledby": "about-title" });
+  const convo = h("section.model-card", { "aria-labelledby": "convo-title" });
   main.append(
     viewHeader([
       h("span.title-icon", { "aria-hidden": "true" }, icon("spark", 18)),
@@ -59,6 +60,8 @@ export function modelView(main) {
         now,
         h("h2.section-title", { id: "picker-title" }, "Model picker"),
         picker,
+        h("h2.section-title", { id: "convo-title" }, "Conversations model"),
+        convo,
         h("h2.section-title", { id: "copilot-title" }, "GitHub Copilot"),
         copilot,
         h("h2.section-title", { id: "about-title" }, "About Spencer"),
@@ -113,6 +116,7 @@ export function modelView(main) {
     busy = false;
     if (r && typeof r === "object" && "copilot" in r) {
       syncDraftFromModel(r, true);
+      syncConvoDraft(r, true);
       setModel(r);
       if (successMsg) toast(typeof successMsg === "function" ? successMsg(r) : successMsg, "info");
     } else render();
@@ -367,6 +371,120 @@ export function modelView(main) {
     picker.replaceChildren(form);
   };
 
+  // Conversations channels run constantly: they can use their own (cheaper) model. API keys are shared with the picker above.
+  const cdraft = { same: true, provider: "", modelId: "", thinking: "off", baseUrl: "", lastKey: null };
+  const syncConvoDraft = (m, force = false) => {
+    const c = m.conversation;
+    const key = JSON.stringify(c ?? null);
+    if (!force && cdraft.lastKey === key) return;
+    cdraft.lastKey = key;
+    cdraft.same = !c;
+    cdraft.provider = c?.provider ?? m.provider ?? "";
+    cdraft.modelId = c?.modelId ?? m.modelId ?? "";
+    cdraft.thinking = c?.thinking ?? "off";
+    cdraft.baseUrl = c?.baseUrl ?? m.baseUrl ?? "";
+  };
+
+  const renderConvo = (m) => {
+    const providers = (m.providers ?? []).filter((p) => p.id !== "github-copilot" || m.copilot?.connected);
+    const c = m.conversation;
+    const status = c
+      ? h(
+          "p.model-convo-status",
+          null,
+          h(`span.dot.${c.ready ? "connected" : "error"}`, { "aria-hidden": "true" }),
+          ` ${providers.find((p) => p.id === c.provider)?.name ?? PROVIDER[c.provider] ?? c.provider} · ${c.modelId ?? "default"}`,
+          c.thinking && c.thinking !== "off" ? h("span.pill.muted", null, `thinking: ${c.thinking}`) : null,
+          c.ready ? null : h("span.pill.bad", null, "Not ready: using the main model"),
+          !c.ready && c.error ? h("span.model-error", null, ` ${c.error}`) : null,
+        )
+      : h("p.model-convo-status.muted", null, "Using the main model.");
+    const sameBox = h("input", {
+      type: "checkbox",
+      role: "switch",
+      checked: cdraft.same,
+      disabled: busy,
+      on: {
+        change: (e) => {
+          cdraft.same = e.target.checked;
+          renderConvo(m);
+        },
+      },
+    });
+    const fields = [];
+    if (!cdraft.same) {
+      if (!providers.some((p) => p.id === cdraft.provider)) cdraft.provider = providers[0]?.id ?? "";
+      const prov = providers.find((p) => p.id === cdraft.provider);
+      const models = prov?.models ?? [];
+      if (prov && !prov.custom && models.length && !models.some((x) => x.id === cdraft.modelId)) cdraft.modelId = models[0].id;
+      fields.push(
+        h(
+          "div.model-row",
+          null,
+          h(
+            "label.model-pick-label",
+            null,
+            "Provider",
+            h(
+              "select.input.model-select",
+              { disabled: busy, on: { change: (e) => ((cdraft.provider = e.target.value), (cdraft.modelId = ""), renderConvo(m)) } },
+              providers.map((p) => h("option", { value: p.id, selected: p.id === cdraft.provider }, p.name)),
+            ),
+          ),
+          h(
+            "label.model-pick-label.sm",
+            null,
+            "Thinking",
+            h(
+              "select.input.model-select",
+              { disabled: busy, on: { change: (e) => (cdraft.thinking = e.target.value) } },
+              THINKING_OPTIONS.map(([v, label]) => h("option", { value: v, selected: cdraft.thinking === v }, label)),
+            ),
+          ),
+        ),
+        prov?.custom
+          ? [
+              h("label.model-pick-label", null, "Model ID", h("input.input.mono", { type: "text", value: cdraft.modelId, disabled: busy, on: { input: (e) => (cdraft.modelId = e.target.value) } })),
+              h("label.model-pick-label", null, "Base URL", h("input.input.mono", { type: "url", placeholder: "http://localhost:11434/v1", value: cdraft.baseUrl, disabled: busy, on: { input: (e) => (cdraft.baseUrl = e.target.value) } })),
+            ]
+          : h(
+              "label.model-pick-label",
+              null,
+              "Model",
+              h(
+                "select.input.model-select",
+                { disabled: busy || !models.length, on: { change: (e) => (cdraft.modelId = e.target.value) } },
+                models.length ? models.map((x) => h("option", { value: x.id, selected: x.id === cdraft.modelId }, x.name === x.id ? x.id : `${x.name} (${x.id})`)) : h("option", { value: "" }, "No models available"),
+              ),
+            ),
+      );
+    }
+    const save = h("button.btn.primary", { type: "submit", disabled: busy || (cdraft.same && !c) }, "Save");
+    const form = h(
+      "form.model-form",
+      {
+        on: {
+          submit: (e) => {
+            e.preventDefault();
+            if (cdraft.same) return void act(() => api.setConversationModel(null), "Conversations use the main model");
+            const mid = cdraft.modelId.trim();
+            if (!mid) return toast("Pick or enter a model ID");
+            const prov = providers.find((p) => p.id === cdraft.provider);
+            if (prov?.custom && !cdraft.baseUrl.trim()) return toast("Base URL is required for OpenAI-compatible servers");
+            const opts = { thinking: cdraft.thinking, ...(prov?.custom ? { baseUrl: cdraft.baseUrl.trim() } : {}) };
+            void act(() => api.setConversationModel(cdraft.provider, mid, opts), `Conversations now use ${mid}`);
+          },
+        },
+      },
+      h("p.hint", null, "Conversations channels chat all day, so they can use a different (cheaper) model. API keys come from the picker above."),
+      status,
+      h("label.switch-row", null, sameBox, h("span", null, "Same as the main model")),
+      ...fields,
+      h("div.model-actions", null, save),
+    );
+    convo.replaceChildren(form);
+  };
+
   const signInBox = (c) => {
     const si = c.signIn;
     if (si?.state === "waiting") {
@@ -531,6 +649,8 @@ export function modelView(main) {
     }
     syncDraftFromModel(m);
     renderPicker(m);
+    syncConvoDraft(m);
+    renderConvo(m);
     copilot.replaceChildren(m.copilot.connected ? connectedBox(m) : signInBox(m.copilot));
   };
 

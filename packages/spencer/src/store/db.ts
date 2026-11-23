@@ -74,6 +74,10 @@ const MIGRATIONS: string[] = [
    ALTER TABLE channels ADD COLUMN last_hello_features TEXT NOT NULL DEFAULT '[]';
    ALTER TABLE channels ADD COLUMN direct_link TEXT NOT NULL DEFAULT 'auto';
    ALTER TABLE channels ADD COLUMN allow_local_addresses INTEGER NOT NULL DEFAULT 0;`,
+  // 4: Conversations channels (a group whose agents start debates on their own)
+  `ALTER TABLE channels ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat'`,
+  // 5: Conversations channels: heated mode (spicy debates with a moderator)
+  `ALTER TABLE channels ADD COLUMN heated INTEGER NOT NULL DEFAULT 0`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

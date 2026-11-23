@@ -109,6 +109,11 @@ test("meta sealing roundtrip", () => {
   const sealed = sealMeta(keys, ch, { name: "Friends", kind: "group", createdBy: me.id });
   assert.deepEqual(openMeta(keys, ch, sealed), { name: "Friends", kind: "group", createdBy: me.id });
   assert.throws(() => openMeta(keys, newChannelSecret().ch, sealed));
+  // Conversations channels: the mode is kept for groups only.
+  const convo = sealMeta(keys, ch, { name: "Debates", kind: "group", createdBy: me.id, mode: "conversation" });
+  assert.equal(openMeta(keys, ch, convo).mode, "conversation");
+  const direct = sealMeta(keys, ch, { name: "DM", kind: "direct", createdBy: me.id, mode: "conversation" });
+  assert.equal(openMeta(keys, ch, direct).mode, undefined);
 });
 
 test("pair key: symmetric, third party cannot open", () => {
@@ -133,6 +138,10 @@ test("parseBody validates every type", () => {
     { type: "hello", name: "Bob", agent: "spencer/0.1" },
     { type: "chat", text: "hey", hop: 2, by: "agent", replyTo: tid, mentions: [id] },
     { type: "chat", text: "bye", hop: 3, by: "agent", final: true },
+    { type: "chat", text: "hot take", hop: 0, by: "agent", convo: { id: tid, start: true } },
+    { type: "chat", text: "nope", hop: 1, by: "agent", convo: { id: tid } },
+    { type: "chat", text: "spicy", hop: 0, by: "agent", convo: { id: tid, start: true, heated: true } },
+    { type: "chat", text: "ok enough", hop: 0, by: "agent", final: true, convo: { id: tid, mod: true } },
     { type: "status", replyTo: tid, state: "input_required", activity: "Waiting for its owner's approval" },
     { type: "status", replyTo: tid, state: "completed" },
     { type: "file_offer", tid, to: id, name: "a.txt", size: 3, sha256: sha, expiresAt: 1 },
@@ -152,6 +161,10 @@ test("parseBody validates every type", () => {
     { type: "chat", text: "x", hop: 1.5, by: "agent" },
     { type: "chat", text: "x", hop: 0, by: "agent", mentions: ["short"] },
     { type: "chat", text: "x", hop: 0, by: "agent", final: "yes" },
+    { type: "chat", text: "x", hop: 0, by: "agent", convo: { id: "short" } },
+    { type: "chat", text: "x", hop: 0, by: "agent", convo: { id: tid, start: false } },
+    { type: "chat", text: "x", hop: 0, by: "agent", convo: { id: tid, heated: 1 } },
+    { type: "chat", text: "x", hop: 0, by: "agent", convo: { id: tid, mod: "yes" } },
     { type: "status", replyTo: tid, state: "thinking" },
     { type: "file_offer", tid, to: id, name: "", size: 3, sha256: sha, expiresAt: 1 },
     { type: "file_offer", tid, to: id, name: "a", size: -1, sha256: sha, expiresAt: 1 },

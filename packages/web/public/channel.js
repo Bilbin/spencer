@@ -1,7 +1,7 @@
 // A channel (direct or group): the transcript between people and their Spencers, composer, members, files and settings.
-import { h, icon, iconButton, richText, shortFp, timeShort, timeFull, autoGrow, hue, avatar, selfAvatar, youAvatar, personOf, clear, append } from "./dom.js";
+import { h, icon, iconButton, richText, shortFp, timeShort, timeFull, autoGrow, hue, avatar, selfAvatar, youAvatar, personOf, clear, append, relTime } from "./dom.js";
 import { api, attempt, toast } from "./api.js";
-import { S, on, setMessages, upsertTransfer, upsertChannel, removeChannel, markRead, peers, channelTitle, allMcpTools, workingIn, workingOf, presenceOf } from "./state.js";
+import { S, on, setConversation, setMessages, upsertTransfer, upsertChannel, removeChannel, markRead, peers, channelTitle, allMcpTools, workingIn, workingOf, presenceOf } from "./state.js";
 import { markdown } from "./md.js";
 import { viewHeader, composer, SEND_HINT, stage, skeleton, emptyState, trace, mark, presenceInfo, activityLine, followupList } from "./common.js";
 import { transferCard } from "./transfers.js";
@@ -119,6 +119,9 @@ function messageRow(c, m, byId, names, myNames, cont, hideRef) {
         who.kind === "agent" && who.mine ? h("span.tag", null, "yours") : null,
         who.label ? h("span.tag", null, who.label) : null,
         m.origin === "agent-followup" ? h("span.tag", { title: "Sent on its own, from a follow-up it scheduled" }, "follow-up") : null,
+        m.convo?.mod ? h("span.tag", { title: "Heated mode: the moderator ended this conversation" }, "moderator") : null,
+        m.convo?.start && m.by === "agent" ? h("span.tag", { title: "Its conversation timer went off: it opened a new conversation" }, "new topic") : null,
+        m.convo?.start && m.convo.heated && m.by === "agent" ? h("span.tag", { title: "Heated mode: a real argument, with a moderator" }, "heated") : null,
         m.hop > 0 ? h("span.tag.hop", { title: `Automatic reply, ${m.hop} ${m.hop === 1 ? "step" : "steps"} from a person's message` }, `hop ${m.hop}`) : null,
         time,
         statusMark(m),
@@ -289,6 +292,7 @@ function sendFileModal(c) {
 function settingsModal(c) {
   const name = h("input.input", { type: "text", value: c.name, maxlength: "100" });
   const autoReply = h("input", { type: "checkbox", checked: c.autoReply, role: "switch" });
+  const heated = h("input", { type: "checkbox", checked: !!c.heated, role: "switch" });
   const directLink = h("input", { type: "checkbox", checked: c.directLink !== "off", role: "switch" });
   const allowLocal = h("input", { type: "checkbox", checked: !!c.allowLocalAddresses, disabled: !directLink.checked, role: "switch" });
   directLink.addEventListener("change", () => { allowLocal.disabled = !directLink.checked; });
@@ -408,6 +412,23 @@ function settingsModal(c) {
         ),
       ),
     ),
+    c.mode === "conversation"
+      ? h(
+          "label.switch-row",
+          null,
+          heated,
+          h(
+            "span",
+            null,
+            h("strong", null, "Heated mode"),
+            h(
+              "span.hint.block",
+              null,
+              "Conversations your Spencer starts are real arguments about spicy topics. A moderator watches them and ends one that goes off the rails. Off: chill hangouts about fun stuff.",
+            ),
+          ),
+        )
+      : null,
     h(
       "div.field",
       null,
@@ -452,6 +473,7 @@ function settingsModal(c) {
     if ((directLink.checked ? "auto" : "off") !== (c.directLink ?? "auto")) patch.directLink = directLink.checked ? "auto" : "off";
     if (allowLocal.checked !== !!c.allowLocalAddresses) patch.allowLocalAddresses = allowLocal.checked;
     if (autoReply.checked !== c.autoReply) patch.autoReply = autoReply.checked;
+    if (c.mode === "conversation" && heated.checked !== !!c.heated) patch.heated = heated.checked;
     if (trust !== (c.trust ?? "standard")) patch.trust = trust;
     const tools = [...selected].sort();
     if (JSON.stringify(tools) !== JSON.stringify([...(c.allowedMcpTools ?? [])].sort())) patch.allowedMcpTools = tools;
@@ -471,6 +493,69 @@ function settingsModal(c) {
 
 const MEMBERS_KEY = "spencer.members";
 const wide = () => matchMedia("(min-width: 1180px)").matches;
+
+/** Conversations channels: my timer, the conversation going on, and "Start now". */
+function hourLabel(hr) {
+  const h12 = hr % 12 === 0 ? 12 : hr % 12;
+  return `${h12}${hr % 24 < 12 ? "am" : "pm"}`;
+}
+
+function zoneLabel(tz) {
+  try {
+    return new Intl.DateTimeFormat("en-US", { timeZone: tz, timeZoneName: "short" }).formatToParts(new Date()).find((p) => p.type === "timeZoneName")?.value ?? tz;
+  } catch {
+    return tz;
+  }
+}
+
+function conversationSection(c) {
+  const st = S.conversations.get(c.id);
+  let what;
+  let detail;
+  if (!st) {
+    what = "Conversations";
+    detail = "Loading…";
+  } else if (st.opening) {
+    what = "Picking a topic…";
+    detail = "Your Spencer is opening a new conversation.";
+  } else if (st.active) {
+    const left = Math.max(0, st.active.max - st.active.used);
+    what = st.active.heated ? "Heated conversation going on" : "Conversation going on";
+    detail = `Your Spencer has ${left} of ${st.active.max} messages left. It ends when they wrap up or go quiet.${st.active.moderating ? " Your Spencer moderates this one and ends it if it goes off the rails." : ""}`;
+  } else if (!c.autoReply) {
+    what = "Paused";
+    detail = "Auto-reply is off: your Spencer won't start or join conversations.";
+  } else {
+    what = `Next topic ${relTime(Math.max(st.nextAt, Date.now() + 60_000))}`;
+    detail = "Unless another Spencer brings one up first (then every timer starts over).";
+  }
+  if (st?.hours && !st.active && !st.opening && c.autoReply) detail += ` Conversations only open between ${hourLabel(st.hours.start)} and ${hourLabel(st.hours.end)} (${zoneLabel(st.hours.timeZone)}).`;
+  const canStart = st && !st.opening && !st.active && c.autoReply && peers(c).length > 0;
+  const start = canStart
+    ? h(
+        "button.btn.sm",
+        {
+          type: "button",
+          on: {
+            click: async (e) => {
+              e.currentTarget.disabled = true;
+              const res = await attempt(() => api.startConversation(c.id));
+              if (res?.ch) setConversation(res);
+            },
+          },
+        },
+        icon("spark", 14),
+        "Start one now",
+      )
+    : null;
+  return h(
+    "section.access",
+    { "aria-label": "Conversations" },
+    h("h2", null, "Conversations"),
+    h("div.access-row", null, icon(st?.active ? "spark" : "clock", 15), h("div", null, h("strong", null, what), h("p", null, detail))),
+    start,
+  );
+}
 
 function membersPref() {
   try {
@@ -560,6 +645,7 @@ export function channelView(main, chId) {
     members.replaceChildren(
       h("div.members-head", null, h("h2", null, c.kind === "group" ? "In this group" : "In this channel"), iconButton("close", "Close members", () => setMembersOpen(false), "members-close")),
       h("ul.member-list", null, c.members.map((m) => memberRow(c, m))),
+      c.mode === "conversation" ? conversationSection(c) : null,
       ...[followupList(c.id, { title: "Your Spencer will follow up" })].filter(Boolean),
       h(
         "section.access",
@@ -584,7 +670,7 @@ export function channelView(main, chId) {
                 tools.length ? h("ul.access-tools", null, tools.map((t) => h("li", null, h("code", null, t.replace(/^mcp__/, "").replace(/__/, " · "))))) : null,
               ),
             ),
-        h("div.access-row", null, icon("reply", 15), h("div", null, h("strong", null, c.autoReply ? "Auto-reply on" : "Auto-reply off"), h("p", null, c.autoReply ? (c.kind === "group" ? "Your Spencer answers when mentioned." : "Your Spencer answers on its own.") : "Your Spencer only listens."))),
+        h("div.access-row", null, icon("reply", 15), h("div", null, h("strong", null, c.autoReply ? "Auto-reply on" : "Auto-reply off"), h("p", null, c.autoReply ? (c.mode === "conversation" ? "Your Spencer talks on its own, and answers anyone who writes here." : c.kind === "group" ? "Your Spencer answers when mentioned." : "Your Spencer answers on its own.") : "Your Spencer only listens."))),
         h("button.btn.sm", { type: "button", on: { click: () => settingsModal(c) } }, icon("gear", 14), "Channel settings"),
       ),
     );
@@ -629,6 +715,8 @@ export function channelView(main, chId) {
               "span.subtitle",
               null,
               h("span", null, status),
+              c.mode === "conversation" ? h("span.pill", { title: "The Spencers here start conversations on their own" }, icon("spark", 11), "conversations") : null,
+              c.mode === "conversation" && c.heated ? h("span.pill", { title: "Heated mode: your Spencer starts real arguments, with a moderator" }, "heated") : null,
               c.trust === "full" ? h("span.pill.attn", { title: "Peers here can use your Spencer's MCP tools without approval" }, icon("shield", 11), "full trust") : null,
               c.autoReply ? null : h("span.pill.muted", null, "auto-reply off"),
             ),
@@ -796,7 +884,14 @@ export function channelView(main, chId) {
     on("transfers", onTransfer),
     on(`working:${chId}`, renderWorking),
     on("followups", renderMembers),
+    on(`conversation:${chId}`, renderMembers),
   ];
+  if (getC()?.mode === "conversation") {
+    api
+      .conversation(chId)
+      .then(setConversation)
+      .catch(() => {});
+  }
   return {
     destroy: () => {
       clearInterval(staleTimer);

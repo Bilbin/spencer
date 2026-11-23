@@ -69,6 +69,8 @@ export interface ConversationSetup {
   codingTools?: { cwd?: string };
   /** Reasoning effort ("off", "minimal", "low", "medium", "high"); absent: the model's default. */
   thinkingLevel?: string;
+  /** Run this conversation on another model than the agent's main one (Conversations channels). */
+  model?: { provider: string; modelId: string };
 }
 
 export interface NoteInput {
@@ -259,7 +261,7 @@ export class PiRuntime implements AgentRuntime {
     const coding = key === OWNER_KEY && setup.codingTools !== undefined;
     const tools: ToolRegistration[] = coding ? [...regs, ...(CodingTools.tools ?? [])] : regs;
     const extensions: Extension[] = coding ? [this.extension, CodingTools] : [this.extension];
-    const model = this.opts.model();
+    const model = setup.model ?? this.opts.model();
     // Skip the commit when nothing changed (start() configures every conversation each time).
     const current = await conv.agent(BACKGROUND_CONTEXT);
     const same =

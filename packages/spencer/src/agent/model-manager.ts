@@ -28,7 +28,7 @@ import {
 } from "./copilot.ts";
 import { FileCredentialStore } from "./credentials.ts";
 import type { FakeBrainHooks } from "./fake-brain.ts";
-import { defaultApiKeyEnvFor, loadBuiltinProvider, PICKER_PROVIDERS, setupModels, type ModelSetup } from "./models.ts";
+import { defaultApiKeyEnvFor, loadBuiltinProvider, PICKER_PROVIDERS, setupModels, withExtraModel, type ModelSetup } from "./models.ts";
 import { BUILTIN_PROVIDERS } from "./providers.ts";
 
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high"]);
@@ -83,6 +83,9 @@ export class ModelManager {
   private opts: ModelManagerOptions;
   readonly credentials: FileCredentialStore;
   private setup: ModelSetup | undefined;
+  /** The Conversations model, when it is set apart from the main one. */
+  private convSetup: ModelSetup | undefined;
+  private combined: Models | undefined;
   private catalog: { id: string; name: string; reasoning?: boolean }[] = [];
   private catalogs = new Map<string, { name: string; models: { id: string; name: string; reasoning?: boolean }[] }>();
   private savedKeys = new Set<string>();
@@ -126,9 +129,9 @@ export class ModelManager {
         .map((m) => ({ id: m.id, name: m.name, ...(m.reasoning ? { reasoning: true } : {}) }));
     }
     const toLoad = new Set(PICKER_PROVIDERS.filter((p) => !p.custom && p.id !== COPILOT_PROVIDER).map((p) => p.id));
-    const curProv = this.opts.core.config().model.provider;
-    if (curProv && curProv !== "fake" && curProv !== "openai-compatible" && curProv !== COPILOT_PROVIDER && Object.hasOwn(BUILTIN_PROVIDERS, curProv)) {
-      toLoad.add(curProv);
+    for (const m of [this.opts.core.config().model, this.opts.core.config().conversationModel]) {
+      const prov = m?.provider;
+      if (prov && prov !== "fake" && prov !== "openai-compatible" && prov !== COPILOT_PROVIDER && Object.hasOwn(BUILTIN_PROVIDERS, prov)) toLoad.add(prov);
     }
     await Promise.all([...toLoad].map((id) => this.ensureCatalog(id)));
     await this.build();
@@ -144,7 +147,7 @@ export class ModelManager {
   }
 
   models(): Models | undefined {
-    return this.setup?.models;
+    return this.combined;
   }
   ref(): { provider: string; modelId: string } | undefined {
     return this.setup?.ref;
@@ -152,15 +155,30 @@ export class ModelManager {
   error(): string | undefined {
     return this.setup?.error;
   }
+  /** The model Conversations channels run with: their own one if it is set and works, else the main one. */
+  conversationRef(): { provider: string; modelId: string } | undefined {
+    return this.convSetup?.ref ?? this.ref();
+  }
+  /** The reasoning effort that goes with `conversationRef()`. */
+  conversationThinking(): string | undefined {
+    const m = (this.convSetup?.ref ? this.opts.core.config().conversationModel : this.opts.core.config().model) as { thinking?: string } | undefined;
+    return typeof m?.thinking === "string" ? m.thinking : undefined;
+  }
 
   private async build(): Promise<void> {
-    this.setup = await setupModels(this.opts.core.config().model, {
+    const opts = {
       name: this.opts.name,
       ...(this.opts.fakeHooks ? { fakeHooks: this.opts.fakeHooks } : {}),
       credentials: this.credentials,
       githubClientId: () => this.clientId(),
-    });
+    };
+    this.setup = await setupModels(this.opts.core.config().model, opts);
     if (this.setup.error) this.opts.log(`model not available: ${this.setup.error}`);
+    const conv = this.opts.core.config().conversationModel;
+    this.convSetup = conv ? await setupModels(conv, opts) : undefined;
+    if (this.convSetup?.error) this.opts.log(`Conversations model not available (using the main model): ${this.convSetup.error}`);
+    const ref = this.convSetup?.ref;
+    this.combined = withExtraModel(this.setup.models, ref ? { models: this.convSetup!.models, ref } : undefined);
   }
 
   private async reload(): Promise<void> {
@@ -264,10 +282,51 @@ export class ModelManager {
         cliAccounts: copilotCliAccounts(this.opts.copilotCliConfig, this.opts.copilotKeyring),
         ...(signIn ? { signIn } : {}),
       },
+      ...this.conversationStatus(),
+    };
+  }
+
+  private conversationStatus(): Pick<ModelStatus, "conversation"> {
+    const c = this.opts.core.config().conversationModel as
+      | { provider: string; modelId?: string; thinking?: ThinkingLevel; baseUrl?: string; apiKeyEnv?: string }
+      | undefined;
+    if (!c) return {};
+    return {
+      conversation: {
+        provider: c.provider,
+        ...(c.modelId ? { modelId: c.modelId } : {}),
+        ...(c.thinking ? { thinking: c.thinking } : {}),
+        ...(c.baseUrl ? { baseUrl: c.baseUrl } : {}),
+        ...(c.apiKeyEnv ? { apiKeyEnv: c.apiKeyEnv } : {}),
+        ready: !!this.convSetup?.ref,
+        ...(this.convSetup?.error ? { error: this.convSetup.error } : {}),
+      },
     };
   }
 
   async setModel(provider: string, modelId: string, opts: SetModelOptions = {}): Promise<ModelStatus> {
+    const next = await this.modelConfig(provider, modelId, opts, this.opts.core.config().model);
+    this.save(next);
+    await this.reload();
+    return this.status();
+  }
+
+  /** The model Conversations channels use; `provider: null` goes back to the main model. */
+  async setConversationModel(provider: string | null, modelId: string, opts: SetModelOptions = {}): Promise<ModelStatus> {
+    if (!this.opts.core.saveConversationModel) throw new ModelError(501, "this Spencer cannot change its model at runtime");
+    if (provider === null) {
+      this.opts.core.saveConversationModel(undefined);
+    } else {
+      const cfg = this.opts.core.config();
+      const next = await this.modelConfig(provider, modelId, opts, cfg.conversationModel ?? cfg.model);
+      this.opts.core.saveConversationModel(next);
+    }
+    await this.reload();
+    return this.status();
+  }
+
+  /** Validate a model choice and turn it into its config (saving or clearing an API key on the way). */
+  private async modelConfig(provider: string, modelId: string, opts: SetModelOptions, currentConfig: ModelConfig): Promise<ModelConfig> {
     if (typeof provider !== "string" || typeof modelId !== "string" || !provider.trim() || !modelId.trim()) {
       throw new ModelError(400, "provider and modelId are required");
     }
@@ -282,7 +341,7 @@ export class ModelManager {
       if (!ENV_NAME_RE.test(apiKeyEnv)) throw new ModelError(400, "apiKeyEnv must be an environment variable name");
     }
     const baseUrl = opts.baseUrl !== undefined && opts.baseUrl.trim() !== "" ? normalizeHttpUrl(opts.baseUrl) : undefined;
-    const current = this.opts.core.config().model as ModelConfig & {
+    const current = currentConfig as ModelConfig & {
       modelId?: string;
       thinking?: ThinkingLevel;
       baseUrl?: string;
@@ -337,9 +396,7 @@ export class ModelManager {
     } else {
       throw new ModelError(400, `unknown model provider "${prov}"`);
     }
-    this.save(next);
-    await this.reload();
-    return this.status();
+    return next;
   }
 
   private save(model: ModelConfig): void {

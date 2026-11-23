@@ -72,6 +72,10 @@ export function createFakeBrain(opts: { name: () => string; hooks?: FakeBrainHoo
     opts.hooks?.onRequest?.(info);
     if (opts.hooks?.gate) await opts.hooks.gate(info, options?.signal);
     if (!target) return text("NO_REPLY");
+    // The heated-mode moderator (agent.ts MODERATOR_INSTRUCTIONS): no tools, answers OK or STOP.
+    if (systemPrompt.includes("You moderate a heated group chat")) {
+      return text(describe(target).includes("MOD_STOP_TEST") ? "STOP: ok guys thats enough, im ending this one" : "OK");
+    }
     if (channel && target.role === "user" && peerText(contentText(target.content)).includes("SLOW_REPLY_TEST")) {
       await abortableDelay(SLOW_REPLY_MS, options?.signal);
     }
@@ -114,7 +118,7 @@ function lastRelevant(messages: readonly Message[], channel: boolean): Message |
     if (m.role === "assistant") return undefined;
     if (m.role !== "user") continue;
     const t = contentText(m.content);
-    if (channel ? t.includes("<peer_message") || t.includes("<followup_note") : !NOTE_PREFIX.test(t.trim())) return m;
+    if (channel ? t.includes("<peer_message") || t.includes("<followup_note") || t.includes(CONVERSATION_TIMER) : !NOTE_PREFIX.test(t.trim())) return m;
   }
   return undefined;
 }
@@ -148,7 +152,11 @@ function followupNote(s: string): string | undefined {
   return s.slice(open + "<followup_note>".length, end === -1 ? undefined : end).trim();
 }
 
+/** The start of the input a Conversations timer submits (agent.ts openerInput). */
+const CONVERSATION_TIMER = "[Your conversation timer went off";
+
 function channelAnswer(raw: string, myName: string): AssistantMessage {
+  if (raw.startsWith(CONVERSATION_TIMER)) return call("search_news", {});
   const fu = followupNote(raw);
   if (fu !== undefined) {
     if (/\bquiet\b/i.test(fu)) return text("NO_REPLY");
@@ -188,6 +196,10 @@ function afterTool(result: Message & { role: "toolResult" }, messages: readonly 
     return text(result.isError ? `could not schedule: ${out.slice(0, 200)}` : "I'll get back to you");
   }
   if (channel && result.toolName.startsWith("mcp__")) return text(`done: ${out.slice(0, 200)}`);
+  if (channel && result.toolName === "search_news") {
+    const first = /^1\. (.+)$/m.exec(out);
+    return text(first ? `Hot take: ${first[1]}` : "NO_REPLY");
+  }
   if (channel) return text("NO_REPLY");
   return text(`done: ${out.slice(0, 200)}`);
 }

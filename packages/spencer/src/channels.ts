@@ -16,6 +16,7 @@ import {
   type HelloBody,
   type Identity,
   type MemberInfo,
+  convoRef,
 } from "@spencer/protocol";
 import type { Sql } from "./store/db.ts";
 import type { SpencerConfig } from "./config.ts";
@@ -26,6 +27,8 @@ import { RelayError, type RelayConnection, type RelayPool } from "./net/relay-cl
 export interface ChannelRow {
   id: string;
   kind: "direct" | "group";
+  /** "chat", or "conversation" for a Conversations channel (groups only). */
+  mode: string;
   meta_name: string;
   custom_name: string | null;
   created_by: string;
@@ -39,6 +42,7 @@ export interface ChannelRow {
   last_hello_features: string;
   direct_link: string;
   allow_local_addresses: number;
+  heated: number;
   unread: number;
   gap: number;
   created_at: number;
@@ -242,12 +246,14 @@ export class ChannelManager {
     return {
       id: r.id,
       kind: r.kind,
+      mode: r.kind === "group" && r.mode === "conversation" ? "conversation" : "chat",
       name: this.displayName(r),
       relayUrl: r.relay_url,
       members,
       directLink: r.direct_link === "off" ? "off" : "auto",
       allowLocalAddresses: !!r.allow_local_addresses,
       autoReply: !!r.auto_reply,
+      ...(r.kind === "group" && r.mode === "conversation" ? { heated: !!r.heated } : {}),
       allowedMcpTools: safeJsonArray(r.allowed_mcp_tools),
       trust: r.trust === "full" ? "full" : "standard",
       unread: r.unread,
@@ -295,6 +301,8 @@ export class ChannelManager {
     if (typeof body.replyTo === "string") m.replyTo = body.replyTo;
     if (Array.isArray(body.mentions)) m.mentions = body.mentions as string[];
     if (body.final === true) m.final = true;
+    const convo = body.convo as Record<string, unknown> | undefined;
+    if (convo && typeof convo.id === "string") m.convo = convoRef(convo);
     if (r.note) m.note = r.note;
     if (r.origin) m.origin = r.origin as ChannelMessage["origin"];
     return m;
@@ -472,8 +480,13 @@ export class ChannelManager {
 
   // ------------------------------------------------------------- lifecycle
 
-  async createInvite(kind: "direct" | "group", name: string, relay?: string): Promise<{ link: string; channel: Channel }> {
-    if (kind !== "direct" && kind !== "group") throw new UserError(400, "kind must be direct or group");
+  /** `kind: "conversation"`: a group in Conversations mode (the relay sees a plain group). */
+  async createInvite(requested: "direct" | "group" | "conversation", name: string, relay?: string): Promise<{ link: string; channel: Channel }> {
+    if (requested !== "direct" && requested !== "group" && requested !== "conversation") {
+      throw new UserError(400, "kind must be direct, group or conversation");
+    }
+    const kind = requested === "direct" ? "direct" : "group";
+    const mode = requested === "conversation" ? "conversation" : "chat";
     const label = typeof name === "string" ? name.trim().slice(0, MAX_NAME) : "";
     if (!label) throw new UserError(400, "name is required");
     let relayUrl = this.d.config().relay;
@@ -481,7 +494,7 @@ export class ChannelManager {
     const { ch, secret } = newChannelSecret();
     const keys = deriveChannelKeys(secret, ch);
     const me = this.d.me.id;
-    const meta = sealMeta(keys, ch, { name: label, kind, createdBy: me });
+    const meta = sealMeta(keys, ch, { name: label, kind, createdBy: me, ...(mode === "conversation" ? { mode } : {}) });
     const conn = await this.readyConn(relayUrl);
     const nonce = conn.nonce;
     if (!nonce) throw new RelayError("disconnected", "relay connection lost");
@@ -497,10 +510,11 @@ export class ChannelManager {
     this.setCroc(relayUrl, ok.croc);
     const head = Number.isSafeInteger(ok.head) ? (ok.head as number) : 0;
     this.d.sql.run(
-      `INSERT INTO channels (id, kind, meta_name, created_by, relay_url, secret, last_seq, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO channels (id, kind, mode, meta_name, created_by, relay_url, secret, last_seq, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ch,
       kind,
+      mode,
       label,
       me,
       relayUrl,
@@ -554,10 +568,11 @@ export class ChannelManager {
     this.setCroc(inv.relayUrl, ok.croc);
     const head = Number.isSafeInteger(ok.head) ? (ok.head as number) : 0;
     this.d.sql.run(
-      `INSERT OR IGNORE INTO channels (id, kind, meta_name, created_by, relay_url, secret, last_seq, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO channels (id, kind, mode, meta_name, created_by, relay_url, secret, last_seq, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       inv.ch,
       kind,
+      kind === "group" && meta.mode === "conversation" ? "conversation" : "chat",
       meta.name,
       meta.createdBy,
       inv.relayUrl,
@@ -600,7 +615,7 @@ export class ChannelManager {
     void this.pruneRelays();
   }
 
-  update(ch: string, patch: { name?: unknown; autoReply?: unknown; allowedMcpTools?: unknown; trust?: unknown; directLink?: unknown; allowLocalAddresses?: unknown }): Channel {
+  update(ch: string, patch: { name?: unknown; autoReply?: unknown; allowedMcpTools?: unknown; trust?: unknown; directLink?: unknown; allowLocalAddresses?: unknown; heated?: unknown }): Channel {
     const r = this.row(ch);
     if (!r) throw new UserError(404, "unknown channel");
     const sets: string[] = [];
@@ -615,6 +630,12 @@ export class ChannelManager {
       if (typeof patch.autoReply !== "boolean") throw new UserError(400, "autoReply must be a boolean");
       sets.push("auto_reply = ?");
       args.push(patch.autoReply ? 1 : 0);
+    }
+    if (patch.heated !== undefined) {
+      if (typeof patch.heated !== "boolean") throw new UserError(400, "heated must be a boolean");
+      if (r.mode !== "conversation") throw new UserError(400, "heated mode is only for Conversations channels");
+      sets.push("heated = ?");
+      args.push(patch.heated ? 1 : 0);
     }
     if (patch.allowedMcpTools !== undefined) {
       const t = patch.allowedMcpTools;

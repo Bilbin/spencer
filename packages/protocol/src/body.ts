@@ -18,7 +18,17 @@ export type ChatBody = {
    * Older Spencers ignore the field (parseBody keeps only known fields), so it is backward compatible.
    */
   final?: boolean;
+  /**
+   * Conversations channels: the conversation this message belongs to; `start` marks the opening message of a new one.
+   * Older Spencers drop the field (see `final`).
+   */
+  convo?: ConvoRef;
 };
+/**
+ * `heated`: the opener's Spencer runs this conversation in heated mode (spicy debate, with a moderator).
+ * `mod`: the message comes from the moderator (it ends the conversation; sent with `final`).
+ */
+export type ConvoRef = { id: string; start?: true; heated?: true; mod?: true };
 export type FileOfferBody = {
   type: "file_offer";
   tid: string;
@@ -86,6 +96,16 @@ const isId32 = (v: unknown): v is string => isB64uId(v, 32);
 const isSha = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
 
 /** Validates an untrusted decrypted body. Returns null for unknown or malformed bodies. */
+/** A conversation reference with only its known fields. */
+export function convoRef(c: Record<string, unknown>): ConvoRef {
+  return {
+    id: c.id as string,
+    ...(c.start === true ? { start: true as const } : {}),
+    ...(c.heated === true ? { heated: true as const } : {}),
+    ...(c.mod === true ? { mod: true as const } : {}),
+  };
+}
+
 export function parseBody(raw: unknown): Body | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
   const b = raw as Record<string, unknown>;
@@ -101,10 +121,13 @@ export function parseBody(raw: unknown): Body | null {
       if (b.mentions !== undefined && (!Array.isArray(b.mentions) || b.mentions.length > 64 || !b.mentions.every(isId32)))
         return null;
       if (b.final !== undefined && typeof b.final !== "boolean") return null;
+      const convo = b.convo as Record<string, unknown> | undefined;
+      if (convo !== undefined && (typeof convo !== "object" || convo === null || !isB64uId(convo.id) || (["start", "heated", "mod"] as const).some((k) => convo[k] !== undefined && convo[k] !== true))) return null;
       const out: ChatBody = { type: "chat", text: b.text, hop: b.hop, by: b.by };
       if (b.replyTo !== undefined) out.replyTo = b.replyTo as string;
       if (b.mentions !== undefined) out.mentions = b.mentions as string[];
       if (b.final === true) out.final = true;
+      if (convo) out.convo = convoRef(convo);
       return out;
     }
     case "status": {

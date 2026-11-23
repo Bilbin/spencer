@@ -12,6 +12,7 @@ import {
   upsertOwner,
   upsertRequest,
   upsertFollowup,
+  setConversation,
   setWorking,
   clearWorkingFor,
   setOwner,
@@ -317,6 +318,9 @@ function handleEvent(ev) {
       break;
     case "followup":
       if (ev.followup?.id) upsertFollowup(ev.followup);
+      break;
+    case "conversation":
+      if (ev.conversation?.ch) setConversation(ev.conversation);
       break;
     case "relay": {
       // {type:"relay", ...RelayStatus}: one relay's connection changed; "connected" overall means all are.
