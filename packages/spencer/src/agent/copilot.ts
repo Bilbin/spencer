@@ -27,11 +27,25 @@ export const DEFAULT_GITHUB_CLIENT_ID = "Ov23lihuugW3NG0Yt8b5";
 
 const GITHUB = "https://github.com";
 const GITHUB_API = "https://api.github.com";
+const COPILOT_API_VERSION = "2026-06-01";
 const CLIENT_ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
 /** Re-check the account (plan, endpoint, models) this often; the token itself does not expire. */
 const RECHECK_MS = 6 * 60 * 60 * 1000;
 /** Used first, in order, when Spencer picks a model after sign-in. */
-export const PREFERRED_COPILOT_MODELS = ["claude-sonnet-5.5", "claude-sonnet-5", "gpt-6.1-terra", "claude-opus-5.5"];
+export const PREFERRED_COPILOT_MODELS = [
+  "claude-sonnet-5.5",
+  "claude-sonnet-5",
+  "claude-sonnet-4.6",
+  "claude-sonnet-4.5",
+  "claude-sonnet-4",
+  "gpt-6.1-terra",
+  "gpt-5.3-codex",
+  "gpt-5",
+  "gpt-4.1",
+  "gpt-4o",
+  "gpt-4o-mini",
+  "claude-opus-5.5",
+];
 
 export function userAgent(): string {
   return `spencer/${process.env.SPENCER_BUILD ?? "dev"}`;
@@ -42,12 +56,24 @@ export function githubClientId(configured?: string): string | undefined {
   return id && CLIENT_ID_RE.test(id) ? id : undefined;
 }
 
+/** A chat model discovered live from the account's Copilot `/models` endpoint. */
+export interface CopilotDiscoveredModel {
+  id: string;
+  name: string;
+  api: "anthropic-messages" | "openai-responses" | "openai-completions";
+  reasoning?: boolean;
+  vision?: boolean;
+  contextWindow?: number;
+  maxTokens?: number;
+}
+
 /** The saved credential: an OAuth credential whose access and refresh are both the GitHub token. */
 export interface CopilotCredential extends OAuthCredential {
   login: string;
   plan?: string;
   apiBase: string;
   availableModelIds?: string[];
+  availableModels?: CopilotDiscoveredModel[];
   source: "device";
 }
 
@@ -216,34 +242,95 @@ export async function copilotAccount(token: string, signal?: AbortSignal): Promi
   };
 }
 
-/** Model ids the account may use (picker-enabled, not disabled by policy, able to call tools). */
-export async function copilotModelIds(token: string, apiBase: string, signal?: AbortSignal): Promise<string[] | undefined> {
+function inferCopilotApi(id: string, endpoints: unknown): CopilotDiscoveredModel["api"] {
+  const eps = Array.isArray(endpoints) ? endpoints.filter((e): e is string => typeof e === "string") : [];
+  if (eps.includes("/v1/messages") && id.startsWith("claude")) return "anthropic-messages";
+  if (eps.includes("/responses") && !eps.includes("/chat/completions")) return "openai-responses";
+  if (eps.includes("/chat/completions")) return "openai-completions";
+  if (eps.includes("/responses")) return "openai-responses";
+  if (eps.includes("/v1/messages")) return "anthropic-messages";
+  return "openai-completions";
+}
+
+function inferReasoning(id: string, supports: Record<string, unknown> | undefined): boolean {
+  if (supports?.adaptive_thinking === true || supports?.reasoning_effort === true || supports?.thinking === true) return true;
+  return /^(o[1-9]|gpt-5|gpt-6|claude-(?:opus|sonnet|haiku|fable)-[4-9]|gemini-[2-9]|grok-[3-9])/.test(id);
+}
+
+/** Parses the JSON body of Copilot's `GET /models` response into chat models the account may use. */
+export function parseCopilotModels(body: unknown): CopilotDiscoveredModel[] | undefined {
+  const data = rec(body)?.data;
+  if (!Array.isArray(data)) return undefined;
+  const rows = data.flatMap((raw) => {
+    const m = rec(raw);
+    if (!m || typeof m.id !== "string" || !m.id.trim()) return [];
+    const caps = rec(m.capabilities);
+    const type = typeof caps?.type === "string" ? caps.type : undefined;
+    if (type && type !== "chat") return [];
+    const supports = rec(caps?.supports);
+    if (supports?.tool_calls === false) return [];
+    const limits = rec(caps?.limits);
+    const ctx =
+      typeof limits?.max_context_window_tokens === "number"
+        ? limits.max_context_window_tokens
+        : typeof limits?.max_prompt_tokens === "number"
+          ? limits.max_prompt_tokens
+          : undefined;
+    const maxTokens = typeof limits?.max_output_tokens === "number" ? limits.max_output_tokens : undefined;
+    const id = m.id.trim();
+    const name = typeof m.name === "string" && m.name.trim() ? m.name.trim() : id;
+    const reasoning = inferReasoning(id, supports);
+    const vision = supports?.vision === true || caps?.vision === true;
+    const model: CopilotDiscoveredModel = {
+      id,
+      name,
+      api: inferCopilotApi(id, m.supported_endpoints),
+      ...(reasoning ? { reasoning: true } : {}),
+      ...(vision ? { vision: true } : {}),
+      ...(ctx && ctx > 0 ? { contextWindow: ctx } : {}),
+      ...(maxTokens && maxTokens > 0 ? { maxTokens } : {}),
+    };
+    return [{ model, picker: m.model_picker_enabled === true, policy: rec(m.policy)?.state }];
+  });
+  const picker = rows.filter((r) => r.picker && r.policy !== "disabled").map((r) => r.model);
+  const chosen = picker.length ? picker : rows.filter((r) => r.policy !== "disabled").map((r) => r.model);
+  const seen = new Set<string>();
+  return chosen.filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true)));
+}
+
+/** Chat models the account may use (picker-enabled, not disabled by policy, able to call tools). */
+export async function copilotModels(token: string, apiBase: string, signal?: AbortSignal): Promise<CopilotDiscoveredModel[] | undefined> {
   const { status, body } = await getJson(
     `${apiBase}/models`,
-    { headers: { Accept: "application/json", Authorization: `Bearer ${token}`, "User-Agent": userAgent() } },
+    {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${token}`,
+        "User-Agent": userAgent(),
+        "X-GitHub-Api-Version": COPILOT_API_VERSION,
+      },
+    },
     signal,
   );
   if (status === 401) throw new CopilotAuthError("revoked", "GitHub Copilot no longer accepts this sign-in. Sign in again.");
-  const data = rec(body)?.data;
-  if (status !== 200 || !Array.isArray(data)) return undefined;
-  const rows = data.flatMap((raw) => {
-    const m = rec(raw);
-    if (!m || typeof m.id !== "string") return [];
-    if (rec(rec(m.capabilities)?.supports)?.tool_calls === false) return [];
-    return [{ id: m.id, picker: m.model_picker_enabled === true, policy: rec(m.policy)?.state }];
-  });
-  const picker = rows.filter((r) => r.picker && r.policy !== "disabled").map((r) => r.id);
-  const ids = picker.length ? picker : rows.filter((r) => r.policy !== "disabled").map((r) => r.id);
-  return [...new Set(ids)];
+  if (status !== 200) return undefined;
+  return parseCopilotModels(body);
+}
+
+/** Model ids the account may use (picker-enabled, not disabled by policy, able to call tools). */
+export async function copilotModelIds(token: string, apiBase: string, signal?: AbortSignal): Promise<string[] | undefined> {
+  const list = await copilotModels(token, apiBase, signal);
+  return list?.map((m) => m.id);
 }
 
 /** Checks the token and builds the credential to save. */
 export async function connectCopilot(token: string, source: CopilotCredential["source"], signal?: AbortSignal): Promise<CopilotCredential> {
   const account = await copilotAccount(token, signal);
-  const ids = await copilotModelIds(token, account.apiBase, signal).catch((e: unknown) => {
+  const discovered = await copilotModels(token, account.apiBase, signal).catch((e: unknown) => {
     if (e instanceof CopilotAuthError && e.code === "revoked") throw e;
     return undefined;
   });
+  const ids = discovered?.map((m) => m.id);
   return {
     type: "oauth",
     access: token,
@@ -252,7 +339,8 @@ export async function connectCopilot(token: string, source: CopilotCredential["s
     login: account.login,
     ...(account.plan ? { plan: account.plan } : {}),
     apiBase: account.apiBase,
-    ...(ids ? { availableModelIds: ids } : {}),
+    ...(ids?.length ? { availableModelIds: ids } : {}),
+    ...(discovered?.length ? { availableModels: discovered } : {}),
     source,
   };
 }
@@ -303,14 +391,54 @@ export function copilotOAuth(clientId: () => string | undefined): OAuthAuth {
   };
 }
 
-/** pi-ai's Copilot catalog and API routing, with Spencer's sign-in and Spencer's own request headers. */
-export function spencerCopilotProvider(base: Provider, clientId: () => string | undefined): Provider {
+function synthesizeCopilotModel(d: CopilotDiscoveredModel, headers: Record<string, string>, baseUrl: string): Model<Api> {
+  const base = {
+    id: d.id,
+    name: d.name || d.id,
+    api: d.api,
+    provider: COPILOT_PROVIDER,
+    baseUrl,
+    headers,
+    reasoning: !!d.reasoning,
+    input: (d.vision ? ["text", "image"] : ["text"]) as ("text" | "image")[],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: d.contextWindow ?? 128_000,
+    maxTokens: d.maxTokens ?? 16_384,
+  };
+  if (d.api === "openai-completions") {
+    return { ...base, compat: { supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: !!d.reasoning } } as Model<Api>;
+  }
+  return base as Model<Api>;
+}
+
+/**
+ * pi-ai's Copilot catalog and API routing, with Spencer's sign-in, Spencer's own request headers, and
+ * synthesized definitions for any live models returned by the account's `/models` endpoint that aren't in
+ * pi-ai's static catalog (such as `gpt-4o` / `gpt-4o-mini` on Business accounts).
+ */
+export function spencerCopilotProvider(base: Provider, clientId: () => string | undefined, cred?: CopilotCredential): Provider {
   const headers = { "User-Agent": userAgent() };
-  const models = base.getModels().map((m): Model<Api> => ({ ...m, headers }));
+  const baseUrl = cred?.apiBase ?? "https://api.githubcopilot.com";
+  const models: Model<Api>[] = base.getModels().map((m): Model<Api> => ({ ...m, headers }));
+  const known = new Set(models.map((m) => m.id));
+  const discovered: CopilotDiscoveredModel[] =
+    cred?.availableModels?.length
+      ? cred.availableModels
+      : (cred?.availableModelIds ?? []).map((id) => ({
+          id,
+          name: id,
+          api: inferCopilotApi(id, undefined),
+          ...(inferReasoning(id, undefined) ? { reasoning: true } : {}),
+        }));
+  for (const d of discovered) {
+    if (known.has(d.id)) continue;
+    known.add(d.id);
+    models.push(synthesizeCopilotModel(d, headers, baseUrl));
+  }
   return createProvider({
     id: COPILOT_PROVIDER,
     name: "GitHub Copilot",
-    baseUrl: "https://api.githubcopilot.com",
+    baseUrl,
     headers,
     auth: { oauth: copilotOAuth(clientId) },
     models,
@@ -318,7 +446,8 @@ export function spencerCopilotProvider(base: Provider, clientId: () => string | 
       const ids = isCopilotCredential(credential) ? credential.availableModelIds : undefined;
       if (!ids?.length) return list;
       const allowed = new Set(ids);
-      return list.filter((m) => allowed.has(m.id));
+      const filtered = list.filter((m) => allowed.has(m.id));
+      return filtered.length ? filtered : list;
     },
     api: {
       stream: (model, context, options) => base.stream(model as never, context, options as never),

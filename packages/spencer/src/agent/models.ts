@@ -103,10 +103,12 @@ async function copilotSetup(
   const base = await loadBuiltinProvider(COPILOT_PROVIDER);
   if (!base) return fail("the GitHub Copilot provider is missing from this build");
   const credentials = opts.credentials ?? new InMemoryCredentialStore();
+  const saved = await credentials.read(COPILOT_PROVIDER);
+  const cred = isCopilotCredential(saved) ? saved : undefined;
   const models = createModels({ credentials });
-  const provider = spencerCopilotProvider(base, opts.githubClientId ?? (() => undefined));
+  const provider = spencerCopilotProvider(base, opts.githubClientId ?? (() => undefined), cred);
   models.setProvider(provider);
-  if (!isCopilotCredential(await credentials.read(COPILOT_PROVIDER))) {
+  if (!cred) {
     return { models, error: "GitHub Copilot is not connected yet: sign in on the Model page" };
   }
   if (!c.modelId || typeof c.modelId !== "string") return { models, error: "no GitHub Copilot model is chosen: pick one on the Model page" };

@@ -13,6 +13,7 @@ import type { CoreServices, LoginState, ModelProviderOption, ModelStatus, SetMod
 import {
   COPILOT_PROVIDER,
   CopilotAuthError,
+  PREFERRED_COPILOT_MODELS,
   connectCopilot,
   githubClientId,
   isCopilotCredential,
@@ -40,10 +41,13 @@ class ModelError extends Error {
 
 /**
  * Copilot's Claude models refuse requests with thinking turned off (they want "between_tools"), so a Copilot
- * model always gets a thinking level; "medium" unless the owner set one.
+ * Claude model gets "medium" unless the owner picked another level. Other Copilot models (like GPT-4o) respect
+ * "off".
  */
 function copilotModelConfig(modelId: string, thinking: string | undefined): ModelConfig {
-  return { provider: COPILOT_PROVIDER, modelId, thinking: thinking && thinking !== "off" ? thinking : "medium" } as ModelConfig;
+  const needsThinking = /^claude-/i.test(modelId);
+  const level = thinking && thinking !== "off" ? thinking : needsThinking ? "medium" : undefined;
+  return { provider: COPILOT_PROVIDER, modelId, ...(level ? { thinking: level } : {}) } as ModelConfig;
 }
 
 function normalizeHttpUrl(raw: string): string {
@@ -156,10 +160,25 @@ export class ModelManager {
   }
 
   private copilotModels(): { id: string; name: string; reasoning?: boolean }[] {
+    const byId = new Map(this.catalog.map((m) => [m.id, m]));
+    const rank = (id: string) => {
+      const i = PREFERRED_COPILOT_MODELS.indexOf(id);
+      return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+    };
+    const sortPref = (list: { id: string; name: string; reasoning?: boolean }[]) =>
+      [...list].sort((a, b) => rank(a.id) - rank(b.id));
+
+    const discovered = this.copilot?.availableModels;
+    if (discovered?.length) {
+      return sortPref(
+        discovered.map((d) => byId.get(d.id) ?? { id: d.id, name: d.name || d.id, ...(d.reasoning ? { reasoning: true } : {}) }),
+      );
+    }
     const ids = this.copilot?.availableModelIds;
-    if (!ids?.length) return this.catalog;
-    const allowed = new Set(ids);
-    return this.catalog.filter((m) => allowed.has(m.id));
+    if (ids?.length) {
+      return sortPref(ids.map((id) => byId.get(id) ?? { id, name: id }));
+    }
+    return this.catalog;
   }
 
   private providerOptions(cur: { provider: string; apiKeyEnv?: string }): ModelProviderOption[] {

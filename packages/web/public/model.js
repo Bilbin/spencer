@@ -68,23 +68,37 @@ export function modelView(main) {
   let busy = false;
   let tick = null;
   // Draft picker state so background model events don't wipe what the user is typing.
-  const draft = { provider: "", modelId: "", filter: "", thinking: "off", baseUrl: "", apiKey: "", initialized: false, lastKey: "" };
+  const draft = { provider: "", modelId: "", filter: "", thinking: "off", baseUrl: "", apiKey: "", initialized: false, lastKey: "", wasConnected: false };
 
   const syncDraftFromModel = (m, force = false) => {
     if (!m) return;
-    const key = `${m.provider ?? ""}|${m.modelId ?? ""}|${m.thinking ?? ""}|${m.baseUrl ?? ""}|${m.copilot?.connected ? "1" : "0"}`;
+    const connected = !!m.copilot?.connected;
+    const copilotCount = m.copilot?.models?.length ?? 0;
+    const key = `${m.provider ?? ""}|${m.modelId ?? ""}|${m.thinking ?? ""}|${m.baseUrl ?? ""}|${m.ready ? "1" : "0"}|${connected ? "1" : "0"}|${copilotCount}`;
     if (!force && draft.initialized && draft.lastKey === key) return;
+    const justConnected = !draft.wasConnected && connected;
     const providers = m.providers ?? [];
-    const fallbackProv = m.copilot?.connected ? "github-copilot" : (providers[0]?.id ?? "anthropic");
-    draft.provider = providers.some((p) => p.id === m.provider) ? m.provider : fallbackProv;
+    const fallbackProv = connected ? "github-copilot" : (providers[0]?.id ?? "anthropic");
+    if (justConnected && (draft.provider === "github-copilot" || m.provider === "github-copilot")) {
+      draft.provider = "github-copilot";
+    } else if (draft.initialized && !force && draft.provider === "github-copilot" && connected) {
+      draft.provider = "github-copilot";
+    } else {
+      draft.provider = providers.some((p) => p.id === m.provider) ? m.provider : fallbackProv;
+    }
     const prov = providers.find((p) => p.id === draft.provider);
-    if (draft.provider === m.provider && m.modelId) draft.modelId = m.modelId;
-    else draft.modelId = prov?.models?.[0]?.id ?? "";
-    draft.thinking = m.thinking ?? (draft.provider === "github-copilot" ? "medium" : "off");
+    if (draft.provider === m.provider && m.modelId && (!prov?.models?.length || prov.models.some((x) => x.id === m.modelId))) {
+      draft.modelId = m.modelId;
+    } else {
+      draft.modelId = prov?.models?.[0]?.id ?? "";
+    }
+    const needsThinking = draft.provider === "github-copilot" && /^claude-/i.test(draft.modelId);
+    draft.thinking = m.thinking ?? (needsThinking ? "medium" : "off");
     draft.baseUrl = m.baseUrl ?? "";
     draft.apiKey = "";
     draft.filter = "";
     draft.initialized = true;
+    draft.wasConnected = connected;
     draft.lastKey = key;
   };
 
@@ -148,7 +162,7 @@ export function modelView(main) {
             const nextProv = providers.find((p) => p.id === draft.provider);
             if (draft.provider === m.provider && m.modelId) draft.modelId = m.modelId;
             else draft.modelId = nextProv?.models?.[0]?.id ?? "";
-            if (draft.provider === "github-copilot" && draft.thinking === "off") draft.thinking = "medium";
+            if (draft.provider === "github-copilot" && /^claude-/i.test(draft.modelId) && draft.thinking === "off") draft.thinking = "medium";
             if (draft.provider === "openai-compatible" && !draft.baseUrl) draft.baseUrl = m.baseUrl ?? "http://localhost:11434/v1";
             renderPicker(m);
           },
@@ -167,6 +181,7 @@ export function modelView(main) {
       }),
     );
 
+    const copilotClaude = isCopilot && /^claude-/i.test(draft.modelId);
     const thinkingSelect = h(
       "select.input.model-select",
       {
@@ -174,8 +189,8 @@ export function modelView(main) {
         disabled: busy,
         on: { change: (e) => (draft.thinking = e.target.value) },
       },
-      THINKING_OPTIONS.filter(([v]) => !isCopilot || v !== "off").map(([v, label]) =>
-        h("option", { value: v, selected: draft.thinking === v || (isCopilot && draft.thinking === "off" && v === "medium") }, label),
+      THINKING_OPTIONS.filter(([v]) => !copilotClaude || v !== "off").map(([v, label]) =>
+        h("option", { value: v, selected: draft.thinking === v || (copilotClaude && draft.thinking === "off" && v === "medium") }, label),
       ),
     );
 
@@ -214,7 +229,15 @@ export function modelView(main) {
         {
           "aria-label": "Model",
           disabled: busy || !filtered.length,
-          on: { change: (e) => (draft.modelId = e.target.value) },
+          on: {
+            change: (e) => {
+              draft.modelId = e.target.value;
+              if (isCopilot && /^claude-/i.test(draft.modelId) && draft.thinking === "off") {
+                draft.thinking = "medium";
+                renderPicker(m);
+              }
+            },
+          },
         },
         filtered.length
           ? filtered.map((x) => h("option", { value: x.id, selected: x.id === draft.modelId }, x.name === x.id ? x.id : `${x.name} (${x.id})`))
@@ -311,7 +334,7 @@ export function modelView(main) {
             if (!mid) return toast("Pick or enter a model ID");
             if (isCustom && !draft.baseUrl.trim()) return toast("Base URL is required for OpenAI-compatible servers");
             const opts = {
-              thinking: isCopilot && draft.thinking === "off" ? "medium" : draft.thinking,
+              thinking: isCopilot && /^claude-/i.test(mid) && draft.thinking === "off" ? "medium" : draft.thinking,
               ...(draft.apiKey.trim() ? { apiKey: draft.apiKey.trim() } : {}),
               ...(isCustom ? { baseUrl: draft.baseUrl.trim() } : {}),
             };
@@ -406,7 +429,7 @@ export function modelView(main) {
                   click: () => {
                     draft.provider = "github-copilot";
                     draft.modelId = c.models[0].id;
-                    if (draft.thinking === "off") draft.thinking = "medium";
+                    draft.thinking = /^claude-/i.test(draft.modelId) ? (draft.thinking === "off" ? "medium" : draft.thinking) : "off";
                     renderPicker(m);
                   },
                 },

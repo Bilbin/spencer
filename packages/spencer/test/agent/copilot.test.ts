@@ -4,7 +4,16 @@ import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileCredentialStore } from "../../src/agent/credentials.ts";
-import { COPILOT_PROVIDER, DEFAULT_GITHUB_CLIENT_ID, copilotOAuth, githubClientId, isCopilotCredential, pickCopilotModel, type CopilotCredential } from "../../src/agent/copilot.ts";
+import {
+  COPILOT_PROVIDER,
+  DEFAULT_GITHUB_CLIENT_ID,
+  copilotOAuth,
+  githubClientId,
+  isCopilotCredential,
+  parseCopilotModels,
+  pickCopilotModel,
+  type CopilotCredential,
+} from "../../src/agent/copilot.ts";
 import { ModelManager } from "../../src/agent/model-manager.ts";
 import { setupModels } from "../../src/agent/models.ts";
 import { resolveConfig, type ModelConfig } from "../../src/config.ts";
@@ -210,4 +219,79 @@ test("ModelManager: openai-compatible requires baseUrl when switching from anoth
   } finally {
     mm.stop();
   }
+});
+
+test("parseCopilotModels: supports Business accounts with legacy/picker-false models and filters non-chat", () => {
+  const parsed = parseCopilotModels({
+    data: [
+      { id: "text-embedding-3-small", name: "Embedding", capabilities: { type: "embeddings" } },
+      { id: "no-tools", name: "No Tools", capabilities: { type: "chat", supports: { tool_calls: false } } },
+      { id: "gpt-4o-mini-2024-07-18", name: "GPT-4o mini", model_picker_enabled: false, capabilities: { type: "chat", supports: { tool_calls: true } } },
+      { id: "gpt-4o", name: "GPT-4o", model_picker_enabled: false, capabilities: { type: "chat", supports: { tool_calls: true, vision: true }, limits: { max_prompt_tokens: 128000, max_output_tokens: 4096 } } },
+      { id: "gpt-4o", name: "GPT-4o duplicate", model_picker_enabled: false, capabilities: { type: "chat", supports: { tool_calls: true } } },
+    ],
+  });
+  assert.deepEqual(
+    parsed?.map((m) => ({ id: m.id, name: m.name, api: m.api, vision: m.vision })),
+    [
+      { id: "gpt-4o-mini-2024-07-18", name: "GPT-4o mini", api: "openai-completions", vision: undefined },
+      { id: "gpt-4o", name: "GPT-4o", api: "openai-completions", vision: true },
+    ],
+  );
+  const endpoints = parseCopilotModels({
+    data: [
+      { id: "claude-sonnet-4.5", name: "Claude Sonnet 4.5", model_picker_enabled: true, supported_endpoints: ["/v1/messages", "/chat/completions"], capabilities: { type: "chat", supports: { tool_calls: true } } },
+      { id: "gpt-5.3-codex", name: "GPT-5.3 Codex", model_picker_enabled: true, supported_endpoints: ["/responses"], capabilities: { type: "chat", supports: { tool_calls: true } } },
+    ],
+  });
+  assert.equal(endpoints?.[0].api, "anthropic-messages");
+  assert.equal(endpoints?.[1].api, "openai-responses");
+});
+
+test("Copilot live-discovered models outside pi-ai static catalog populate picker and work in setupModels", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spencer-mm-biz-"));
+  const businessCred = cred({
+    plan: "business",
+    apiBase: "https://api.business.githubcopilot.com",
+    availableModelIds: ["gpt-4o-mini-2024-07-18", "gpt-4o", "gpt-3.5-turbo"],
+    availableModels: [
+      { id: "gpt-4o-mini-2024-07-18", name: "GPT-4o mini", api: "openai-completions" },
+      { id: "gpt-4o", name: "GPT-4o", api: "openai-completions", vision: true },
+      { id: "gpt-3.5-turbo", name: "GPT 3.5 Turbo", api: "openai-completions" },
+    ],
+  });
+  const store = new FileCredentialStore(dir);
+  await store.modify(COPILOT_PROVIDER, async () => businessCred);
+
+  const { mm } = makeModelManager(dir, { provider: "anthropic", modelId: "claude-sonnet-5-5", apiKeyEnv: "ANTHROPIC_API_KEY" });
+  try {
+    await mm.init();
+    const st = mm.status();
+    assert.equal(st.copilot.connected, true);
+    assert.deepEqual(
+      st.copilot.models.map((m) => m.id),
+      ["gpt-4o", "gpt-4o-mini-2024-07-18", "gpt-3.5-turbo"],
+    );
+    assert.deepEqual(
+      st.providers?.find((p) => p.id === COPILOT_PROVIDER)?.models.map((m) => m.id),
+      ["gpt-4o", "gpt-4o-mini-2024-07-18", "gpt-3.5-turbo"],
+    );
+    assert.equal(pickCopilotModel(st.copilot.models.map((m) => m.id)), "gpt-4o");
+
+    const switched = await mm.setModel(COPILOT_PROVIDER, "gpt-4o");
+    assert.equal(switched.ready, true);
+    assert.equal(switched.provider, COPILOT_PROVIDER);
+    assert.equal(switched.modelId, "gpt-4o");
+    assert.equal(switched.thinking, undefined);
+  } finally {
+    mm.stop();
+  }
+
+  // Also works for credentials saved before `availableModels` existed (only `availableModelIds`).
+  const legacyDir = mkdtempSync(join(tmpdir(), "spencer-mm-legacy-"));
+  const legacyStore = new FileCredentialStore(legacyDir);
+  await legacyStore.modify(COPILOT_PROVIDER, async () => cred({ availableModelIds: ["gpt-4o", "gpt-3.5-turbo"] }));
+  const ok = await setupModels({ provider: COPILOT_PROVIDER, modelId: "gpt-4o" }, { name: () => "Spencer", credentials: legacyStore });
+  assert.deepEqual(ok.ref, { provider: COPILOT_PROVIDER, modelId: "gpt-4o" });
+  assert.equal(ok.models.getModel(COPILOT_PROVIDER, "gpt-4o")?.api, "openai-completions");
 });
