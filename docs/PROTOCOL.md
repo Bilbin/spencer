@@ -321,6 +321,10 @@ if no usable link is available. See [P2P design](P2P.md) for details.
   - `full`: every MCP tool; peer messages are wrapped as `<peer_message trust="full">`; outgoing files in the
     channel need no approval (whoever asked).
   - Each MCP call made from a channel conversation leaves an audit note in the owner chat.
+- **Soul**: when `<dataDir>/SOUL.md` exists (the owner's description of their Spencer's personality, values and
+  voice), every conversation's instructions end with it inside `<soul>` tags, after the trust rules, which it never
+  overrides. Channel conversations are told not to quote it to peers. It is read whenever a conversation is
+  configured: at start, on `PUT /api/soul`, and on model or channel changes.
 
 ### 7.2 Routing an incoming chat (`decideReply`) and the loop guard
 The message is always written to the channel conversation as context (a `write` entry with model text).
@@ -468,6 +472,8 @@ that, `schedule_followup` fails and tells the model to report what it has (or as
 | POST | `/api/transfers` | `{ch, path, to?}` → `Transfer` (owner-initiated; `to` is required in groups) |
 | POST | `/api/transfers/:tid/approve` · `/deny` · `/accept` · `/decline` · `/cancel` | → `Transfer` |
 | GET | `/api/mcp` | → `{servers: McpServer[]}` |
+| GET | `/api/soul` | → `{text, maxBytes}`: the owner's `<dataDir>/SOUL.md` (trimmed; `""` when there is none) |
+| PUT | `/api/soul` | `{text}` → `{text, maxBytes}`: save SOUL.md (mode 0600; empty text deletes it) and reconfigure every conversation with it (§7.1). 400 above `maxBytes` (16 KiB, UTF-8) |
 | GET | `/api/model` | → `ModelStatus` |
 | PUT | `/api/model` | `{provider, modelId, thinking?, apiKey?, clearApiKey?, apiKeyEnv?, baseUrl?}` → `ModelStatus`: switch provider/model/thinking live and save it to `config.json`. `apiKey` is stored in `<dataDir>/secrets/credentials.json` (mode 0600), never in `config.json`; `clearApiKey: true` deletes the saved key. Supports `github-copilot` (signed in), any built-in `pi-ai` provider, or `openai-compatible` (requires `baseUrl`); 400/409 otherwise |
 | POST | `/api/auth/github-copilot/login` | → `ModelStatus` with `copilot.signIn = {state:"waiting", userCode, verificationUri, expiresAt}`; progress follows as `model` events. Uses Spencer's built-in GitHub OAuth App (or `auth.githubClientId` override) |
@@ -580,4 +586,4 @@ Environment variable overrides: `SPENCER_DATA_DIR`, `SPENCER_PORT`, `SPENCER_REL
 WS(S) and are normalized to the WebSocket endpoint.
 
 The data dir is mode 0700. Secrets and databases in it (`identity.json`, `api-token`, `config.json`,
-`spencer.sqlite`, `pi.sqlite` and their `-wal`/`-shm` files) are mode 0600.
+`spencer.sqlite`, `pi.sqlite` and their `-wal`/`-shm` files) are mode 0600, as is `SOUL.md` when Spencer writes it.

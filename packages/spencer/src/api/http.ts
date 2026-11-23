@@ -405,6 +405,17 @@ export class ApiServer {
 
     if (p === "/api/mcp" && method === "GET") return { servers: b.agent().mcpStatus() };
 
+    if (p === "/api/soul") {
+      const agent = b.agent();
+      if (!agent.soul || !agent.setSoul) throw new HttpError(404, "SOUL.md is not supported");
+      if (method === "GET") return agent.soul();
+      if (method === "PUT") {
+        const body = await readJson(req);
+        if (typeof body.text !== "string") throw new HttpError(400, "text must be a string");
+        return await agent.setSoul(body.text);
+      }
+    }
+
     if (p === "/api/model") {
       const agent = b.agent();
       if (!agent.refreshModelStatus || !agent.setModel) throw new HttpError(404, "model settings are not supported");

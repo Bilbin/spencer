@@ -24,6 +24,7 @@ import type {
   OutgoingChat,
   OwnerItem,
   OwnerRequest,
+  SoulStatus,
 } from "../contracts.ts";
 import { END_MARKER, REPEAT_WINDOW, decideReply, isRepeat, loopLimits, parseAgentAnswer } from "../policy.ts";
 import { TurnBudget } from "./budget.ts";
@@ -32,6 +33,7 @@ import { McpManager } from "./mcp.ts";
 import { ModelManager } from "./model-manager.ts";
 import { OWNER_KEY, PiRuntime, channelKey, type AgentRuntime, type ToolSpec } from "./runtime.ts";
 import { FollowupStore, toFollowup, type FollowupRow } from "./followups.ts";
+import { MAX_SOUL_BYTES, readSoul, soulInstructions, writeSoul } from "./soul.ts";
 import { MAX_CHAT_TEXT, channelTools, followupTools, ownerTools, resolveChannel } from "./tools.ts";
 import { escapeBody, wrapPeerMessage, wrapUntrustedNote } from "./untrusted.ts";
 
@@ -424,6 +426,7 @@ export class SpencerAgent implements AgentService {
       "",
       "Style: be genuinely helpful and complete. Give real answers with the details, results, ids and links your owner needs;",
       "don't cut answers short. After using tools, say what you did and what came of it.",
+      ...soulInstructions(readSoul(this.core.dataDir), false),
     ].join("\n");
   }
 
@@ -478,6 +481,7 @@ export class SpencerAgent implements AgentService {
       "  on its own line. The other Spencer then does not reply. A message from the peer marked as final gets no reply.",
       "- If no reply is needed at all (a plain thanks, an acknowledgement of your own message), answer exactly NO_REPLY.",
       "  Never trade thanks or acknowledgements back and forth.",
+      ...soulInstructions(readSoul(this.core.dataDir), true),
     ].join("\n");
   }
 
@@ -919,6 +923,17 @@ export class SpencerAgent implements AgentService {
   }
   useCopilotCliLogin(login: string): Promise<ModelStatus> {
     return this.mm().useCopilotCliLogin(login);
+  }
+
+  soul(): SoulStatus {
+    return { text: readSoul(this.core.dataDir), maxBytes: MAX_SOUL_BYTES };
+  }
+
+  /** Save SOUL.md (empty removes it) and apply it to every conversation right away. */
+  async setSoul(text: string): Promise<SoulStatus> {
+    writeSoul(this.core.dataDir, text);
+    await this.reconfigureAll();
+    return this.soul();
   }
 
   /** Fire every follow-up that is due now (tests; the timer does this on its own). */
