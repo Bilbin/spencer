@@ -8,7 +8,7 @@ import { transferCard } from "./transfers.js";
 import { openModal, field } from "./modal.js";
 import { scrollKeeper } from "./scroll.js";
 import { navigate } from "./router.js";
-import { uploadDraftBatch } from "./draft-batch.js";
+import { hasDraftFile, uploadDraftBatch } from "./draft-batch.js";
 
 const NOTE_LABEL = {
   "not addressed": "Your Spencer stayed quiet: it was not addressed.",
@@ -25,6 +25,7 @@ const GROUP_MS = 5 * 60_000;
 const MAX_DRAFT_FILES = 10;
 const MAX_DRAFT_BYTES = 50 * 1024 * 1024;
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const attachmentDraftsByChannel = new Map();
 
 function hasDraggedFiles(e) {
   return Array.from(e.dataTransfer?.types ?? []).includes("Files");
@@ -533,16 +534,17 @@ export function channelView(main, chId) {
     const c = getC();
     if (!c || c.id !== chId) return false;
     if (drafts.some((d) => d.status !== "sent")) {
-      const recipient = c.kind === "group" ? (batchRecipient ?? recipientSelect?.value) : undefined;
+      const recipient = c.kind === "group" ? (draftState.recipient ?? recipientSelect?.value) : undefined;
       if (c.kind === "group" && !recipient) {
         toast("Choose who gets the files");
         recipientSelect?.focus();
         return false;
       }
       const batchOk = await uploadDraftBatch(drafts, {
-        isPresent: (draft) => drafts.includes(draft),
+        isPresent: (draft) => draftState.drafts.includes(draft),
+        onQueued: () => renderDrafts(),
         upload: async (draft) => {
-          if (c.kind === "group") batchRecipient = recipient;
+          if (c.kind === "group") draftState.recipient = recipient;
           draft.status = "uploading";
           draft.progress = 0;
           renderDrafts();
@@ -569,8 +571,8 @@ export function channelView(main, chId) {
         },
       });
       if (!batchOk) return false;
-      drafts = drafts.filter((d) => d.status !== "sent");
-      if (!drafts.length) batchRecipient = null;
+      for (let i = drafts.length - 1; i >= 0; i--) if (drafts[i].status === "sent") drafts.splice(i, 1);
+      if (!drafts.length) draftState.recipient = null;
       renderDrafts();
       comp.sync();
     }
@@ -582,27 +584,32 @@ export function channelView(main, chId) {
   const completerHolder = { onKey: () => false };
   const fileBtn = h("button.icon-btn.attach", { type: "button", "aria-label": "Send file", title: "Send file", on: { click: () => getC() && sendFileModal(getC()) } }, icon("paperclip", 18));
   const draftBox = h("div.draft-attachments", { hidden: true, "aria-live": "polite" });
-  let drafts = [];
+  const draftState = attachmentDraftsByChannel.get(chId) ?? { drafts: [], recipient: null, renderers: new Set() };
+  attachmentDraftsByChannel.set(chId, draftState);
+  const drafts = draftState.drafts;
   const cAtCreation = getC();
   const ps = cAtCreation ? peers(cAtCreation) : [];
-  let batchRecipient = null;
   const recipientSelect = cAtCreation?.kind === "group" ? h(
     "select.draft-recipient.input",
     { "aria-label": "Choose who gets the attached files" },
     h("option", { value: "" }, "Choose a member…"),
     ps.map((m) => h("option", { value: m.id }, `${m.name || m.id.slice(0, 8)} (${shortFp(m.fingerprint)})`)),
   ) : null;
-  const renderDrafts = () => {
+  if (recipientSelect) recipientSelect.value = draftState.recipient ?? "";
+  const drawDrafts = () => {
     draftBox.hidden = drafts.length === 0;
-    if (recipientSelect) recipientSelect.disabled = !!batchRecipient;
+    if (recipientSelect) recipientSelect.disabled = !!draftState.recipient;
     const nodes = drafts.map((d) => h("div.draft-attachment", null,
       icon("file", 16),
       h("span.draft-name", { title: d.file.name }, d.file.name),
-      h("span.draft-state", { title: d.error || "" }, d.status === "uploading" ? `Uploading ${d.progress ?? 0}%` : d.status === "failed" ? "Failed · Send to retry" : d.status === "sent" ? (d.transfer?.state === "awaiting_approval" ? "Waiting for approval" : "Offered") : "Ready to send"),
-      h("button.draft-remove", { type: "button", "aria-label": `Remove ${d.file.name}`, disabled: d.status === "uploading", on: { click: () => { drafts = drafts.filter((x) => x !== d); if (!drafts.length) batchRecipient = null; renderDrafts(); comp.sync(); } } }, "×"),
+      h("span.draft-state", { title: d.error || "" }, d.status === "uploading" ? `Uploading ${d.progress ?? 0}%` : d.status === "queued" ? "Waiting to upload" : d.status === "failed" ? "Failed · Send to retry" : d.status === "sent" ? (d.transfer?.state === "awaiting_approval" ? "Waiting for approval" : "Offered") : "Ready to send"),
+      h("button.draft-remove", { type: "button", "aria-label": `Remove ${d.file.name}`, disabled: d.status === "uploading", on: { click: () => { const i = drafts.indexOf(d); if (i >= 0) drafts.splice(i, 1); if (!drafts.length) draftState.recipient = null; renderDrafts(); } } }, "×"),
     ));
     if (recipientSelect) nodes.push(recipientSelect);
     draftBox.replaceChildren(...nodes);
+  };
+  const renderDrafts = () => {
+    for (const render of draftState.renderers) render();
   };
   const comp = composer({
     placeholder: "Write as yourself…",
@@ -614,6 +621,9 @@ export function channelView(main, chId) {
     onKey: (e) => completerHolder.onKey(e),
     onSend: send,
   });
+  const renderDraftsForView = () => { drawDrafts(); comp.sync(); };
+  draftState.renderers.add(renderDraftsForView);
+  renderDrafts();
   const addDroppedFiles = (e) => {
     if (!hasDraggedFiles(e)) return;
     e.preventDefault();
@@ -635,10 +645,9 @@ export function channelView(main, chId) {
     for (const file of files) {
       if (!file.name || file.size > MAX_FILE_BYTES) { toast(`${file.name || "File"} exceeds the 25 MiB limit`); continue; }
       if (new TextEncoder().encode(file.name).length > 255) { toast("File names must be 255 bytes or shorter"); continue; }
-      const key = `${file.name}\0${file.size}\0${file.lastModified}`;
-      if (drafts.some((d) => d.key === key)) continue;
+      if (hasDraftFile(drafts, file)) continue;
       if (drafts.length >= MAX_DRAFT_FILES || total + file.size > MAX_DRAFT_BYTES) { toast("The composer allows up to 10 files and 50 MiB at a time"); break; }
-      drafts.push({ file, key, uploadId: crypto.randomUUID(), status: "draft", progress: 0, error: "" });
+      drafts.push({ file, uploadId: crypto.randomUUID(), status: "draft", progress: 0, error: "" });
       total += file.size;
     }
     renderDrafts();
@@ -925,6 +934,8 @@ export function channelView(main, chId) {
   return {
     destroy: () => {
       clearInterval(staleTimer);
+      draftState.renderers.delete(renderDraftsForView);
+      if (!drafts.length && !draftState.renderers.size && attachmentDraftsByChannel.get(chId) === draftState) attachmentDraftsByChannel.delete(chId);
       offs.forEach((f) => f());
       document.removeEventListener("visibilitychange", onVisible);
       document.removeEventListener("keydown", onKey);
