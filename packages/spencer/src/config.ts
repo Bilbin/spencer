@@ -81,6 +81,8 @@ export interface SpencerConfig {
   model: ModelConfig;
   /** The model Conversations channels use (they run often and can use many tokens). Absent: the main model. */
   conversationModel?: ModelConfig;
+  /** Experimental features (SOUL.md and Conversations channels). Off by default. */
+  experimental: boolean;
   /** `throttleUpload`: croc's --throttleUpload for sends (e.g. "500k"), null = unlimited. */
   croc: { path: string; relay: string | null; pass: string | null; allowLocal: boolean; throttleUpload: string | null };
   mcpServers: Record<string, McpServerConfig>;
@@ -127,6 +129,7 @@ export function defaultConfig(): SpencerConfig {
     mcpServers: {},
     policy: { ...DEFAULT_POLICY },
     auth: {},
+    experimental: false,
   };
 }
 
@@ -147,6 +150,7 @@ export function resolveConfig(raw: Partial<SpencerConfig> & Record<string, unkno
     mcpServers: (raw.mcpServers as Record<string, McpServerConfig>) ?? {},
     policy: { ...d.policy, ...(raw.policy ?? {}) },
     auth: {},
+    experimental: raw.experimental === true,
   };
   if (raw.conversationModel && typeof raw.conversationModel === "object") cfg.conversationModel = raw.conversationModel as ModelConfig;
   const auth = raw.auth as Record<string, unknown> | undefined;

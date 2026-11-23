@@ -214,6 +214,7 @@ export interface McpServerStatus {
 // ---------------------------------------------------------------- events
 
 export type DaemonEvent =
+  | { type: "experimental"; enabled: boolean }
   | { type: "channel"; channel: Channel }
   | { type: "channel_removed"; ch: string }
   | { type: "message"; ch: string; message: ChannelMessage }
@@ -423,7 +424,9 @@ export interface AgentService {
   copilotLogout?(): Promise<ModelStatus>;
   /** Reuse the GitHub Copilot CLI's saved sign-in for this login. */
   useCopilotCliLogin?(login: string): Promise<ModelStatus>;
-  /** The owner's SOUL.md (Spencer's personality), added to every conversation's instructions. */
+  /** Experimental features were turned on or off (config `experimental`): re-apply the soul and Conversations channels. */
+  experimentalChanged?(): Promise<void>;
+  /** The owner's SOUL.md (Spencer's personality), added to every conversation's instructions (experimental). */
   soul?(): SoulStatus;
   /** Save SOUL.md (empty text removes it); applies to every conversation right away. */
   setSoul?(text: string): Promise<SoulStatus>;

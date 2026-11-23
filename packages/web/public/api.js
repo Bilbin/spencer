@@ -56,6 +56,7 @@ export const api = {
   sendFile: (ch, path, to) => request("POST", "/api/transfers", to ? { ch, path, to } : { ch, path }),
   transferAction: (tid, action) => request("POST", `/api/transfers/${enc(tid)}/${action}`),
   mcp: () => request("GET", "/api/mcp"),
+  setExperimental: (enabled) => request("PUT", "/api/experimental", { enabled }),
   soul: () => request("GET", "/api/soul"),
   setSoul: (text) => request("PUT", "/api/soul", { text }),
   cancelFollowup: (id) => request("POST", `/api/followups/${enc(id)}/cancel`),

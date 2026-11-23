@@ -1,7 +1,7 @@
 // Model & settings view: pick any provider/model/thinking effort live, and sign in to GitHub Copilot.
 import { h, icon, copyText } from "./dom.js";
 import { api, attempt, toast } from "./api.js";
-import { S, on, setModel } from "./state.js";
+import { S, on, setModel, setExperimental } from "./state.js";
 import { viewHeader } from "./common.js";
 
 const PLAN = { individual: "Copilot Pro", individual_pro: "Copilot Pro+", business: "Copilot Business", enterprise: "Copilot Enterprise", free: "Copilot Free" };
@@ -46,6 +46,34 @@ export function modelView(main) {
   const copilot = h("section.model-card", { "aria-labelledby": "copilot-title" });
   const about = h("section.model-card", { "aria-labelledby": "about-title" });
   const convo = h("section.model-card", { "aria-labelledby": "convo-title" });
+  const convoTitle = h("h2.section-title", { id: "convo-title" }, "Conversations model");
+  const expBox = h("input", { type: "checkbox", role: "switch" });
+  const experimental = h(
+    "section.model-card",
+    { "aria-labelledby": "exp-title" },
+    h(
+      "label.switch-row",
+      null,
+      expBox,
+      h(
+        "span",
+        null,
+        h("strong", null, "Experimental features"),
+        h("span.hint.block", null, "Soul (your Spencer's personality, SOUL.md) and Conversations channels (your Spencers chill out and talk on their own). Still being worked on; they may change or use a lot of tokens."),
+      ),
+    ),
+  );
+  const renderExperimental = () => {
+    expBox.checked = S.experimental;
+    convoTitle.hidden = convo.hidden = !S.experimental;
+  };
+  expBox.addEventListener("change", async () => {
+    expBox.disabled = true;
+    const r = await attempt(() => api.setExperimental(expBox.checked));
+    expBox.disabled = false;
+    if (r && typeof r.enabled === "boolean") setExperimental(r.enabled);
+    renderExperimental();
+  });
   main.append(
     viewHeader([
       h("span.title-icon", { "aria-hidden": "true" }, icon("spark", 18)),
@@ -60,10 +88,12 @@ export function modelView(main) {
         now,
         h("h2.section-title", { id: "picker-title" }, "Model picker"),
         picker,
-        h("h2.section-title", { id: "convo-title" }, "Conversations model"),
+        convoTitle,
         convo,
         h("h2.section-title", { id: "copilot-title" }, "GitHub Copilot"),
         copilot,
+        h("h2.section-title", { id: "exp-title" }, "Experimental"),
+        experimental,
         h("h2.section-title", { id: "about-title" }, "About Spencer"),
         about,
         h("p.model-foot", null, "Changes take effect immediately without restarting Spencer. Saved API keys live in ", h("code", null, "secrets/credentials.json"), " (mode 0600), never in config.json."),
@@ -655,12 +685,15 @@ export function modelView(main) {
   };
 
   render();
+  renderExperimental();
   attempt(() => api.model()).then((r) => r && setModel(r));
   const off = on("model", render);
+  const offExp = on("experimental", renderExperimental);
   return {
     destroy: () => {
       clearInterval(tick);
       off();
+      offExp();
     },
   };
 }

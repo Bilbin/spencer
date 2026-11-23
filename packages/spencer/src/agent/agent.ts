@@ -343,7 +343,7 @@ export class SpencerAgent implements AgentService {
     const key = channelKey(ch.id);
     await this.rt().ensureConversation(key);
     this.watchChannel(ch.id);
-    const convo = isConversation(ch);
+    const convo = this.isConversation(ch);
     if (convo) this.configuredHeated.set(ch.id, this.convoHeated(ch.id));
     const model = convo ? this.models?.conversationRef() : undefined;
     const thinking = convo ? this.models?.conversationThinking() : undefined;
@@ -486,7 +486,7 @@ export class SpencerAgent implements AgentService {
       "",
       "Style: be genuinely helpful and complete. Give real answers with the details, results, ids and links your owner needs;",
       "don't cut answers short. After using tools, say what you did and what came of it.",
-      ...soulInstructions(readSoul(this.core.dataDir), false),
+      ...soulInstructions(this.soulText(), false),
     ].join("\n");
   }
 
@@ -541,8 +541,8 @@ export class SpencerAgent implements AgentService {
       "  on its own line. The other Spencer then does not reply. A message from the peer marked as final gets no reply.",
       "- If no reply is needed at all (a plain thanks, an acknowledgement of your own message), answer exactly NO_REPLY.",
       "  Never trade thanks or acknowledgements back and forth.",
-      ...soulInstructions(readSoul(this.core.dataDir), true),
-      ...(isConversation(ch) ? ["", ...this.conversationInstructions(this.convoHeated(ch.id))] : []),
+      ...soulInstructions(this.soulText(), true),
+      ...(this.isConversation(ch) ? ["", ...this.conversationInstructions(this.convoHeated(ch.id))] : []),
     ].join("\n");
   }
 
@@ -633,7 +633,7 @@ export class SpencerAgent implements AgentService {
   /** Re-configure a Conversations channel whose conversation switched between heated and chill. */
   private async syncConvoMode(chId: string): Promise<void> {
     const ch = this.core.getChannel(chId);
-    if (!ch || !isConversation(ch) || this.configuredHeated.get(chId) === this.convoHeated(chId)) return;
+    if (!ch || !this.isConversation(ch) || this.configuredHeated.get(chId) === this.convoHeated(chId)) return;
     await this.configureChannel(ch);
   }
 
@@ -683,7 +683,7 @@ export class SpencerAgent implements AgentService {
     }
 
     // §7.5: a message of a conversation in a Conversations channel.
-    const convo = ch && isConversation(ch) ? msg.body.convo : undefined;
+    const convo = ch && this.isConversation(ch) ? msg.body.convo : undefined;
     if (ch && convo) {
       this.conversationSeen(ch.id, convo, msg.body.final === true && msg.body.by === "agent", msg.body.by);
       await this.syncConvoMode(ch.id);
@@ -1132,7 +1132,7 @@ export class SpencerAgent implements AgentService {
     for (const row of rows) {
       if (this.stopping) return;
       const ch = this.core.getChannel(row.ch);
-      if (!ch || !isConversation(ch)) {
+      if (!ch || !this.isConversation(ch)) {
         this.convos.remove(row.ch);
         continue;
       }
@@ -1271,7 +1271,7 @@ export class SpencerAgent implements AgentService {
   /** §7.5: my owner writes in Conversations channel `ch`: a new conversation starts, in my channel's mode, moderated by me. */
   humanConversationRef(chId: string): ConvoRef | undefined {
     const ch = this.core.getChannel(chId);
-    if (this.stopping || !this.started || !ch || !isConversation(ch)) return undefined;
+    if (this.stopping || !this.started || !ch || !this.isConversation(ch)) return undefined;
     const id = randomBytes(16).toString("base64url");
     const heated = ch.heated === true;
     this.convos.begin(chId, id, { heated, moderating: true });
@@ -1384,7 +1384,7 @@ export class SpencerAgent implements AgentService {
   conversationStatus(ch: string): ConversationStatus {
     const c = this.core.getChannel(ch);
     if (!c) throw new AgentHttpError(404, "unknown channel");
-    if (!isConversation(c)) throw new AgentHttpError(400, "not a Conversations channel");
+    if (!this.isConversation(c)) throw new AgentHttpError(400, "not a Conversations channel");
     if (!this.convos.get(ch)) this.convos.ensure(ch);
     return this.conversationStatusOf(ch)!;
   }
@@ -1446,6 +1446,25 @@ export class SpencerAgent implements AgentService {
     return this.mm().useCopilotCliLogin(login);
   }
 
+  /** Experimental features (SOUL.md, Conversations channels) are on (config `experimental`). */
+  private experimental(): boolean {
+    return this.core.config().experimental === true;
+  }
+
+  /** A Conversations channel, while experimental features are on (off: it behaves as a plain group). */
+  private isConversation(ch: Channel): boolean {
+    return this.experimental() && isConversationChannel(ch);
+  }
+
+  /** SOUL.md, applied only while experimental features are on. */
+  private soulText(): string {
+    return this.experimental() ? readSoul(this.core.dataDir) : "";
+  }
+
+  async experimentalChanged(): Promise<void> {
+    await this.reconfigureAll();
+  }
+
   soul(): SoulStatus {
     return { text: readSoul(this.core.dataDir), maxBytes: MAX_SOUL_BYTES };
   }
@@ -1489,7 +1508,7 @@ export class SpencerAgent implements AgentService {
     const member = ch?.members.find((m) => m.id === msg.from);
     const me = this.core.me();
     const attrs: Record<string, string> = {};
-    if (ch && isConversation(ch)) {
+    if (ch && this.isConversation(ch)) {
       if (msg.body.by === "human") attrs.person = "true";
       if (msg.body.convo?.mod) attrs.moderator = "true";
     }
@@ -1500,7 +1519,7 @@ export class SpencerAgent implements AgentService {
     }
     return wrapPeerMessage({
       channel: msg.channelName,
-      from: ch && isConversation(ch) ? this.speakerName(msg, ch) : (msg.fromName ?? member?.name ?? msg.from),
+      from: ch && this.isConversation(ch) ? this.speakerName(msg, ch) : (msg.fromName ?? member?.name ?? msg.from),
       fingerprint: member?.fingerprint,
       hop: msg.body.hop,
       text: msg.body.text,
@@ -1532,7 +1551,7 @@ export class SpencerAgent implements AgentService {
     await this.ensureChannel(msg.ch);
     // §7.5: in a Conversations channel my owner is one of the people in the chat: my Spencer may answer them too.
     const ch = this.core.getChannel(msg.ch);
-    const active = ch && isConversation(ch) && msg.origin === "human" ? this.convos.active(msg.ch) : undefined;
+    const active = ch && this.isConversation(ch) && msg.origin === "human" ? this.convos.active(msg.ch) : undefined;
     if (ch && active && active.started_at >= msg.ts - 60_000) {
       await this.route({
         id: msg.id,
@@ -1837,7 +1856,7 @@ function ownerOf(name: string): string {
   return name.replace(/['’]s Spencer$/i, "") || name;
 }
 
-function isConversation(ch: Channel): boolean {
+function isConversationChannel(ch: Channel): boolean {
   return ch.kind === "group" && ch.mode === "conversation";
 }
 

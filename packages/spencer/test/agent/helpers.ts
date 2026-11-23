@@ -79,6 +79,8 @@ export function makeCore(opts: { dir?: string; channels?: Channel[]; config?: Pa
   const db = new DatabaseSync(join(dir, "core.db"));
   const cfg: SpencerConfig = { ...defaultConfig(), name: ME.name, model: { provider: "fake" }, ...opts.config };
   cfg.policy = { ...defaultConfig().policy, ownerCodingTools: false, ...(opts.config?.policy ?? {}) };
+  // The soul and Conversations channels are tested here, so experimental features are on unless a test turns them off.
+  cfg.experimental = opts.config?.experimental ?? true;
   const channels = new Map<string, Channel>((opts.channels ?? [channel("chDirect", "direct", "Bob chat"), channel("chGroup", "group", "Team")]).map((c) => [c.id, c]));
   const byKey = new Map<string, string>();
   const core: StubCore = {

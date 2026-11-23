@@ -353,6 +353,7 @@ export class Daemon {
       },
       leaveChannel: (ch) => this.leave(ch),
       acceptInvite: (link) => channels.acceptInvite(link),
+      setExperimental: (enabled) => this.saveExperimental(enabled),
       ...(webRoot ? { webRoot } : {}),
     });
     await s.api.listen(cfg.http.port);
@@ -665,6 +666,17 @@ export class Daemon {
     this.s.cfg = { ...rest, ...(model ? { conversationModel: model } : {}) };
   }
 
+  /** Turn experimental features on or off, saved in config.json, and re-apply them right away. */
+  async saveExperimental(enabled: boolean): Promise<{ enabled: boolean }> {
+    if (this.need("cfg").experimental !== enabled) {
+      this.writeConfigKey("experimental", enabled);
+      this.s.cfg = { ...this.need("cfg"), experimental: enabled };
+      await this.s.agent?.experimentalChanged?.();
+      this.events.emit({ type: "experimental", enabled });
+    }
+    return { enabled };
+  }
+
   /** Set (or with `undefined`, remove) one top-level key of config.json, atomically. */
   private writeConfigKey(key: string, value: unknown): void {
     const file = join(this.dataDir, "config.json");
@@ -696,6 +708,7 @@ export class Daemon {
       transfers: this.s.transfers?.list() ?? [],
       mcp: agent?.mcpStatus() ?? [],
       policy: cfg.policy,
+      experimental: cfg.experimental,
       ownerBusy: agent?.ownerBusy() ?? false,
       requests: agent?.listRequests?.() ?? [],
       followups: agent?.listFollowups?.() ?? [],
