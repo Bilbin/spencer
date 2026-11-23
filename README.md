@@ -28,30 +28,28 @@ TypeScript runs directly on Node ≥ 22.18 through type stripping. There is no b
 
 ## Install
 
-### Quick install (Linux & macOS)
+### Quick install (Linux)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/PJalv/spencer/main/install.sh | sh
 ```
 
-This downloads the prebuilt binary for your OS/architecture from [GitHub Releases](https://github.com/PJalv/spencer/releases), verifies its SHA-256 checksum against `SHA256SUMS`, and installs it to `~/.local/bin/spencer` (override with `SPENCER_INSTALL_DIR` or `SPENCER_VERSION=v0.1.0`).
+This downloads the prebuilt Linux binary (`x64` or `arm64`) from [GitHub Releases](https://github.com/PJalv/spencer/releases), verifies its SHA-256 checksum against `SHA256SUMS`, and installs it to `~/.local/bin/spencer` (override with `SPENCER_INSTALL_DIR` or `SPENCER_VERSION=v0.1.0`).
 
 Then run it:
 
 ```sh
 spencer                                                               # opens the web UI in your browser
 spencer --no-open --port 7420 --name "Alice's Spencer" --relay wss://hub.example.com/ws
-spencer service install                                               # optional: start at login (systemd user unit / launchd)
+spencer service install                                               # optional: start at login (systemd user unit)
 spencer service uninstall
 ```
 
 ### Single binary (manual download or build)
 
-You can also download `spencer-<os>-<arch>` directly from [Releases](https://github.com/PJalv/spencer/releases), `chmod +x` it, and run it.
+You can also download `spencer-linux-x64` or `spencer-linux-arm64` directly from [Releases](https://github.com/PJalv/spencer/releases), `chmod +x` it, and run it.
 
-The binary bundles Node 24, Spencer, its web UI, the pinned `node-datachannel` native addon (for direct P2P file transfers), and pinned `croc` v10.3.1. On first start it unpacks them into `~/.cache/spencer/<build>/` (macOS: `~/Library/Caches/spencer/`); data lives in `~/.local/share/spencer` as usual. Builds exist for `linux-x64`, `linux-arm64`, `darwin-arm64`, and `darwin-x64`.
-
-Build them yourself (needs Node 24.12.0, the version embedded in the binary):
+The binary bundles Node 24, Spencer, its web UI, the pinned `node-datachannel` native addon (for direct P2P file transfers), and pinned `croc` v10.3.1. On first start it unpacks them into `~/.cache/spencer/<build>/` (macOS: `~/Library/Caches/spencer/`); data lives in `~/.local/share/spencer` as usual. On macOS, use Nix, npm, or build the single binary locally:
 
 ```sh
 npm ci && npm run build:binary                        # this machine's platform → dist/binary/spencer-<target>

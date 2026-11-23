@@ -25,10 +25,14 @@ OS_RAW=$(uname -s)
 ARCH_RAW=$(uname -m)
 
 case "$OS_RAW" in
-  Linux)  OS="linux" ;;
-  Darwin) OS="darwin" ;;
+  Linux) OS="linux" ;;
+  Darwin)
+    printf 'spencer install: prebuilt binaries are currently published for Linux (x86_64, arm64) only.\n' >&2
+    printf 'On macOS, run with Nix (`nix run github:%s`) or build from source (`npm ci && npm run build:binary`).\n' "$REPO" >&2
+    exit 1
+    ;;
   *)
-    printf 'spencer install: unsupported OS "%s" (supported: Linux, macOS)\n' "$OS_RAW" >&2
+    printf 'spencer install: unsupported OS "%s" (supported: Linux)\n' "$OS_RAW" >&2
     exit 1
     ;;
 esac

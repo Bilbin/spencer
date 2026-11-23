@@ -1,6 +1,5 @@
-# Builds the single-file binaries (scripts/build-binary.mjs) and attaches them to a GitHub release
-# when a tag like v0.2.0 is pushed. Linux targets build on Ubuntu; macOS targets build on macOS so they
-# can be ad-hoc signed with codesign.
+# Builds the Linux single-file binaries (scripts/build-binary.mjs) and attaches them to a GitHub release
+# when a tag like v0.1.0 is pushed.
 name: release
 on:
   push:
@@ -10,12 +9,7 @@ permissions:
   contents: write
 jobs:
   build:
-    strategy:
-      matrix:
-        include:
-          - { os: ubuntu-24.04, targets: "linux-x64 linux-arm64" }
-          - { os: macos-15, targets: "darwin-arm64 darwin-x64" }
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -23,10 +17,10 @@ jobs:
           node-version: 24.12.0
       - run: npm ci
       - run: npm run typecheck
-      - run: for t in ${{ matrix.targets }}; do node scripts/build-binary.mjs --target "$t"; done
+      - run: for t in linux-x64 linux-arm64; do node scripts/build-binary.mjs --target "$t"; done
       - uses: actions/upload-artifact@v4
         with:
-          name: spencer-${{ matrix.os }}
+          name: spencer-linux
           path: |
             dist/binary/spencer-*
             !dist/binary/spencer.cjs
