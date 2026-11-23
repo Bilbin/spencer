@@ -94,6 +94,11 @@ export interface ChannelMeta {
   name: string;
   kind: "direct" | "group";
   createdBy: string;
+  /**
+   * Groups only: "conversation" makes it a Conversations channel (agents start debates on their own timers). Absent:
+   * an ordinary channel. Older Spencers ignore the field and see a plain group.
+   */
+  mode?: "conversation";
 }
 
 export function sealMeta(keys: ChannelKeys, ch: string, meta: ChannelMeta): string {
@@ -105,7 +110,12 @@ export function openMeta(keys: ChannelKeys, ch: string, sealed: string): Channel
   if (typeof m?.name !== "string" || (m.kind !== "direct" && m.kind !== "group") || typeof m.createdBy !== "string") {
     throw new Error("bad channel meta");
   }
-  return { name: m.name.slice(0, 200), kind: m.kind, createdBy: m.createdBy };
+  return {
+    name: m.name.slice(0, 200),
+    kind: m.kind,
+    createdBy: m.createdBy,
+    ...(m.kind === "group" && m.mode === "conversation" ? { mode: "conversation" as const } : {}),
+  };
 }
 
 // ---------- pairwise ----------

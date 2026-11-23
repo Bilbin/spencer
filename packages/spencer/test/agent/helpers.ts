@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import type { ConvoRef } from "@spencer/protocol";
 import { defaultConfig, type SpencerConfig } from "../../src/config.ts";
 import type {
   Channel,
@@ -33,6 +34,7 @@ export interface SentChat {
   replyTo?: string;
   mentions?: string[];
   final?: boolean;
+  convo?: ConvoRef;
   idempotencyKey?: string;
 }
 
@@ -56,6 +58,7 @@ export function channel(id: string, kind: "direct" | "group", name: string, extr
   return {
     id,
     kind,
+    mode: "chat",
     name,
     relayUrl: "ws://127.0.0.1:1/ws",
     members: [{ ...ME, me: true, presence: "online" as const }, ...peers.map((p) => ({ ...p, me: false, presence: "online" as const }))],
@@ -101,7 +104,7 @@ export function makeCore(opts: { dir?: string; channels?: Channel[]; config?: Pa
       const id = randomUUID();
       if (msg.idempotencyKey) byKey.set(msg.idempotencyKey, id);
       core.sent.push({ ch, id, ...msg });
-      core.messages.push({ id, ch, from: ME.id, mine: true, ts: Date.now(), type: "chat", text: msg.text, hop: msg.hop, by: msg.by, status: "pending" });
+      core.messages.push({ id, ch, from: ME.id, mine: true, ts: Date.now(), type: "chat", text: msg.text, hop: msg.hop, by: msg.by, status: "pending", ...(msg.convo ? { convo: msg.convo } : {}) });
       return { id };
     },
     sendStatus(ch, s) {
@@ -129,9 +132,13 @@ export function makeCore(opts: { dir?: string; channels?: Channel[]; config?: Pa
     },
     listTransfers: () => [],
     async createInvite(kind, name) {
-      const c = channel(`ch${channels.size + 1}`, kind, name);
+      const c = channel(`ch${channels.size + 1}`, kind === "direct" ? "direct" : "group", name, kind === "conversation" ? { mode: "conversation" } : {});
       channels.set(c.id, c);
       return { link: `https://example.test/i/${c.id}#secret`, channel: c };
+    },
+    saveConversationModel(m) {
+      if (m) cfg.conversationModel = m;
+      else delete cfg.conversationModel;
     },
     events: { emit: (e) => core.emitted.push(e) },
     cleanup() {
@@ -148,10 +155,17 @@ let seq = 0;
 export function peerChat(
   ch: Channel,
   text: string,
-  extra: Omit<Partial<IncomingChat>, "from"> & { hop?: number; mentions?: string[]; by?: "human" | "agent"; final?: boolean; from?: typeof BOB } = {},
+  extra: Omit<Partial<IncomingChat>, "from"> & {
+    hop?: number;
+    mentions?: string[];
+    by?: "human" | "agent";
+    final?: boolean;
+    convo?: ConvoRef;
+    from?: typeof BOB;
+  } = {},
 ): IncomingChat {
   const from = extra.from ?? BOB;
-  const { hop = 0, mentions, by = "human", final, from: _from, ...rest } = extra;
+  const { hop = 0, mentions, by = "human", final, convo, from: _from, ...rest } = extra;
   return {
     id: `msg-${++seq}-${randomUUID()}`,
     ch: ch.id,
@@ -159,7 +173,7 @@ export function peerChat(
     from: from.id,
     fromName: from.name,
     ts: Date.now(),
-    body: { type: "chat", text, hop, by, ...(mentions ? { mentions } : {}), ...(final ? { final } : {}) },
+    body: { type: "chat", text, hop, by, ...(mentions ? { mentions } : {}), ...(final ? { final } : {}), ...(convo ? { convo } : {}) },
     channelKind: ch.kind,
     channelName: ch.name,
     ...rest,

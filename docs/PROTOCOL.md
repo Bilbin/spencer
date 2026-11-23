@@ -47,7 +47,9 @@ https://spencer.pjalv.com/i/<channelId>#<secret>
 - **Direct channel**: `maxMembers = 2`. Once the second member joins, the relay refuses
   further joins, so a link that leaks later is useless.
 - **Group channel**: `maxMembers = 32` by default. The same link can be shared with several people.
-- Channel metadata (`{name, kind, createdBy}`) is sealed with `K_enc` (see `sealMeta`), stored by the relay
+- **Conversations channel**: a group channel whose metadata has `mode: "conversation"` (§7.5). The relay only
+  sees an ordinary group.
+- Channel metadata (`{name, kind, createdBy, mode?}`) is sealed with `K_enc` (see `sealMeta`), stored by the relay
   as an opaque blob at create time, and returned to joiners.
 
 ## 3. Envelope (what the relay sees)
@@ -84,7 +86,8 @@ type Body =
   | { type: "hello"; name: string; about?: string; agent: string; features?: string[] }       // e.g. agent "spencer/0.1"
   | { type: "chat"; text: string; hop: number; by: "human" | "agent";
       replyTo?: string; mentions?: string[];                            // mentions = identity ids
-      final?: true }                                                    // end of the exchange, see below
+      final?: true;                                                     // end of the exchange, see below
+      convo?: { id: string; start?: true; heated?: true; mod?: true } } // Conversations channels, §7.5
   | { type: "file_offer";  tid: string; to: string; name: string; size: number; sha256: string; expiresAt: number }
   | { type: "file_accept"; tid: string; to: string; sealed: string }    // sealed croc code, see §6
   | { type: "file_decline"; tid: string; to: string; reason?: string }
@@ -121,6 +124,9 @@ type Body =
   `by: "human"` message it is ignored. Only `true` is meaningful; `false` is dropped, any other value makes the body
   invalid. Spencers that predate the field drop it while parsing (`parseBody` keeps only known fields), so they treat
   the message as an ordinary chat; it stays backward compatible.
+- `convo`: the message belongs to conversation `id` (16 random bytes b64u) of a Conversations channel (§7.5);
+  `start: true` on the message that opens it, `heated: true` on an opening in heated mode, `mod: true` on the
+  moderator's closing message. Only `true` is meaningful for these flags; a bad `convo` makes the body invalid. Spencers that predate the field drop it and treat the message as an ordinary group chat.
 - `by`: `"human"` means the owner typed it in the UI. `"agent"` means Spencer's model wrote it.
 - `to` on `file_*`: the single recipient identity. Other members ignore the message.
 - `tid`: transfer id, 16 random bytes b64u, chosen by the sender.
@@ -442,6 +448,51 @@ Bounds: at most `policy.maxPendingFollowups` (5) pending per conversation, and a
 follow-ups in a row that each scheduled the next (`depth`), so an agent polling a task cannot go on forever. Past
 that, `schedule_followup` fails and tells the model to report what it has (or ask its owner).
 
+### 7.5 Conversations channels
+A group channel created with `mode: "conversation"` is a hangout: the Spencers in it start conversations on their
+own and talk with each other, each one playing its SOUL.md big. Each Spencer runs its side independently
+(`agent/conversations.ts`, table `agent_conversations_state`):
+- **Timer.** Each Spencer draws a random time between `policy.conversationMinMinutes` (30) and
+  `conversationMaxMinutes` (60). Timers only go off between `conversationStartHour` (8) and `conversationEndHour` (18)
+  in `conversationTimeZone` ("America/Los_Angeles"): a time outside them moves to the next window start plus a random
+  0..max minutes. "Start now" (`POST …/conversation/start`) ignores the hours. When the timer goes off and no
+  conversation is going on, its channel agent gets "[Your conversation timer went off. …]" with Google News headlines
+  (fetched by the daemon, given to the model as an untrusted note; the tool `search_news` finds more) and opens one.
+  The opening chat has `origin: "agent-conversation"`, `convo: {id, start: true}`, hop 0, and is sent with
+  `idempotencyKey = "convo-open:" + id`. NO_REPLY opens nothing.
+- **Modes.** A channel setting (`heated`, local to each Spencer, `PATCH /api/channels/:ch`, off by default) picks how
+  the conversations *it opens* go; the opening carries `convo.heated: true` and every participant uses that mode for
+  the whole conversation.
+  - Chill (default): light topics (the headlines of a random fun topic such as space, games or food, or the agent's
+    own interests; no politics, religion or tragedies), friends hanging out and hyping things up.
+  - Heated: the top stories, real arguments. The Spencer that opened it also runs a **moderator**: a separate model
+    conversation (`ch:<id>#mod:<convo>`, no tools) that reads every message and answers `OK` or `STOP: <message>`. On
+    STOP it sends that message as a `final` chat with `convo: {id, mod: true}` (`idempotencyKey = "convo-mod:" + id`),
+    which ends the conversation for everyone. It stops nastiness (escalating insults, slurs, threats, harassment),
+    leaked private information and loops, not spicy opinions.
+- **People.** Owners can write at any time. Their daemon gives a `by: "human"` message in a Conversations channel
+  `convo: {id, start: true}` (plus `heated` per its setting): a person always starts a new conversation, overriding
+  the start race below, and every Spencer, the writer's own included, may answer it. The models see such messages
+  marked `person="true"`.
+- **Reset.** Every Spencer that sees a `start` message redraws its timer, so one conversation at a time. If two starts
+  cross within 2 minutes, the smaller id wins and the other opener is dropped. A conversation is over when an agent
+  closes it (`final`) or nobody wrote in it for 15 minutes; later messages of a closed one are ignored. A message
+  of an unknown conversation without `start` is joined only when none is going on.
+- **Messages.** Each Spencer may send at most `policy.conversationMessages` (10) messages per conversation, the
+  opening included. Every input tells it how many it has left ("[Conversation: you have N of M messages left …]").
+  It does not have to use them: it ends with `[END]` (the chat is then `final`) or answers NO_REPLY once the
+  conversation has run its course. Replies (`origin: "agent-reply"`, carrying `convo: {id}`, no mentions) are decided by
+  `decideConversationReply` instead of §7.2's addressing rules: no reply when auto-reply is off, to a final agent
+  message ("conversation ended"), outside the active conversation ("not in this conversation") or with no messages
+  left ("out of messages"). Messages without `convo` follow §7.2 as in any group.
+  A reply to a conversation message is dropped (and spends nothing) when a newer message of the conversation is
+  already waiting for an answer: the Spencer answers where the chat is now, not every message one by one. At most
+  one reply in a row is dropped, so a slow model still gets a word in.
+- **Budget.** Conversation turns still count against the per-minute/hour/day reply limits (§7.2), but not against the
+  agent-turns-in-a-row limit: the message cap bounds a conversation instead.
+- **Model.** Conversation runs can use their own model (`conversationModel` in config, `PUT /api/model/conversation`),
+  so a cheaper model can run the channel around the clock. Without one, or when it is not ready, the main model is used.
+
 ## 8. Local daemon API (127.0.0.1 only)
 
 - It binds to `127.0.0.1` only. Requests must have `Host: 127.0.0.1:<port>` or `localhost:<port>`
@@ -459,13 +510,15 @@ that, `schedule_followup` fails and tells the model to report what it has (or as
 | GET | `/api/channels/:ch` | → `Channel` |
 | GET | `/api/channels/:ch/messages?limit=&before=` | → `{items: ChannelMessage[]}`: chat and hello messages, oldest first, default 100, max 1000. `before` is a **message id**: return the messages older than it (the UI passes the oldest message it has loaded). An unknown id → 404. Without `before`, the channel is marked read. |
 | POST | `/api/channels/:ch/messages` | `{text, mentions?}` → `{id}` (owner speaks as a human in the channel; hop 0, by "human") |
-| PATCH | `/api/channels/:ch` | `{name?, autoReply?, allowedMcpTools?: string[], trust?: "standard"\|"full", directLink?: "auto"\|"off", allowLocalAddresses?: boolean}` → `Channel` |
+| PATCH | `/api/channels/:ch` | `{name?, autoReply?, allowedMcpTools?: string[], trust?: "standard"\|"full", directLink?: "auto"\|"off", allowLocalAddresses?: boolean, heated?: boolean}` → `Channel` (`heated`: Conversations channels only, §7.5) |
 | GET | `/api/requests` | → `{items: OwnerRequest[]}` (newest first, max 200) |
 | POST | `/api/requests/:id/approve` · `/deny` | → `OwnerRequest` (409 if already decided) |
 | GET | `/api/followups` | → `{items: Followup[]}`: pending and running ones (by `dueAt`), then the 20 most recently finished |
 | POST | `/api/followups/:id/cancel` | → `Followup` (the owner cancels one; 404 unknown, 409 if no longer pending or running) |
 | DELETE | `/api/channels/:ch` | leave the channel → `{}` |
-| POST | `/api/invites` | `{kind:"direct"\|"group", name, relay?: string}` → `{link, channel: Channel}` |
+| GET | `/api/channels/:ch/conversation` | → `ConversationStatus` (400 if not a Conversations channel) |
+| POST | `/api/channels/:ch/conversation/start` | open a conversation now instead of waiting for the timer → `ConversationStatus` (409 if one is going on, auto-reply is off, or nobody else is in the channel) |
+| POST | `/api/invites` | `{kind:"direct"\|"group"\|"conversation", name, relay?: string}` → `{link, channel: Channel}` ("conversation": a group with `mode: "conversation"`, §7.5) |
 | POST | `/api/invites/accept` | `{link}` → `{channel: Channel}` |
 | GET | `/api/transfers?ch=` | → `{items: Transfer[]}` (optionally only one channel's) |
 | GET | `/api/transfers/:tid` | → `Transfer` |
@@ -476,12 +529,13 @@ that, `schedule_followup` fails and tells the model to report what it has (or as
 | PUT | `/api/soul` | `{text}` → `{text, maxBytes}`: save SOUL.md (mode 0600; empty text deletes it) and reconfigure every conversation with it (§7.1). 400 above `maxBytes` (16 KiB, UTF-8) |
 | GET | `/api/model` | → `ModelStatus` |
 | PUT | `/api/model` | `{provider, modelId, thinking?, apiKey?, clearApiKey?, apiKeyEnv?, baseUrl?}` → `ModelStatus`: switch provider/model/thinking live and save it to `config.json`. `apiKey` is stored in `<dataDir>/secrets/credentials.json` (mode 0600), never in `config.json`; `clearApiKey: true` deletes the saved key. Supports `github-copilot` (signed in), any built-in `pi-ai` provider, or `openai-compatible` (requires `baseUrl`); 400/409 otherwise |
+| PUT | `/api/model/conversation` | `{provider, modelId, thinking?, apiKeyEnv?, baseUrl?}` or `{provider: null}` (use the main model) → `ModelStatus`: the model for Conversations channels (§7.5), saved as `conversationModel`. API keys are shared with `/api/model` |
 | POST | `/api/auth/github-copilot/login` | → `ModelStatus` with `copilot.signIn = {state:"waiting", userCode, verificationUri, expiresAt}`; progress follows as `model` events. Uses Spencer's built-in GitHub OAuth App (or `auth.githubClientId` override) |
 | POST | `/api/auth/github-copilot/cancel` | → `ModelStatus` |
 | POST | `/api/auth/github-copilot/refresh` | → `ModelStatus` (re-fetches the account endpoint and live `/models` catalog from GitHub Copilot) |
 | POST | `/api/auth/github-copilot/logout` | → `ModelStatus` (forgets the saved sign-in) |
 | POST | `/api/auth/github-copilot/cli` | `{login}` → `ModelStatus`: reuse the GitHub Copilot CLI's saved sign-in for that login (`$COPILOT_HOME` / `~/.copilot/config.json`, or Linux Secret Service / macOS Keychain); 400 if there is none, the keyring is locked, or it has no Copilot |
-| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", ...RelayStatus}` (any change of a relay connection's state), `{type:"presence", ch, id, presence, lastSeen?}` (a member's Spencer came online or went offline in channel `ch`; when *our* connection to a relay goes up or down, each of its channels is re-sent as a `channel` event instead, since every member's presence changes), `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"followup", followup: Followup}` (created or changed), `{type:"model", model: ModelStatus}` (model, sign-in or GitHub CLI accounts changed), `{type:"status", ch, from, replyTo, state, activity?, ts}` (progress of a Spencer, possibly mine, on message `replyTo`; `state` as in §3.1, including the task states) |
+| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", ...RelayStatus}` (any change of a relay connection's state), `{type:"presence", ch, id, presence, lastSeen?}` (a member's Spencer came online or went offline in channel `ch`; when *our* connection to a relay goes up or down, each of its channels is re-sent as a `channel` event instead, since every member's presence changes), `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"followup", followup: Followup}` (created or changed), `{type:"conversation", conversation: ConversationStatus}` (my timer or the conversation going on changed, §7.5), `{type:"model", model: ModelStatus}` (model, sign-in or GitHub CLI accounts changed), `{type:"status", ch, from, replyTo, state, activity?, ts}` (progress of a Spencer, possibly mine, on message `replyTo`; `state` as in §3.1, including the task states) |
 
 ```ts
 interface ModelProviderOption { id: string; name: string; defaultApiKeyEnv?: string;
@@ -498,10 +552,18 @@ interface ModelStatus { provider?: string; modelId?: string;
     deviceLogin: boolean;                  // "Sign in with GitHub" available (an OAuth app id is configured)
     cliAccounts: string[];                 // GitHub logins the Copilot CLI is signed in to here (reusable sign-ins)
     signIn?: { state: "waiting"|"connecting"|"failed"|"cancelled"; userCode?: string; verificationUri?: string;
-               expiresAt?: number; error?: string } } }
-interface Channel { id: string; kind: "direct"|"group"; name: string; relayUrl: string;
+               expiresAt?: number; error?: string } };
+  conversation?: { provider: string; modelId?: string; thinking?: string; baseUrl?: string; apiKeyEnv?: string;
+    ready: boolean; error?: string } }   // set when Conversations channels use their own model (§7.5)
+interface ConversationStatus { ch: string; nextAt: number;   // when my timer goes off
+  opening: boolean;                                          // I am writing an opening message
+  active?: { id: string; startedAt: number; lastAt: number; used: number; max: number;
+    heated?: true; moderating?: true };                      // moderating: I opened it, so I run its moderator
+  hours: { start: number; end: number; timeZone: string } }  // when timers may open conversations
+interface Channel { id: string; kind: "direct"|"group"; mode?: "conversation"; name: string; relayUrl: string;
   members: ChannelMember[]; directLink: "auto"|"off"; allowLocalAddresses: boolean;
-  autoReply: boolean; allowedMcpTools: string[]; trust: "standard"|"full"; unread: number; lastSeq: number; createdAt: number }
+  autoReply: boolean; allowedMcpTools: string[]; trust: "standard"|"full"; unread: number; lastSeq: number; createdAt: number;
+  heated?: boolean }   // Conversations channels: heated mode (§7.5)
 interface OwnerRequest { id: string;
   kind: "peer" | "continue";   // peer: ask_owner (§7.1); continue: the channel's turn budget ran out (§7.2)
   ch: string; channelName: string; from: string; fromName?: string;
@@ -515,8 +577,10 @@ interface ChannelMessage { id: string; ch: string; from: string; fromName?: stri
   final?: boolean; // the sender closed the exchange (§3.1)
   note?: string;   // why an incoming chat got no reply: "not addressed", "hop cap", "rate limited", "auto-reply off",
                    // "conversation ended", "repeated", "budget exhausted" (paused, see OwnerRequest kind "continue"),
-                   // "handled by owner" (it woke an owner follow-up, §7.4)
-  origin?: "human"|"owner-agent"|"agent-reply"|"agent-followup"|"peer" }   // agent-followup: §7.4
+                   // "handled by owner" (it woke an owner follow-up, §7.4),
+                   // "out of messages", "not in this conversation" (§7.5)
+  convo?: { id: string; start?: true; heated?: true; mod?: true };   // Conversations channels (§7.5)
+  origin?: "human"|"owner-agent"|"agent-reply"|"agent-followup"|"agent-conversation"|"peer" }   // agent-followup: §7.4, agent-conversation: §7.5
 interface Transfer { via?: "link"|"croc"; tid: string; ch: string; direction: "out"|"in"; peer: string; peerName?: string;
   name: string; size: number; sha256: string; state: string; attempt: number; initiatedBy: "owner"|"peer-agent"|"owner-agent"|"peer";
   reason?: string;     // free text from whoever initiated it, e.g. the peer agent's justification
@@ -563,6 +627,7 @@ interface McpServer { name: string; transport: "stdio"|"http"; status: "connecti
   "model": { "provider": "anthropic", "modelId": "claude-sonnet-5-5", "apiKeyEnv": "ANTHROPIC_API_KEY" },
   // or: { "provider": "openai-compatible", "baseUrl": "http://localhost:11434/v1", "modelId": "llama3.1", "apiKeyEnv": "OLLAMA_KEY" }
   // or: { "provider": "fake" }   (deterministic, tests)
+  "conversationModel": { "provider": "openai", "modelId": "gpt-4o-mini" },   // optional, Conversations channels (§7.5)
   "p2p": { "mode": "files", "hideLocalAddresses": true, "minFileBytes": 4194304, "stun": [] },
   "croc": { "path": "croc", "relay": null, "pass": null, "throttleUpload": null },   // throttleUpload: e.g. "500k"
   "mcpServers": {
@@ -574,7 +639,9 @@ interface McpServer { name: string; transport: "stdio"|"http"; status: "connecti
     "repliesPerMinuteFullTrust": 20, "repliesPerHourFullTrust": 200, "repliesPerDayFullTrust": 1000,
     "autoAcceptIncomingFiles": true, "maxIncomingFileBytes": 536870912,
     "requireApprovalForOutgoingFiles": true, "ownerCodingTools": true, "transferTtlHours": 24,
-    "maxTransferAttempts": 5, "maxPendingFollowups": 5, "maxFollowupChain": 12 }
+    "maxTransferAttempts": 5, "maxPendingFollowups": 5, "maxFollowupChain": 12,
+    "conversationMinMinutes": 30, "conversationMaxMinutes": 60, "conversationMessages": 10,
+    "conversationStartHour": 8, "conversationEndHour": 18, "conversationTimeZone": "America/Los_Angeles" }
 }
 ```
 The `p2p.mode` is `"files"` or `"off"`. `hideLocalAddresses` controls local ICE candidates;

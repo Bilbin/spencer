@@ -15,6 +15,7 @@ export const S = {
   model: null, // ModelStatus: the model Spencer thinks with and the Copilot sign-in
   requests: new Map(), // id -> OwnerRequest (ask_owner approvals and "continue?" cards)
   followups: new Map(), // id -> Followup (reminders the agents scheduled on themselves)
+  conversations: new Map(), // ch -> ConversationStatus (Conversations channels: my timer and the debate going on)
   working: new Map(), // ch -> Map(memberId -> {replyTo, activity, steps, since, ts}): a Spencer is working on a reply
   messages: new Map(), // ch -> ChannelMessage[] (only for channels that were opened)
   owner: null, // OwnerItem[] once loaded
@@ -134,6 +135,11 @@ export function setOwnerBusy(busy) {
   if (busy && !S.ownerBusy) S.ownerBusySince = Date.now();
   S.ownerBusy = !!busy;
   emit("busy");
+}
+
+export function setConversation(st) {
+  S.conversations.set(st.ch, st);
+  emit(`conversation:${st.ch}`);
 }
 
 export function upsertFollowup(f) {

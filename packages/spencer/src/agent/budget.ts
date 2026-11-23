@@ -87,13 +87,18 @@ export class TurnBudget {
     return { ok: true };
   }
 
-  /** Spend one automatic turn in `ch`. */
-  record(ch: string): void {
+  /**
+   * Spend one automatic turn in `ch`. `streak: false` counts it in the rate windows only (Conversations: those turns
+   * have their own per-conversation message cap, so they do not pause the channel for "no person wrote").
+   */
+  record(ch: string, opts: { streak?: boolean } = {}): void {
     const t = this.now();
     this.db.prepare("INSERT INTO agent_turns (ch, at) VALUES (?, ?)").run(ch, t);
-    this.db
-      .prepare("INSERT INTO agent_channel_budget (ch, streak) VALUES (?, 1) ON CONFLICT (ch) DO UPDATE SET streak = streak + 1")
-      .run(ch);
+    if (opts.streak !== false) {
+      this.db
+        .prepare("INSERT INTO agent_channel_budget (ch, streak) VALUES (?, 1) ON CONFLICT (ch) DO UPDATE SET streak = streak + 1")
+        .run(ch);
+    }
     if (t - this.lastPrune > HOUR) {
       this.lastPrune = t;
       this.db.prepare("DELETE FROM agent_turns WHERE at < ?").run(t - DAY);
