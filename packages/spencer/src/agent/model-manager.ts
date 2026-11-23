@@ -24,6 +24,7 @@ import {
   spencerCopilotProvider,
   startDeviceFlow,
   type CopilotCredential,
+  type CopilotKeyring,
 } from "./copilot.ts";
 import { FileCredentialStore } from "./credentials.ts";
 import type { FakeBrainHooks } from "./fake-brain.ts";
@@ -74,6 +75,8 @@ export interface ModelManagerOptions {
   autoRefreshCopilot?: boolean;
   /** The Copilot CLI's config.json (tests; default `copilotCliConfigPath()`). */
   copilotCliConfig?: string;
+  /** Keyring backend for Copilot CLI tokens (tests; default OS keyring when using the real config path). */
+  copilotKeyring?: CopilotKeyring;
 }
 
 export class ModelManager {
@@ -258,7 +261,7 @@ export class ModelManager {
         ...(c?.modelsRefreshedAt ? { modelsRefreshedAt: c.modelsRefreshedAt } : {}),
         ...(this.copilotModelsError ? { modelsError: this.copilotModelsError } : {}),
         deviceLogin: !!this.clientId(),
-        cliAccounts: copilotCliAccounts(this.opts.copilotCliConfig),
+        cliAccounts: copilotCliAccounts(this.opts.copilotCliConfig, this.opts.copilotKeyring),
         ...(signIn ? { signIn } : {}),
       },
     };
@@ -459,7 +462,8 @@ export class ModelManager {
     if (typeof login !== "string" || !login) throw new ModelError(400, "login is required");
     let cred: CopilotCredential;
     try {
-      cred = await connectCopilot(copilotCliToken(login, this.opts.copilotCliConfig), "copilot-cli");
+      const token = await copilotCliToken(login, this.opts.copilotCliConfig, this.opts.copilotKeyring);
+      cred = await connectCopilot(token, "copilot-cli");
     } catch (e) {
       const status = e instanceof CopilotAuthError && e.code === "network" ? 502 : 400;
       throw new ModelError(status, (e as Error).message);

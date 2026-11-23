@@ -23,6 +23,9 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createProvider, type Api, type Model, type OAuthAuth, type OAuthCredential, type Provider } from "@earendil-works/pi-ai";
+import { osCopilotKeyring, type CopilotKeyring } from "./copilot-keyring.ts";
+
+export { osCopilotKeyring, parseDbusUnixAddress, type CopilotKeyring, type KeyringLookupResult } from "./copilot-keyring.ts";
 
 export const COPILOT_PROVIDER = "github-copilot";
 
@@ -47,9 +50,14 @@ export const PREFERRED_COPILOT_MODELS = [
   "claude-sonnet-4.5",
   "claude-sonnet-4",
   "gpt-6.1-terra",
+  "gpt-6-luna",
+  "gpt-6-sol",
+  "gpt-6-astra",
+  "gpt-5.6-luna",
   "gpt-5.3-codex",
   "gpt-5",
   "gpt-4.1",
+  "claude-haiku-4.5",
   "gpt-4o",
   "gpt-4o-mini",
   "claude-opus-5.5",
@@ -396,40 +404,85 @@ export function copilotCliConfigPath(): string {
 const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})$/;
 const TOKEN_RE = /^[A-Za-z0-9_]{20,255}$/;
 
-/** github.com tokens the Copilot CLI stores in plain text, by login; empty when it is missing or keeps them in the keychain. */
-function copilotCliTokens(file: string): Map<string, string> {
-  const out = new Map<string, string>();
+function readCopilotCliConfig(file: string): { tokens: Map<string, string>; loggedIn: string[] } {
+  const tokens = new Map<string, string>();
+  const loggedIn: string[] = [];
   let text: string;
   try {
     text = readFileSync(file, "utf8");
   } catch {
-    return out;
+    return { tokens, loggedIn };
   }
   let cfg: Record<string, unknown> | undefined;
   try {
     // The file starts with `//` comment lines.
     cfg = rec(JSON.parse(text.replace(/^\s*\/\/.*$/gm, "")));
   } catch {
-    return out;
+    return { tokens, loggedIn };
   }
-  const tokens = rec(cfg?.authTokens);
-  for (const [key, v] of Object.entries(tokens ?? {})) {
+  const rawTokens = rec(cfg?.authTokens);
+  for (const [key, v] of Object.entries(rawTokens ?? {})) {
     const m = /^https:\/\/github\.com:([^:]+)$/.exec(key);
     const token = rec(v)?.token;
-    if (m && GITHUB_LOGIN_RE.test(m[1]!) && typeof token === "string" && TOKEN_RE.test(token)) out.set(m[1]!, token);
+    if (m && GITHUB_LOGIN_RE.test(m[1]!) && typeof token === "string" && TOKEN_RE.test(token)) tokens.set(m[1]!, token);
+  }
+  const addUser = (u: unknown) => {
+    const r = rec(u);
+    if (!r || r.host !== GITHUB || typeof r.login !== "string") return;
+    if (GITHUB_LOGIN_RE.test(r.login) && !loggedIn.includes(r.login)) loggedIn.push(r.login);
+  };
+  addUser(cfg?.lastLoggedInUser);
+  if (Array.isArray(cfg?.loggedInUsers)) {
+    for (const u of cfg.loggedInUsers) addUser(u);
+  }
+  return { tokens, loggedIn };
+}
+
+function resolveKeyring(file: string, keyring?: CopilotKeyring): CopilotKeyring | undefined {
+  if (keyring) return keyring;
+  return file === copilotCliConfigPath() ? osCopilotKeyring() : undefined;
+}
+
+/**
+ * github.com accounts the Copilot CLI is signed in to on this machine (either plaintext tokens in
+ * `config.json` or `loggedInUsers` backed by the OS keyring on Linux/macOS).
+ */
+export function copilotCliAccounts(file = copilotCliConfigPath(), keyring?: CopilotKeyring): string[] {
+  const { tokens, loggedIn } = readCopilotCliConfig(file);
+  const kr = resolveKeyring(file, keyring);
+  const allowKeyring = !!kr?.available();
+  const out: string[] = [];
+  if (allowKeyring) {
+    for (const login of loggedIn) {
+      if (!out.includes(login)) out.push(login);
+    }
+  }
+  for (const login of tokens.keys()) {
+    if (!out.includes(login)) out.push(login);
   }
   return out;
 }
 
-/** github.com accounts the Copilot CLI is signed in to on this machine (with a token Spencer can read). */
-export function copilotCliAccounts(file = copilotCliConfigPath()): string[] {
-  return [...copilotCliTokens(file).keys()];
-}
+export async function copilotCliToken(
+  login: string,
+  file = copilotCliConfigPath(),
+  keyring?: CopilotKeyring,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (!GITHUB_LOGIN_RE.test(login)) throw new CopilotAuthError("failed", `Invalid GitHub login "${login}".`);
+  const { tokens } = readCopilotCliConfig(file);
+  const plain = tokens.get(login);
+  if (plain) return plain;
 
-export function copilotCliToken(login: string, file = copilotCliConfigPath()): string {
-  const token = copilotCliTokens(file).get(login);
-  if (!token) throw new CopilotAuthError("failed", `The GitHub Copilot CLI has no saved sign-in for @${login}.`);
-  return token;
+  const kr = resolveKeyring(file, keyring);
+  if (kr?.available()) {
+    const res = await kr.read(login, signal);
+    if (res.status === "ok" && TOKEN_RE.test(res.token)) return res.token;
+    if (res.status === "locked") {
+      throw new CopilotAuthError("failed", `Your system keyring is locked. Unlock it and try reusing the Copilot CLI sign-in for @${login} again.`);
+    }
+  }
+  throw new CopilotAuthError("failed", `The GitHub Copilot CLI has no saved sign-in for @${login}.`);
 }
 
 // ------------------------------------------------------------------ pi-ai provider
