@@ -64,6 +64,7 @@ export const api = {
   copilotCancel: () => request("POST", "/api/auth/github-copilot/cancel"),
   copilotRefresh: () => request("POST", "/api/auth/github-copilot/refresh"),
   copilotLogout: () => request("POST", "/api/auth/github-copilot/logout"),
+  copilotCli: (login) => request("POST", "/api/auth/github-copilot/cli", { login }),
 };
 
 // ---------------------------------------------------------------- toasts

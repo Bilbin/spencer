@@ -410,6 +410,8 @@ export interface AgentService {
   /** Re-fetch the signed-in GitHub Copilot account's live model list. */
   refreshCopilotModels?(): Promise<ModelStatus>;
   copilotLogout?(): Promise<ModelStatus>;
+  /** Reuse the GitHub Copilot CLI's saved sign-in for this login. */
+  useCopilotCliLogin?(login: string): Promise<ModelStatus>;
 }
 
 /** A sign-in in progress ("Sign in with GitHub"), or how the last one ended. */
@@ -459,7 +461,7 @@ export interface ModelStatus {
     connected: boolean;
     login?: string;
     plan?: string;
-    via?: "device";
+    via?: "device" | "copilot-cli";
     /** Models the account can use (id + display name), when connected. */
     models: { id: string; name: string }[];
     /** Epoch ms of the last successful live `/models` refresh. */
@@ -468,6 +470,8 @@ export interface ModelStatus {
     modelsError?: string;
     /** "Sign in with GitHub" is available (Spencer's GitHub OAuth app is configured). */
     deviceLogin: boolean;
+    /** GitHub accounts the Copilot CLI is signed in to on this machine, whose sign-in Spencer can reuse. */
+    cliAccounts: string[];
     signIn?: LoginState;
   };
 }

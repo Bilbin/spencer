@@ -474,6 +474,7 @@ that, `schedule_followup` fails and tells the model to report what it has (or as
 | POST | `/api/auth/github-copilot/cancel` | → `ModelStatus` |
 | POST | `/api/auth/github-copilot/refresh` | → `ModelStatus` (re-fetches the account endpoint and live `/models` catalog from GitHub Copilot) |
 | POST | `/api/auth/github-copilot/logout` | → `ModelStatus` (forgets the saved sign-in) |
+| POST | `/api/auth/github-copilot/cli` | `{login}` → `ModelStatus`: reuse the GitHub Copilot CLI's saved sign-in for that login (`$COPILOT_HOME` or `~/.copilot/config.json`); 400 if there is none or it has no Copilot |
 | WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", ...RelayStatus}` (any change of a relay connection's state), `{type:"presence", ch, id, presence, lastSeen?}` (a member's Spencer came online or went offline in channel `ch`; when *our* connection to a relay goes up or down, each of its channels is re-sent as a `channel` event instead, since every member's presence changes), `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"followup", followup: Followup}` (created or changed), `{type:"model", model: ModelStatus}` (model, sign-in or GitHub CLI accounts changed), `{type:"status", ch, from, replyTo, state, activity?, ts}` (progress of a Spencer, possibly mine, on message `replyTo`; `state` as in §3.1, including the task states) |
 
 ```ts
@@ -484,11 +485,12 @@ interface ModelStatus { provider?: string; modelId?: string;
   thinking?: "off"|"minimal"|"low"|"medium"|"high"; baseUrl?: string; apiKeyEnv?: string;
   ready: boolean; error?: string;          // ready: a model is set up and signed in; error never contains a secret
   providers?: ModelProviderOption[];       // curated providers + current provider for the UI picker
-  copilot: { connected: boolean; login?: string; plan?: string; via?: "device";
+  copilot: { connected: boolean; login?: string; plan?: string; via?: "device"|"copilot-cli";
     models: {id: string; name: string}[];  // what the signed-in account can use
     modelsRefreshedAt?: number;            // ms of last live /models refresh
     modelsError?: string;                  // last live /models refresh error, if any
     deviceLogin: boolean;                  // "Sign in with GitHub" available (an OAuth app id is configured)
+    cliAccounts: string[];                 // GitHub logins the Copilot CLI is signed in to here (reusable sign-ins)
     signIn?: { state: "waiting"|"connecting"|"failed"|"cancelled"; userCode?: string; verificationUri?: string;
                expiresAt?: number; error?: string } } }
 interface Channel { id: string; kind: "direct"|"group"; name: string; relayUrl: string;

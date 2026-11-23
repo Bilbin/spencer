@@ -84,24 +84,24 @@ const model: ModelStatus =
         apiKeyEnv: "ANTHROPIC_API_KEY",
         ready: false,
         error: "environment variable ANTHROPIC_API_KEY (model.apiKeyEnv) is not set",
-        copilot: { connected: false, models: [], deviceLogin: true },
+        copilot: { connected: false, models: [], deviceLogin: true, cliAccounts: ["alice"] },
       }
     : {
         provider: "github-copilot",
         modelId: "claude-sonnet-5.5",
         thinking: "medium",
         ready: true,
-        copilot: { connected: true, login: "alice", plan: "individual", via: "device", models: COPILOT_MODELS, deviceLogin: true },
+        copilot: { connected: true, login: "alice", plan: "individual", via: "device", models: COPILOT_MODELS, deviceLogin: true, cliAccounts: ["alice"] },
       };
 model.providers = MOCK_PROVIDERS();
 function syncMockProviders() {
   model.providers = MOCK_PROVIDERS();
 }
 let signInTimer: ReturnType<typeof setTimeout> | undefined;
-function copilotConnected(login: string) {
+function copilotConnected(login: string, via: "device" | "copilot-cli" = "device") {
   clearTimeout(signInTimer);
   const { signIn: _s, ...rest } = model.copilot;
-  model.copilot = { ...rest, connected: true, login, plan: "individual", via: "device", models: COPILOT_MODELS };
+  model.copilot = { ...rest, connected: true, login, plan: "individual", via, models: COPILOT_MODELS };
   if (!model.ready) Object.assign(model, { provider: "github-copilot", modelId: "claude-sonnet-5.5", thinking: "medium", ready: true, error: undefined });
   syncMockProviders();
 }
@@ -854,8 +854,12 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       model.copilot.modelsRefreshedAt = Date.now();
       model.copilot.modelsError = undefined;
       syncMockProviders();
+    } else if (c === "cli") {
+      const body = await readJson(req);
+      if (!model.copilot.cliAccounts.includes(String(body.login))) throw new HttpError(400, `The GitHub Copilot CLI has no saved sign-in for @${body.login}.`);
+      copilotConnected(String(body.login), "copilot-cli");
     } else if (c === "logout") {
-      model.copilot = { connected: false, models: [], deviceLogin: true };
+      model.copilot = { connected: false, models: [], deviceLogin: true, cliAccounts: ["alice"] };
       syncMockProviders();
       if (model.provider === "github-copilot") {
         Object.assign(model, { ready: false, error: "GitHub Copilot is not connected yet: sign in on the Model page" });
