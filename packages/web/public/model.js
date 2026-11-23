@@ -410,11 +410,27 @@ export function modelView(main) {
       "div.signin",
       null,
       si?.state === "failed" ? h("p.model-error", null, si.error ?? "Sign-in failed.") : null,
-      h("p.signin-lede", null, "Use the Copilot subscription you already pay for. Spencer pairs via GitHub device code and talks to Copilot directly."),
-      h("div.signin-actions", null, deviceBtn),
+      h("p.signin-lede", null, "Use the Copilot subscription you already pay for. Spencer pairs via GitHub device code, or reuses your GitHub Copilot CLI sign-in, and talks to Copilot directly."),
+      h("div.signin-actions", null, ...cliButtons(c, "primary"), deviceBtn),
       c.deviceLogin ? null : h("p.signin-note", null, "Sign in with GitHub needs a GitHub OAuth app id (", h("code", null, "auth.githubClientId"), " in config.json)."),
     );
   };
+
+  // Reuse the GitHub Copilot CLI's sign-in: GitHub's own client, which some Business/Enterprise policies give more models.
+  const cliButtons = (c, kind = "") =>
+    (c.cliAccounts ?? [])
+      .filter((login) => !(c.connected && c.via === "copilot-cli" && c.login === login))
+      .map((login) =>
+        h(
+          `button.btn${kind ? `.${kind}` : ".sm"}`,
+          {
+            type: "button",
+            disabled: busy,
+            on: { click: () => act(() => api.copilotCli(login), (r) => `Using the Copilot CLI sign-in: ${r.copilot?.models?.length ?? 0} models`) },
+          },
+          `Use Copilot CLI sign-in (@${login})`,
+        ),
+      );
 
   const connectedBox = (m) => {
     const c = m.copilot;
@@ -428,6 +444,7 @@ export function modelView(main) {
         h("span.dot.connected", { "aria-hidden": "true" }),
         h("span.account-name", null, `@${c.login}`),
         h("span.pill.muted", null, planName(c.plan)),
+        c.via === "copilot-cli" ? h("span.pill.muted", null, "via Copilot CLI") : null,
         h(
           "div.account-actions",
           null,
@@ -436,6 +453,10 @@ export function modelView(main) {
         ),
       ),
       c.modelsError ? h("p.model-error", null, c.modelsError) : null,
+      (() => {
+        const btns = cliButtons(c);
+        return btns.length ? h("div.signin-actions", null, ...btns) : null;
+      })(),
       !onCopilot && c.models.length
         ? h(
             "div.signin-actions",

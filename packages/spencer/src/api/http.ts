@@ -436,7 +436,7 @@ export class ApiServer {
         return await agent.setModel(body.provider, body.modelId, opts);
       }
     }
-    if ((m = /^\/api\/auth\/github-copilot\/(login|cancel|refresh|logout)$/.exec(p)) && method === "POST") {
+    if ((m = /^\/api\/auth\/github-copilot\/(login|cancel|refresh|logout|cli)$/.exec(p)) && method === "POST") {
       const agent = b.agent();
       if (!agent.startCopilotLogin || !agent.cancelCopilotLogin || !agent.copilotLogout) {
         throw new HttpError(404, "sign-in is not supported");
@@ -451,6 +451,12 @@ export class ApiServer {
           return await agent.refreshCopilotModels();
         case "logout":
           return await agent.copilotLogout();
+        case "cli": {
+          if (!agent.useCopilotCliLogin) throw new HttpError(404, "Copilot CLI sign-in is not supported");
+          const body = await readJson(req);
+          if (typeof body.login !== "string" || !body.login) throw new HttpError(400, "login is required");
+          return await agent.useCopilotCliLogin(body.login);
+        }
       }
     }
 

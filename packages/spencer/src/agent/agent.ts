@@ -917,6 +917,9 @@ export class SpencerAgent implements AgentService {
   copilotLogout(): Promise<ModelStatus> {
     return this.mm().copilotLogout();
   }
+  useCopilotCliLogin(login: string): Promise<ModelStatus> {
+    return this.mm().useCopilotCliLogin(login);
+  }
 
   /** Fire every follow-up that is due now (tests; the timer does this on its own). */
   async followupTick(): Promise<void> {

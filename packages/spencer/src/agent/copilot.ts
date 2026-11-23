@@ -12,9 +12,16 @@
  * Requests identify as Spencer (User-Agent `spencer/<version>`), not as VS Code: pi-ai's built-in Copilot
  * provider borrows VS Code's client id and editor headers, which we do not.
  *
+ * Instead of the device flow, a person already signed in to the GitHub Copilot CLI can reuse that sign-in
+ * (`~/.copilot/config.json`). Some Business/Enterprise policies give third-party OAuth apps (like Spencer's)
+ * only a few legacy models, while GitHub's own clients get the full list.
+ *
  * The provider id stays `github-copilot` so pi-ai's per-API Copilot handling (Bearer auth, X-Initiator, vision
  * header) applies; models route per their `api` (Anthropic Messages for Claude, Responses for GPT, …).
  */
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { createProvider, type Api, type Model, type OAuthAuth, type OAuthCredential, type Provider } from "@earendil-works/pi-ai";
 
 export const COPILOT_PROVIDER = "github-copilot";
@@ -76,7 +83,7 @@ export interface CopilotCredential extends OAuthCredential {
   availableModelIds?: string[];
   availableModels?: CopilotDiscoveredModel[];
   modelsRefreshedAt?: number;
-  source: "device";
+  source: "device" | "copilot-cli";
 }
 
 export class CopilotAuthError extends Error {
@@ -377,6 +384,52 @@ export async function connectCopilot(
 export function isCopilotCredential(c: unknown): c is CopilotCredential {
   const r = rec(c);
   return !!r && r.type === "oauth" && typeof r.access === "string" && typeof r.apiBase === "string" && typeof r.login === "string";
+}
+
+// ------------------------------------------------------------------ GitHub Copilot CLI
+
+/** The Copilot CLI's config file: `$COPILOT_HOME/config.json`, else `~/.copilot/config.json`. */
+export function copilotCliConfigPath(): string {
+  return join(process.env.COPILOT_HOME || join(homedir(), ".copilot"), "config.json");
+}
+
+const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})$/;
+const TOKEN_RE = /^[A-Za-z0-9_]{20,255}$/;
+
+/** github.com tokens the Copilot CLI stores in plain text, by login; empty when it is missing or keeps them in the keychain. */
+function copilotCliTokens(file: string): Map<string, string> {
+  const out = new Map<string, string>();
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    return out;
+  }
+  let cfg: Record<string, unknown> | undefined;
+  try {
+    // The file starts with `//` comment lines.
+    cfg = rec(JSON.parse(text.replace(/^\s*\/\/.*$/gm, "")));
+  } catch {
+    return out;
+  }
+  const tokens = rec(cfg?.authTokens);
+  for (const [key, v] of Object.entries(tokens ?? {})) {
+    const m = /^https:\/\/github\.com:([^:]+)$/.exec(key);
+    const token = rec(v)?.token;
+    if (m && GITHUB_LOGIN_RE.test(m[1]!) && typeof token === "string" && TOKEN_RE.test(token)) out.set(m[1]!, token);
+  }
+  return out;
+}
+
+/** github.com accounts the Copilot CLI is signed in to on this machine (with a token Spencer can read). */
+export function copilotCliAccounts(file = copilotCliConfigPath()): string[] {
+  return [...copilotCliTokens(file).keys()];
+}
+
+export function copilotCliToken(login: string, file = copilotCliConfigPath()): string {
+  const token = copilotCliTokens(file).get(login);
+  if (!token) throw new CopilotAuthError("failed", `The GitHub Copilot CLI has no saved sign-in for @${login}.`);
+  return token;
 }
 
 // ------------------------------------------------------------------ pi-ai provider

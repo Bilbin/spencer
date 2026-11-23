@@ -3,7 +3,7 @@
  *
  *  - builds the pi-ai `Models` from config.json's `model` (models.ts), and rebuilds it live when the owner
  *    switches model or signs in, so no restart is needed;
- *  - runs "Sign in with GitHub" (Copilot device flow), saving the result in
+ *  - runs "Sign in with GitHub" (Copilot device flow) and "use my Copilot CLI sign-in", saving the result in
  *    `<dataDir>/secrets/credentials.json`;
  *  - reports all of it as `ModelStatus` (GET /api/model and `model` events).
  */
@@ -15,6 +15,8 @@ import {
   CopilotAuthError,
   PREFERRED_COPILOT_MODELS,
   connectCopilot,
+  copilotCliAccounts,
+  copilotCliToken,
   githubClientId,
   isCopilotCredential,
   pickCopilotModel,
@@ -70,6 +72,8 @@ export interface ModelManagerOptions {
   onReload: () => Promise<void>;
   /** Automatically refresh Copilot's live model list in the background on startup (default true). */
   autoRefreshCopilot?: boolean;
+  /** The Copilot CLI's config.json (tests; default `copilotCliConfigPath()`). */
+  copilotCliConfig?: string;
 }
 
 export class ModelManager {
@@ -254,6 +258,7 @@ export class ModelManager {
         ...(c?.modelsRefreshedAt ? { modelsRefreshedAt: c.modelsRefreshedAt } : {}),
         ...(this.copilotModelsError ? { modelsError: this.copilotModelsError } : {}),
         deviceLogin: !!this.clientId(),
+        cliAccounts: copilotCliAccounts(this.opts.copilotCliConfig),
         ...(signIn ? { signIn } : {}),
       },
     };
@@ -446,6 +451,22 @@ export class ModelManager {
       this.signIn = undefined;
     }
     this.emit();
+    return this.status();
+  }
+
+  /** Reuse the GitHub Copilot CLI's saved sign-in for `login`. */
+  async useCopilotCliLogin(login: string): Promise<ModelStatus> {
+    if (typeof login !== "string" || !login) throw new ModelError(400, "login is required");
+    let cred: CopilotCredential;
+    try {
+      cred = await connectCopilot(copilotCliToken(login, this.opts.copilotCliConfig), "copilot-cli");
+    } catch (e) {
+      const status = e instanceof CopilotAuthError && e.code === "network" ? 502 : 400;
+      throw new ModelError(status, (e as Error).message);
+    }
+    this.signIn?.abort?.abort(new Error("replaced"));
+    this.signIn = undefined;
+    await this.connected(cred);
     return this.status();
   }
 

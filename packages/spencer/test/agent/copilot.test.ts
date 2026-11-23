@@ -1,6 +1,6 @@
 import { mock, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileCredentialStore } from "../../src/agent/credentials.ts";
@@ -112,7 +112,7 @@ test("model picked after sign-in", () => {
   assert.equal(pickCopilotModel([]), undefined);
 });
 
-function makeModelManager(dir: string, initialModel: ModelConfig) {
+function makeModelManager(dir: string, initialModel: ModelConfig, extra: { copilotCliConfig?: string } = {}) {
   let cfg = resolveConfig({ model: initialModel } as never);
   const saved: ModelConfig[] = [];
   const events: DaemonEvent[] = [];
@@ -131,6 +131,7 @@ function makeModelManager(dir: string, initialModel: ModelConfig) {
     name: () => "Spencer",
     log: () => {},
     autoRefreshCopilot: false,
+    ...extra,
     onReload: async () => {
       reloads++;
     },
@@ -335,4 +336,43 @@ test("pollDeviceFlow waits longer than GitHub's interval so an approved sign-in 
   ac.abort(new Error("test over"));
   assert.equal(await result, "gho_ok");
   assert.deepEqual(polls, ["authorization_pending", "authorization_pending", "token"]);
+});
+
+test("ModelManager reuses the GitHub Copilot CLI sign-in (GitHub's own client, full model list)", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "spencer-mm-cli-"));
+  const cliConfig = join(dir, "copilot-config.json");
+  const cliToken = "gho_" + "c".repeat(36);
+  writeFileSync(
+    cliConfig,
+    `// User settings belong in settings.json.\n// This file is managed automatically.\n${JSON.stringify({
+      authTokens: { "https://github.com:alice": { token: cliToken }, "https://github.com:alice:github": { token: cliToken } },
+      loggedInUsers: [{ host: "https://github.com", login: "alice" }],
+    })}`,
+  );
+  const auths: string[] = [];
+  t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    auths.push(new Headers(init.headers).get("Authorization") ?? "");
+    const body = String(url).endsWith("/copilot_internal/user")
+      ? { login: "alice", copilot_plan: "business", chat_enabled: true, endpoints: { api: "https://api.business.githubcopilot.com" } }
+      : { data: [{ id: "claude-sonnet-5.5", name: "Claude Sonnet 5.5", model_picker_enabled: true, capabilities: { type: "chat", supports: { tool_calls: true } } }] };
+    return new Response(JSON.stringify(body), { status: 200 });
+  });
+  const { mm } = makeModelManager(dir, { provider: "anthropic", modelId: "claude-sonnet-5-5", apiKeyEnv: "ANTHROPIC_API_KEY" }, { copilotCliConfig: cliConfig });
+  try {
+    await mm.init();
+    assert.deepEqual(mm.status().copilot.cliAccounts, ["alice"]);
+    await assert.rejects(mm.useCopilotCliLogin("bob"), /no saved sign-in for @bob/);
+
+    const st = await mm.useCopilotCliLogin("alice");
+    assert.equal(st.copilot.connected, true);
+    assert.equal(st.copilot.via, "copilot-cli");
+    assert.deepEqual(st.copilot.models.map((m) => m.id), ["claude-sonnet-5.5"]);
+    assert.equal(st.provider, COPILOT_PROVIDER);
+    assert.equal(st.modelId, "claude-sonnet-5.5");
+    assert.ok(auths.length > 0 && auths.every((a) => a === `Bearer ${cliToken}`));
+    const saved = await new FileCredentialStore(dir).read(COPILOT_PROVIDER);
+    assert.ok(isCopilotCredential(saved) && saved.source === "copilot-cli" && saved.access === cliToken);
+  } finally {
+    mm.stop();
+  }
 });
