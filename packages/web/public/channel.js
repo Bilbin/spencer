@@ -9,6 +9,7 @@ import { openModal, field } from "./modal.js";
 import { scrollKeeper } from "./scroll.js";
 import { navigate } from "./router.js";
 import { hasDraftFile, uploadDraftBatch } from "./draft-batch.js";
+import { discardEmptyChannelDraftState, getChannelDraftState } from "./draft-state.js";
 
 const NOTE_LABEL = {
   "not addressed": "Your Spencer stayed quiet: it was not addressed.",
@@ -151,7 +152,7 @@ function messageRow(c, m, byId, names, myNames, cont, hideRef) {
 
 // ---------------------------------------------------------------- mention completion
 
-function mentionCompleter(input, getChannel) {
+function mentionCompleter(input, getChannel, onChange) {
   const list = h("ul.mention-list", { role: "listbox", hidden: true, "aria-label": "Mention a member" });
   let state = null; // {start, items, idx}
 
@@ -173,6 +174,7 @@ function mentionCompleter(input, getChannel) {
     input.setSelectionRange(pos, pos);
     close();
     autoGrow(input);
+    onChange?.(input.value);
     input.focus();
   };
 
@@ -596,13 +598,13 @@ export function channelView(main, chId) {
     } finally {
       draftState.sending = false;
       renderDrafts();
+      discardEmptyChannelDraftState(attachmentDraftsByChannel, chId, draftState);
     }
   };
   const completerHolder = { onKey: () => false };
   const fileBtn = h("button.icon-btn.attach", { type: "button", "aria-label": "Send file", title: "Send file", on: { click: () => getC() && sendFileModal(getC()) } }, icon("paperclip", 18));
   const draftBox = h("div.draft-attachments", { hidden: true, "aria-live": "polite" });
-  const draftState = attachmentDraftsByChannel.get(chId) ?? { drafts: [], recipient: null, recipientLocked: false, messageText: "", sending: false, renderers: new Set() };
-  attachmentDraftsByChannel.set(chId, draftState);
+  const draftState = getChannelDraftState(attachmentDraftsByChannel, chId);
   const drafts = draftState.drafts;
   const cAtCreation = getC();
   const ps = cAtCreation ? peers(cAtCreation) : [];
@@ -694,7 +696,7 @@ export function channelView(main, chId) {
     comp.form.classList.remove("file-drop-target");
     addDroppedFiles(e);
   });
-  const completer = mentionCompleter(comp.input, getC);
+  const completer = mentionCompleter(comp.input, getC, (value) => { draftState.messageText = value; renderDrafts(); });
   completerHolder.onKey = completer.onKey;
   comp.input.setAttribute("aria-autocomplete", "list");
   comp.form.prepend(completer.el);
@@ -964,7 +966,7 @@ export function channelView(main, chId) {
     destroy: () => {
       clearInterval(staleTimer);
       draftState.renderers.delete(renderDraftsForView);
-      if (!drafts.length && !draftState.renderers.size && attachmentDraftsByChannel.get(chId) === draftState) attachmentDraftsByChannel.delete(chId);
+      discardEmptyChannelDraftState(attachmentDraftsByChannel, chId, draftState);
       offs.forEach((f) => f());
       document.removeEventListener("visibilitychange", onVisible);
       document.removeEventListener("keydown", onKey);

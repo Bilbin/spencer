@@ -1,8 +1,30 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { hasDraftFile, uploadDraftBatch } from "../public/draft-batch.js";
+import { discardEmptyChannelDraftState, getChannelDraftState } from "../public/draft-state.js";
 
 const draft = (name, file = { name }) => ({ file, status: "draft" });
+
+test("channel state survives navigation while text or a send is pending", () => {
+  const states = new Map();
+  const original = getChannelDraftState(states, "channel-a");
+  original.messageText = "unsent text";
+  discardEmptyChannelDraftState(states, "channel-a", original);
+  assert.equal(getChannelDraftState(states, "channel-a"), original);
+
+  original.messageText = "message with attachment";
+  original.sending = true;
+  original.drafts.push(draft("file.txt"));
+  original.drafts.length = 0; // Upload completed; the message request is still pending.
+  discardEmptyChannelDraftState(states, "channel-a", original);
+  assert.equal(getChannelDraftState(states, "channel-a"), original);
+  assert.equal(original.sending, true);
+
+  original.sending = false;
+  original.messageText = ""; // Message send succeeded.
+  discardEmptyChannelDraftState(states, "channel-a", original);
+  assert.equal(states.has("channel-a"), false);
+});
 
 test("distinct same-metadata files are not silently collapsed", () => {
   const firstFile = { name: "report.txt", size: 12, lastModified: 1 };
