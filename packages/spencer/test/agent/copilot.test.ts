@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +14,7 @@ import {
   isCopilotCredential,
   parseCopilotModels,
   pickCopilotModel,
+  pollDeviceFlow,
   type CopilotCredential,
 } from "../../src/agent/copilot.ts";
 import { ModelManager } from "../../src/agent/model-manager.ts";
@@ -306,4 +307,32 @@ test("Copilot live-discovered models outside pi-ai static catalog populate picke
   const ok = await setupModels({ provider: COPILOT_PROVIDER, modelId: "gpt-4o" }, { name: () => "Spencer", credentials: legacyStore });
   assert.deepEqual(ok.ref, { provider: COPILOT_PROVIDER, modelId: "gpt-4o" });
   assert.equal(ok.models.getModel(COPILOT_PROVIDER, "gpt-4o")?.api, "openai-completions");
+});
+
+test("pollDeviceFlow waits longer than GitHub's interval so an approved sign-in is not stuck on slow_down", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  // A GitHub that answers slow_down (raising the interval by 5s) to any poll that isn't later than the interval.
+  let interval = 5;
+  let last = Date.now();
+  const polls: string[] = [];
+  t.mock.method(globalThis, "fetch", async () => {
+    const early = Date.now() - last <= interval * 1000;
+    last = Date.now();
+    if (early) interval += 5;
+    const body = early ? { error: "slow_down", interval } : polls.length < 2 ? { error: "authorization_pending" } : { access_token: "gho_ok" };
+    polls.push(early ? "slow_down" : (body.error ?? "token"));
+    return new Response(JSON.stringify(body), { status: 200 });
+  });
+  const device = { deviceCode: "d", userCode: "U", verificationUri: "https://github.com/login/device", intervalSeconds: 5, expiresAt: Date.now() + 900_000 };
+  const ac = new AbortController();
+  const result = pollDeviceFlow("id", device, ac.signal);
+  let done = false;
+  void result.finally(() => (done = true)).catch(() => {});
+  for (let s = 0; s < 120 && !done; s++) {
+    t.mock.timers.tick(1000);
+    await new Promise((r) => setImmediate(r));
+  }
+  ac.abort(new Error("test over"));
+  assert.equal(await result, "gho_ok");
+  assert.deepEqual(polls, ["authorization_pending", "authorization_pending", "token"]);
 });

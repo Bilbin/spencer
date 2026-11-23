@@ -170,11 +170,18 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+/**
+ * Added to every poll wait. GitHub answers `slow_down` (and withholds the token) when a poll arrives right at the
+ * interval, then raises the interval by 5s; polling exactly on time hits that again on every request, so an
+ * approved sign-in never completes. OpenCode and the GitHub CLI pad the interval the same way.
+ */
+export const DEVICE_POLL_MARGIN_MS = 3_000;
+
 /** Polls until the person approves (resolves with the GitHub token), denies, or the code expires. */
 export async function pollDeviceFlow(clientId: string, device: DeviceCode, signal: AbortSignal): Promise<string> {
   let interval = device.intervalSeconds;
   for (;;) {
-    await sleep(interval * 1000, signal);
+    await sleep(interval * 1000 + DEVICE_POLL_MARGIN_MS, signal);
     if (Date.now() > device.expiresAt) throw new CopilotAuthError("expired", "The code expired before it was entered. Start again.");
     let r: { status: number; body: unknown };
     try {
