@@ -407,6 +407,8 @@ export interface AgentService {
   /** Start "Sign in with GitHub" for Copilot; progress arrives as `model` events. */
   startCopilotLogin?(): Promise<ModelStatus>;
   cancelCopilotLogin?(): ModelStatus;
+  /** Re-fetch the signed-in GitHub Copilot account's live model list. */
+  refreshCopilotModels?(): Promise<ModelStatus>;
   copilotLogout?(): Promise<ModelStatus>;
 }
 
@@ -460,6 +462,10 @@ export interface ModelStatus {
     via?: "device";
     /** Models the account can use (id + display name), when connected. */
     models: { id: string; name: string }[];
+    /** Epoch ms of the last successful live `/models` refresh. */
+    modelsRefreshedAt?: number;
+    /** Last live `/models` refresh error, if any. */
+    modelsError?: string;
     /** "Sign in with GitHub" is available (Spencer's GitHub OAuth app is configured). */
     deviceLogin: boolean;
     signIn?: LoginState;

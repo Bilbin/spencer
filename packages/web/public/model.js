@@ -73,8 +73,8 @@ export function modelView(main) {
   const syncDraftFromModel = (m, force = false) => {
     if (!m) return;
     const connected = !!m.copilot?.connected;
-    const copilotCount = m.copilot?.models?.length ?? 0;
-    const key = `${m.provider ?? ""}|${m.modelId ?? ""}|${m.thinking ?? ""}|${m.baseUrl ?? ""}|${m.ready ? "1" : "0"}|${connected ? "1" : "0"}|${copilotCount}`;
+    const copilotSig = (m.copilot?.models ?? []).map((x) => `${x.id}:${x.name}`).join(",");
+    const key = `${m.provider ?? ""}|${m.modelId ?? ""}|${m.thinking ?? ""}|${m.baseUrl ?? ""}|${m.ready ? "1" : "0"}|${connected ? "1" : "0"}|${m.copilot?.modelsRefreshedAt ?? ""}|${m.copilot?.modelsError ?? ""}|${copilotSig}`;
     if (!force && draft.initialized && draft.lastKey === key) return;
     const justConnected = !draft.wasConnected && connected;
     const providers = m.providers ?? [];
@@ -109,12 +109,18 @@ export function modelView(main) {
     const r = await attempt(fn);
     busy = false;
     if (r && typeof r === "object" && "copilot" in r) {
-      setModel(r);
       syncDraftFromModel(r, true);
-      if (successMsg) toast(successMsg, "info");
+      setModel(r);
+      if (successMsg) toast(typeof successMsg === "function" ? successMsg(r) : successMsg, "info");
     } else render();
     return r;
   };
+
+  const refreshCopilot = () =>
+    act(
+      () => api.copilotRefresh(),
+      (r) => `Refreshed ${r.copilot?.models?.length ?? 0} GitHub Copilot models`,
+    );
 
   const renderNow = (m) => {
     if (!m) return now.replaceChildren(h("p.muted", null, "Loading…"));
@@ -244,6 +250,7 @@ export function modelView(main) {
           : [h("option", { value: "" }, q ? "No matching models" : "No models available")],
       );
 
+      const modelLabel = isCopilot ? `Model (${allModels.length} available)` : "Model";
       if (allModels.length > 15) {
         const filterInput = h("input.input.model-filter", {
           type: "search",
@@ -263,9 +270,12 @@ export function modelView(main) {
             },
           },
         });
-        modelField = h("div.model-pick-stack", null, h("label.model-pick-label", null, "Model", filterInput, modelSelect));
+        modelField = h("div.model-pick-stack", null, h("label.model-pick-label", null, modelLabel, filterInput, modelSelect));
       } else {
-        modelField = h("label.model-pick-label", null, "Model", modelSelect);
+        modelField = h("label.model-pick-label", null, modelLabel, modelSelect);
+      }
+      if (isCopilot && m.copilot?.modelsError) {
+        extraFields.push(h("p.model-error", null, m.copilot.modelsError));
       }
       if (!filtered.length) canSave = false;
     }
@@ -324,6 +334,10 @@ export function modelView(main) {
     }
 
     const saveBtn = h("button.btn.primary", { type: "submit", disabled: busy || !canSave }, "Save & switch");
+    const refreshBtn =
+      isCopilot && m.copilot?.connected
+        ? h("button.btn", { type: "button", disabled: busy, on: { click: () => void refreshCopilot() } }, "Refresh models")
+        : null;
     const form = h(
       "form.model-form",
       {
@@ -345,7 +359,7 @@ export function modelView(main) {
       h("div.model-row", null, h("label.model-pick-label", null, "Provider", providerSelect), h("label.model-pick-label.sm", null, "Thinking", thinkingSelect)),
       modelField,
       ...extraFields,
-      h("div.model-actions", null, saveBtn),
+      h("div.model-actions", null, saveBtn, refreshBtn),
     );
     picker.replaceChildren(form);
   };
@@ -414,8 +428,14 @@ export function modelView(main) {
         h("span.dot.connected", { "aria-hidden": "true" }),
         h("span.account-name", null, `@${c.login}`),
         h("span.pill.muted", null, planName(c.plan)),
-        h("button.btn.sm.ghost.account-out", { type: "button", disabled: busy, on: { click: () => act(() => api.copilotLogout(), "Signed out of GitHub Copilot") } }, "Sign out"),
+        h(
+          "div.account-actions",
+          null,
+          h("button.btn.sm", { type: "button", disabled: busy, on: { click: () => void refreshCopilot() } }, "Refresh models"),
+          h("button.btn.sm.ghost", { type: "button", disabled: busy, on: { click: () => act(() => api.copilotLogout(), "Signed out of GitHub Copilot") } }, "Sign out"),
+        ),
       ),
+      c.modelsError ? h("p.model-error", null, c.modelsError) : null,
       !onCopilot && c.models.length
         ? h(
             "div.signin-actions",

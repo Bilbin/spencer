@@ -848,6 +848,12 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     } else if (c === "cancel") {
       clearTimeout(signInTimer);
       model.copilot.signIn = { state: "cancelled" };
+    } else if (c === "refresh") {
+      if (!model.copilot.connected) throw new HttpError(409, "Sign in to GitHub Copilot first.");
+      model.copilot.models = COPILOT_MODELS;
+      model.copilot.modelsRefreshedAt = Date.now();
+      model.copilot.modelsError = undefined;
+      syncMockProviders();
     } else if (c === "logout") {
       model.copilot = { connected: false, models: [], deviceLogin: true };
       syncMockProviders();

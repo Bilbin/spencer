@@ -5,10 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileCredentialStore } from "../../src/agent/credentials.ts";
 import {
+  COPILOT_API_VERSION,
   COPILOT_PROVIDER,
   DEFAULT_GITHUB_CLIENT_ID,
   copilotOAuth,
   githubClientId,
+  inferCopilotApi,
   isCopilotCredential,
   parseCopilotModels,
   pickCopilotModel,
@@ -88,9 +90,10 @@ test("setupModels: Copilot needs a sign-in and a model the account has", async (
   await credentials.modify(COPILOT_PROVIDER, async () => cred());
   const ok = await setupModels({ provider: COPILOT_PROVIDER, modelId: "claude-sonnet-5.5" }, opts);
   assert.deepEqual(ok.ref, { provider: COPILOT_PROVIDER, modelId: "claude-sonnet-5.5" });
-  // Requests identify as Spencer, not as VS Code.
+  // Requests identify as Spencer (with Copilot API version), not as VS Code.
   const model = ok.models.getModel(COPILOT_PROVIDER, "claude-sonnet-5.5")!;
   assert.match(String(model.headers?.["User-Agent"]), /^spencer\//);
+  assert.equal(model.headers?.["X-GitHub-Api-Version"], COPILOT_API_VERSION);
   assert.equal(model.headers?.["Editor-Version"], undefined);
   assert.equal(model.headers?.["Copilot-Integration-Id"], undefined);
   // Only the account's models are offered.
@@ -126,6 +129,7 @@ function makeModelManager(dir: string, initialModel: ModelConfig) {
     core,
     name: () => "Spencer",
     log: () => {},
+    autoRefreshCopilot: false,
     onReload: async () => {
       reloads++;
     },
@@ -246,6 +250,14 @@ test("parseCopilotModels: supports Business accounts with legacy/picker-false mo
   });
   assert.equal(endpoints?.[0].api, "anthropic-messages");
   assert.equal(endpoints?.[1].api, "openai-responses");
+
+  // OpenCode fallback endpoint routing when supported_endpoints is omitted.
+  assert.equal(inferCopilotApi("gpt-4o", undefined), "openai-completions");
+  assert.equal(inferCopilotApi("gpt-5-mini", undefined), "openai-completions");
+  assert.equal(inferCopilotApi("gpt-5", undefined), "openai-responses");
+  assert.equal(inferCopilotApi("gpt-5.3-codex", undefined), "openai-responses");
+  assert.equal(inferCopilotApi("grok-4.7", undefined), "openai-responses");
+  assert.equal(inferCopilotApi("claude-sonnet-4.5", undefined), "anthropic-messages");
 });
 
 test("Copilot live-discovered models outside pi-ai static catalog populate picker and work in setupModels", async () => {

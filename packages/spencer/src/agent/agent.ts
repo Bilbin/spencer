@@ -911,6 +911,9 @@ export class SpencerAgent implements AgentService {
   cancelCopilotLogin(): ModelStatus {
     return this.mm().cancelCopilotLogin();
   }
+  refreshCopilotModels(): Promise<ModelStatus> {
+    return this.mm().refreshCopilotModels();
+  }
   copilotLogout(): Promise<ModelStatus> {
     return this.mm().copilotLogout();
   }

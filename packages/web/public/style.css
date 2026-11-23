@@ -3069,8 +3069,12 @@ details[open] > summary > .icon:last-child,
   font-size: 13px;
   color: var(--ink-3);
 }
-.account-out {
+.account-out,
+.account-actions {
   margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .model-pick {
   display: flex;

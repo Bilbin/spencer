@@ -436,7 +436,7 @@ export class ApiServer {
         return await agent.setModel(body.provider, body.modelId, opts);
       }
     }
-    if ((m = /^\/api\/auth\/github-copilot\/(login|cancel|logout)$/.exec(p)) && method === "POST") {
+    if ((m = /^\/api\/auth\/github-copilot\/(login|cancel|refresh|logout)$/.exec(p)) && method === "POST") {
       const agent = b.agent();
       if (!agent.startCopilotLogin || !agent.cancelCopilotLogin || !agent.copilotLogout) {
         throw new HttpError(404, "sign-in is not supported");
@@ -446,6 +446,9 @@ export class ApiServer {
           return await agent.startCopilotLogin();
         case "cancel":
           return agent.cancelCopilotLogin();
+        case "refresh":
+          if (!agent.refreshCopilotModels) throw new HttpError(404, "refresh is not supported");
+          return await agent.refreshCopilotModels();
         case "logout":
           return await agent.copilotLogout();
       }
@@ -492,13 +495,13 @@ export class ApiServer {
     if (!data && isIndex) return this.sendHtml(res, req, Buffer.from(PLACEHOLDER));
     if (!data) return this.sendJson(res, 404, { error: "not found" });
     if (isIndex) return this.sendHtml(res, req, data);
-    res.writeHead(200, { ...this.securityHeaders(), "Content-Type": type, "Content-Length": data.length });
+    res.writeHead(200, { ...this.securityHeaders(), "Cache-Control": "no-cache", "Content-Type": type, "Content-Length": data.length });
     res.end(req.method === "HEAD" ? undefined : data);
   }
 
   private sendHtml(res: ServerResponse, req: IncomingMessage, raw: Buffer): void {
     const html = Buffer.from(raw.toString("utf8").replaceAll("__SPENCER_TOKEN__", this.b.token));
-    res.writeHead(200, { ...this.securityHeaders(), "Content-Type": MIME[".html"], "Content-Length": html.length });
+    res.writeHead(200, { ...this.securityHeaders(), "Cache-Control": "no-cache", "Content-Type": MIME[".html"], "Content-Length": html.length });
     res.end(req.method === "HEAD" ? undefined : html);
   }
 }

@@ -472,6 +472,7 @@ that, `schedule_followup` fails and tells the model to report what it has (or as
 | PUT | `/api/model` | `{provider, modelId, thinking?, apiKey?, clearApiKey?, apiKeyEnv?, baseUrl?}` → `ModelStatus`: switch provider/model/thinking live and save it to `config.json`. `apiKey` is stored in `<dataDir>/secrets/credentials.json` (mode 0600), never in `config.json`; `clearApiKey: true` deletes the saved key. Supports `github-copilot` (signed in), any built-in `pi-ai` provider, or `openai-compatible` (requires `baseUrl`); 400/409 otherwise |
 | POST | `/api/auth/github-copilot/login` | → `ModelStatus` with `copilot.signIn = {state:"waiting", userCode, verificationUri, expiresAt}`; progress follows as `model` events. Uses Spencer's built-in GitHub OAuth App (or `auth.githubClientId` override) |
 | POST | `/api/auth/github-copilot/cancel` | → `ModelStatus` |
+| POST | `/api/auth/github-copilot/refresh` | → `ModelStatus` (re-fetches the account endpoint and live `/models` catalog from GitHub Copilot) |
 | POST | `/api/auth/github-copilot/logout` | → `ModelStatus` (forgets the saved sign-in) |
 | WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", ...RelayStatus}` (any change of a relay connection's state), `{type:"presence", ch, id, presence, lastSeen?}` (a member's Spencer came online or went offline in channel `ch`; when *our* connection to a relay goes up or down, each of its channels is re-sent as a `channel` event instead, since every member's presence changes), `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"followup", followup: Followup}` (created or changed), `{type:"model", model: ModelStatus}` (model, sign-in or GitHub CLI accounts changed), `{type:"status", ch, from, replyTo, state, activity?, ts}` (progress of a Spencer, possibly mine, on message `replyTo`; `state` as in §3.1, including the task states) |
 
@@ -485,6 +486,8 @@ interface ModelStatus { provider?: string; modelId?: string;
   providers?: ModelProviderOption[];       // curated providers + current provider for the UI picker
   copilot: { connected: boolean; login?: string; plan?: string; via?: "device";
     models: {id: string; name: string}[];  // what the signed-in account can use
+    modelsRefreshedAt?: number;            // ms of last live /models refresh
+    modelsError?: string;                  // last live /models refresh error, if any
     deviceLogin: boolean;                  // "Sign in with GitHub" available (an OAuth app id is configured)
     signIn?: { state: "waiting"|"connecting"|"failed"|"cancelled"; userCode?: string; verificationUri?: string;
                expiresAt?: number; error?: string } } }

@@ -68,6 +68,8 @@ export interface ModelManagerOptions {
   log: (m: string) => void;
   /** The model changed: reconfigure every conversation. */
   onReload: () => Promise<void>;
+  /** Automatically refresh Copilot's live model list in the background on startup (default true). */
+  autoRefreshCopilot?: boolean;
 }
 
 export class ModelManager {
@@ -78,6 +80,8 @@ export class ModelManager {
   private catalogs = new Map<string, { name: string; models: { id: string; name: string; reasoning?: boolean }[] }>();
   private savedKeys = new Set<string>();
   private copilot: CopilotCredential | undefined;
+  private copilotModelsError: string | undefined;
+  private refreshAbort: AbortController | undefined;
   private signIn: (LoginState & { abort?: AbortController }) | undefined;
   private stopped = false;
 
@@ -121,11 +125,15 @@ export class ModelManager {
     }
     await Promise.all([...toLoad].map((id) => this.ensureCatalog(id)));
     await this.build();
+    if (this.copilot && this.opts.autoRefreshCopilot !== false) {
+      void this.refreshCopilotModels({ silent: true });
+    }
   }
 
   stop(): void {
     this.stopped = true;
     this.signIn?.abort?.abort(new Error("stopping"));
+    this.refreshAbort?.abort(new Error("stopping"));
   }
 
   models(): Models | undefined {
@@ -243,6 +251,8 @@ export class ModelManager {
         connected: !!c,
         ...(c ? { login: c.login, via: c.source, ...(c.plan ? { plan: c.plan } : {}) } : {}),
         models: c ? this.copilotModels().map(({ id, name }) => ({ id, name })) : [],
+        ...(c?.modelsRefreshedAt ? { modelsRefreshedAt: c.modelsRefreshedAt } : {}),
+        ...(this.copilotModelsError ? { modelsError: this.copilotModelsError } : {}),
         deviceLogin: !!this.clientId(),
         ...(signIn ? { signIn } : {}),
       },
@@ -333,8 +343,11 @@ export class ModelManager {
   private async connected(cred: CopilotCredential): Promise<void> {
     await this.credentials.modify(COPILOT_PROVIDER, async () => cred);
     this.copilot = cred;
+    this.copilotModelsError = cred.availableModels?.length ? undefined : "Could not fetch live models from GitHub Copilot; click Refresh models to retry.";
     this.signIn = undefined;
-    this.opts.log(`GitHub Copilot connected as @${cred.login}${cred.plan ? ` (${cred.plan})` : ""}`);
+    this.opts.log(
+      `GitHub Copilot connected as @${cred.login}${cred.plan ? ` (${cred.plan})` : ""} (${cred.availableModels?.length ?? 0} live models from ${cred.apiBase})`,
+    );
     const current = this.opts.core.config().model as { provider: string; modelId?: string };
     const available = this.copilotModels().map((m) => m.id);
     const keep = current.provider === COPILOT_PROVIDER && current.modelId && available.includes(current.modelId);
@@ -343,6 +356,46 @@ export class ModelManager {
       if (pick) this.save(copilotModelConfig(pick, current.provider === COPILOT_PROVIDER ? (current as { thinking?: string }).thinking : undefined));
     }
     await this.reload();
+  }
+
+  /** Re-queries `/copilot_internal/user` and `${apiBase}/models` and updates the live model picker. */
+  async refreshCopilotModels(opts?: { silent?: boolean }): Promise<ModelStatus> {
+    const currentCred = this.copilot;
+    if (!currentCred) {
+      if (opts?.silent) return this.status();
+      throw new ModelError(409, "Sign in to GitHub Copilot first.");
+    }
+    this.refreshAbort?.abort(new Error("superseded"));
+    const abort = new AbortController();
+    this.refreshAbort = abort;
+    try {
+      const next = await connectCopilot(currentCred.access, currentCred.source ?? "device", abort.signal, { strictModels: true });
+      if (this.stopped || abort.signal.aborted || this.copilot?.access !== currentCred.access) return this.status();
+      this.copilotModelsError = undefined;
+      await this.credentials.modify(COPILOT_PROVIDER, async () => next);
+      this.copilot = next;
+      this.opts.log(`GitHub Copilot models refreshed: ${next.availableModels?.length ?? 0} models from ${next.apiBase}`);
+      const cur = this.opts.core.config().model as { provider: string; modelId?: string; thinking?: string };
+      const available = this.copilotModels().map((m) => m.id);
+      const keep = cur.provider === COPILOT_PROVIDER && cur.modelId && available.includes(cur.modelId);
+      if (!keep && (cur.provider === COPILOT_PROVIDER || !this.setup?.ref)) {
+        const pick = pickCopilotModel(available);
+        if (pick) this.save(copilotModelConfig(pick, cur.provider === COPILOT_PROVIDER ? cur.thinking : undefined));
+      }
+      await this.reload();
+      return this.status();
+    } catch (e) {
+      if (this.stopped || abort.signal.aborted) return this.status();
+      const msg = e instanceof Error ? e.message : String(e);
+      this.copilotModelsError = msg;
+      this.opts.log(`GitHub Copilot model refresh failed: ${msg}`);
+      this.emit();
+      if (opts?.silent) return this.status();
+      const status = e instanceof CopilotAuthError && e.code === "revoked" ? 401 : 502;
+      throw new ModelError(status, msg);
+    } finally {
+      if (this.refreshAbort === abort) this.refreshAbort = undefined;
+    }
   }
 
   async startCopilotLogin(): Promise<ModelStatus> {
@@ -398,7 +451,9 @@ export class ModelManager {
 
   async copilotLogout(): Promise<ModelStatus> {
     this.signIn?.abort?.abort(new Error("signed out"));
+    this.refreshAbort?.abort(new Error("signed out"));
     this.signIn = undefined;
+    this.copilotModelsError = undefined;
     await this.credentials.delete(COPILOT_PROVIDER);
     this.copilot = undefined;
     this.opts.log("GitHub Copilot signed out");
