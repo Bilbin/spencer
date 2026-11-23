@@ -900,7 +900,6 @@ export class SpencerAgent implements AgentService {
     return this.models?.status();
   }
   async refreshModelStatus(): Promise<ModelStatus> {
-    await this.mm().refreshGh();
     return this.mm().status();
   }
   setModel(provider: string, modelId: string, opts?: import("../contracts.ts").SetModelOptions): Promise<ModelStatus> {
@@ -911,9 +910,6 @@ export class SpencerAgent implements AgentService {
   }
   cancelCopilotLogin(): ModelStatus {
     return this.mm().cancelCopilotLogin();
-  }
-  useGhLogin(login: string): Promise<ModelStatus> {
-    return this.mm().useGhLogin(login);
   }
   copilotLogout(): Promise<ModelStatus> {
     return this.mm().copilotLogout();

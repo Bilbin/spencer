@@ -132,10 +132,7 @@ Chat-only hubs attempt direct transfers at any size. See [the direct link design
 
 Open the web UI and go to **Model & settings** in the sidebar to pick any provider, model, and thinking level live (no restart needed):
 
-- **GitHub Copilot (no API key):** if you have GitHub Copilot (Pro, Pro+, Business or Enterprise), click **Model & settings** and either:
-  - **Reuse your GitHub CLI login:** if `gh auth login` is done on this machine, click your `@account` button.
-  - **Sign in with GitHub:** Spencer shows a short code to enter at `github.com/login/device`. This needs a GitHub OAuth App client id in `config.json`, `"auth": {"githubClientId": "Ov23…"}` (or `SPENCER_GITHUB_CLIENT_ID`). To register one: GitHub → Settings → Developer settings → OAuth Apps → New OAuth App, then tick *Enable Device Flow* (no client secret needed).
-  - Spencer talks to Copilot's API directly with that GitHub token, identifying as Spencer (following OpenCode's flow), and saves the sign-in in `<dataDir>/secrets/credentials.json` (mode 0600).
+- **GitHub Copilot (no API key):** if you have GitHub Copilot (Pro, Pro+, Business or Enterprise), click **Model & settings** → **Sign in with GitHub** to pair via GitHub's OAuth Device Flow (`github.com/login/device`). Spencer ships with its own OAuth App Client ID (override with `"auth": {"githubClientId": "…"}` or `SPENCER_GITHUB_CLIENT_ID`), talks to Copilot's API directly, and saves the sign-in in `<dataDir>/secrets/credentials.json` (mode 0600).
 - **API-key providers & local servers:** pick Anthropic, OpenAI, Google Gemini, OpenRouter, xAI, Groq, DeepSeek, or an OpenAI-compatible server (Ollama, vLLM, LM Studio) right in the **Model picker**. You can either provide the key via its environment variable (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`) or paste it into the UI (saved in `<dataDir>/secrets/credentials.json`, mode 0600—never in `config.json`).
 - Any other built-in `pi-ai` provider id can also be configured in `config.json`, as well as `{"provider": "fake"}` (deterministic stub for tests/demos).
 - `"thinking": "off" | "minimal" | "low" | "medium" | "high"` sets the reasoning effort (sent as `reasoning_effort` to OpenAI-compatible endpoints).

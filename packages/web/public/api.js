@@ -62,7 +62,6 @@ export const api = {
   setModel: (provider, modelId, opts = {}) => request("PUT", "/api/model", { provider, modelId, ...opts }),
   copilotLogin: () => request("POST", "/api/auth/github-copilot/login"),
   copilotCancel: () => request("POST", "/api/auth/github-copilot/cancel"),
-  copilotGh: (login) => request("POST", "/api/auth/github-copilot/gh", { login }),
   copilotLogout: () => request("POST", "/api/auth/github-copilot/logout"),
 };
 

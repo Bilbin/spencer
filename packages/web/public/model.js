@@ -373,31 +373,9 @@ export function modelView(main) {
       "div.signin",
       null,
       si?.state === "failed" ? h("p.model-error", null, si.error ?? "Sign-in failed.") : null,
-      h("p.signin-lede", null, "Use the Copilot subscription you already pay for. Spencer signs in to GitHub and talks to Copilot directly."),
+      h("p.signin-lede", null, "Use the Copilot subscription you already pay for. Spencer pairs via GitHub device code and talks to Copilot directly."),
       h("div.signin-actions", null, deviceBtn),
-      c.deviceLogin ? null : h("p.signin-note", null, "Sign in with GitHub needs Spencer's GitHub app id (", h("code", null, "auth.githubClientId"), " in config.json). You can reuse a GitHub CLI login instead."),
-      c.ghAccounts?.length
-        ? h(
-            "div.gh-cli",
-            null,
-            h("p.gh-cli-title", null, c.deviceLogin ? "Or reuse your GitHub CLI login" : "Reuse your GitHub CLI login"),
-            h(
-              "div.gh-cli-list",
-              null,
-              c.ghAccounts.map((a) =>
-                h(
-                  "button.btn.sm",
-                  { type: "button", disabled: busy, on: { click: () => act(() => api.copilotGh(a.login), `Connected GitHub Copilot as @${a.login}`) } },
-                  icon("terminal", 14),
-                  `@${a.login}`,
-                  a.active ? h("span.muted", null, " (active)") : null,
-                ),
-              ),
-            ),
-          )
-        : c.deviceLogin
-          ? null
-          : h("p.signin-note", null, "No GitHub CLI login found. Install the GitHub CLI and run ", h("code", null, "gh auth login"), ", then come back."),
+      c.deviceLogin ? null : h("p.signin-note", null, "Sign in with GitHub needs a GitHub OAuth app id (", h("code", null, "auth.githubClientId"), " in config.json)."),
     );
   };
 
@@ -413,7 +391,6 @@ export function modelView(main) {
         h("span.dot.connected", { "aria-hidden": "true" }),
         h("span.account-name", null, `@${c.login}`),
         h("span.pill.muted", null, planName(c.plan)),
-        c.via === "gh-cli" ? h("span.account-via", null, "via GitHub CLI") : null,
         h("button.btn.sm.ghost.account-out", { type: "button", disabled: busy, on: { click: () => act(() => api.copilotLogout(), "Signed out of GitHub Copilot") } }, "Sign out"),
       ),
       !onCopilot && c.models.length

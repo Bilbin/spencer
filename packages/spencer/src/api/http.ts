@@ -436,9 +436,9 @@ export class ApiServer {
         return await agent.setModel(body.provider, body.modelId, opts);
       }
     }
-    if ((m = /^\/api\/auth\/github-copilot\/(login|cancel|gh|logout)$/.exec(p)) && method === "POST") {
+    if ((m = /^\/api\/auth\/github-copilot\/(login|cancel|logout)$/.exec(p)) && method === "POST") {
       const agent = b.agent();
-      if (!agent.startCopilotLogin || !agent.cancelCopilotLogin || !agent.useGhLogin || !agent.copilotLogout) {
+      if (!agent.startCopilotLogin || !agent.cancelCopilotLogin || !agent.copilotLogout) {
         throw new HttpError(404, "sign-in is not supported");
       }
       switch (m[1]) {
@@ -446,11 +446,6 @@ export class ApiServer {
           return await agent.startCopilotLogin();
         case "cancel":
           return agent.cancelCopilotLogin();
-        case "gh": {
-          const body = await readJson(req);
-          if (typeof body.login !== "string" || !body.login) throw new HttpError(400, "login is required");
-          return await agent.useGhLogin(body.login);
-        }
         case "logout":
           return await agent.copilotLogout();
       }

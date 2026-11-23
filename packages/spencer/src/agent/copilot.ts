@@ -12,21 +12,18 @@
  * Requests identify as Spencer (User-Agent `spencer/<version>`), not as VS Code: pi-ai's built-in Copilot
  * provider borrows VS Code's client id and editor headers, which we do not.
  *
- * Instead of the device flow, a person who already uses the GitHub CLI can reuse its login (`gh auth token`).
- *
  * The provider id stays `github-copilot` so pi-ai's per-API Copilot handling (Bearer auth, X-Initiator, vision
  * header) applies; models route per their `api` (Anthropic Messages for Claude, Responses for GPT, …).
  */
-import { execFile } from "node:child_process";
 import { createProvider, type Api, type Model, type OAuthAuth, type OAuthCredential, type Provider } from "@earendil-works/pi-ai";
 
 export const COPILOT_PROVIDER = "github-copilot";
 
 /**
- * Spencer's GitHub OAuth app (Device Flow enabled). Empty until one is registered; `auth.githubClientId` in
- * config.json or SPENCER_GITHUB_CLIENT_ID sets it. Without one, only the GitHub CLI sign-in is offered.
+ * Spencer's GitHub OAuth app (Device Flow enabled). `auth.githubClientId` in config.json or
+ * SPENCER_GITHUB_CLIENT_ID can override it.
  */
-export const DEFAULT_GITHUB_CLIENT_ID = "";
+export const DEFAULT_GITHUB_CLIENT_ID = "Ov23lihuugW3NG0Yt8b5";
 
 const GITHUB = "https://github.com";
 const GITHUB_API = "https://api.github.com";
@@ -51,7 +48,7 @@ export interface CopilotCredential extends OAuthCredential {
   plan?: string;
   apiBase: string;
   availableModelIds?: string[];
-  source: "device" | "gh-cli";
+  source: "device";
 }
 
 export class CopilotAuthError extends Error {
@@ -263,49 +260,6 @@ export async function connectCopilot(token: string, source: CopilotCredential["s
 export function isCopilotCredential(c: unknown): c is CopilotCredential {
   const r = rec(c);
   return !!r && r.type === "oauth" && typeof r.access === "string" && typeof r.apiBase === "string" && typeof r.login === "string";
-}
-
-// ------------------------------------------------------------------ GitHub CLI
-
-export interface GhAccount {
-  login: string;
-  active: boolean;
-}
-
-function gh(args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile("gh", args, { timeout: 10_000, maxBuffer: 1024 * 1024, env: { ...process.env, GH_PROMPT_DISABLED: "1", NO_COLOR: "1" } }, (err, stdout) =>
-      err ? reject(err) : resolve(stdout),
-    );
-  });
-}
-
-/** github.com accounts the GitHub CLI is signed in to; [] when gh is missing or signed out. */
-export async function ghAccounts(): Promise<GhAccount[]> {
-  try {
-    const out = JSON.parse(await gh(["auth", "status", "--hostname", "github.com", "--json", "hosts"])) as unknown;
-    const list = rec(rec(out)?.hosts)?.["github.com"];
-    if (!Array.isArray(list)) return [];
-    return list.flatMap((a) => {
-      const r = rec(a);
-      return r && typeof r.login === "string" && r.state === "success" ? [{ login: r.login, active: r.active === true }] : [];
-    });
-  } catch {
-    return [];
-  }
-}
-
-export async function ghToken(login: string): Promise<string> {
-  if (!/^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})$/.test(login)) throw new CopilotAuthError("failed", "not a GitHub username");
-  let out: string;
-  try {
-    out = await gh(["auth", "token", "--hostname", "github.com", "--user", login]);
-  } catch {
-    throw new CopilotAuthError("failed", `The GitHub CLI has no login for @${login}.`);
-  }
-  const token = out.trim();
-  if (!/^[A-Za-z0-9_]{20,255}$/.test(token)) throw new CopilotAuthError("failed", "The GitHub CLI returned an unexpected token.");
-  return token;
 }
 
 // ------------------------------------------------------------------ pi-ai provider

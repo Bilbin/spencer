@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileCredentialStore } from "../../src/agent/credentials.ts";
-import { COPILOT_PROVIDER, copilotOAuth, githubClientId, isCopilotCredential, pickCopilotModel, type CopilotCredential } from "../../src/agent/copilot.ts";
+import { COPILOT_PROVIDER, DEFAULT_GITHUB_CLIENT_ID, copilotOAuth, githubClientId, isCopilotCredential, pickCopilotModel, type CopilotCredential } from "../../src/agent/copilot.ts";
 import { ModelManager } from "../../src/agent/model-manager.ts";
 import { setupModels } from "../../src/agent/models.ts";
 import { resolveConfig, type ModelConfig } from "../../src/config.ts";
@@ -49,6 +49,8 @@ test("GitHub client id: env over config over default, validated", () => {
   const prev = process.env.SPENCER_GITHUB_CLIENT_ID;
   try {
     delete process.env.SPENCER_GITHUB_CLIENT_ID;
+    assert.equal(githubClientId(), DEFAULT_GITHUB_CLIENT_ID);
+    assert.ok(DEFAULT_GITHUB_CLIENT_ID.startsWith("Ov23li"));
     assert.equal(githubClientId("Ov23liABC"), "Ov23liABC");
     assert.equal(githubClientId("bad id with spaces"), undefined);
     process.env.SPENCER_GITHUB_CLIENT_ID = "Ov23liENV";

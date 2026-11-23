@@ -3,7 +3,7 @@
  *
  *  - builds the pi-ai `Models` from config.json's `model` (models.ts), and rebuilds it live when the owner
  *    switches model or signs in, so no restart is needed;
- *  - runs "Sign in with GitHub" (Copilot device flow) and "use my GitHub CLI login", saving the result in
+ *  - runs "Sign in with GitHub" (Copilot device flow), saving the result in
  *    `<dataDir>/secrets/credentials.json`;
  *  - reports all of it as `ModelStatus` (GET /api/model and `model` events).
  */
@@ -14,8 +14,6 @@ import {
   COPILOT_PROVIDER,
   CopilotAuthError,
   connectCopilot,
-  ghAccounts,
-  ghToken,
   githubClientId,
   isCopilotCredential,
   pickCopilotModel,
@@ -23,7 +21,6 @@ import {
   spencerCopilotProvider,
   startDeviceFlow,
   type CopilotCredential,
-  type GhAccount,
 } from "./copilot.ts";
 import { FileCredentialStore } from "./credentials.ts";
 import type { FakeBrainHooks } from "./fake-brain.ts";
@@ -78,7 +75,6 @@ export class ModelManager {
   private savedKeys = new Set<string>();
   private copilot: CopilotCredential | undefined;
   private signIn: (LoginState & { abort?: AbortController }) | undefined;
-  private gh: GhAccount[] = [];
   private stopped = false;
 
   constructor(opts: ModelManagerOptions) {
@@ -121,7 +117,6 @@ export class ModelManager {
     }
     await Promise.all([...toLoad].map((id) => this.ensureCatalog(id)));
     await this.build();
-    void this.refreshGh();
   }
 
   stop(): void {
@@ -230,19 +225,9 @@ export class ModelManager {
         ...(c ? { login: c.login, via: c.source, ...(c.plan ? { plan: c.plan } : {}) } : {}),
         models: c ? this.copilotModels().map(({ id, name }) => ({ id, name })) : [],
         deviceLogin: !!this.clientId(),
-        ghAccounts: this.gh,
         ...(signIn ? { signIn } : {}),
       },
     };
-  }
-
-  /** Re-reads the GitHub CLI accounts (it is cheap; called when the Model page opens). */
-  async refreshGh(): Promise<void> {
-    const next = await ghAccounts();
-    if (JSON.stringify(next) !== JSON.stringify(this.gh)) {
-      this.gh = next;
-      this.emit();
-    }
   }
 
   async setModel(provider: string, modelId: string, opts: SetModelOptions = {}): Promise<ModelStatus> {
@@ -344,7 +329,7 @@ export class ModelManager {
   async startCopilotLogin(): Promise<ModelStatus> {
     const clientId = this.clientId();
     if (!clientId) {
-      throw new ModelError(409, "Sign in with GitHub needs Spencer's GitHub OAuth app id (auth.githubClientId in config.json). Use a GitHub CLI login instead.");
+      throw new ModelError(409, "Sign in with GitHub needs a GitHub OAuth app id (auth.githubClientId in config.json).");
     }
     this.signIn?.abort?.abort(new Error("restarted"));
     const abort = new AbortController();
@@ -389,20 +374,6 @@ export class ModelManager {
       this.signIn = undefined;
     }
     this.emit();
-    return this.status();
-  }
-
-  async useGhLogin(login: string): Promise<ModelStatus> {
-    if (typeof login !== "string" || !login) throw new ModelError(400, "login is required");
-    let cred: CopilotCredential;
-    try {
-      cred = await connectCopilot(await ghToken(login), "gh-cli");
-    } catch (e) {
-      const status = e instanceof CopilotAuthError && e.code === "network" ? 502 : 400;
-      throw new ModelError(status, (e as Error).message);
-    }
-    this.signIn?.abort?.abort(new Error("replaced"));
-    await this.connected(cred);
     return this.status();
   }
 

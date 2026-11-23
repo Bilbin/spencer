@@ -400,15 +400,13 @@ export interface AgentService {
   cancelFollowup?(id: string): Followup;
   /** Which model Spencer thinks with, and the sign-ins behind it. */
   modelStatus?(): ModelStatus | undefined;
-  /** The same, after re-reading the GitHub CLI accounts. */
+  /** Latest model status. */
   refreshModelStatus?(): Promise<ModelStatus>;
   /** Switch the model (persisted to config.json; optional API key saved in secrets/credentials.json mode 0600). */
   setModel?(provider: string, modelId: string, opts?: SetModelOptions): Promise<ModelStatus>;
   /** Start "Sign in with GitHub" for Copilot; progress arrives as `model` events. */
   startCopilotLogin?(): Promise<ModelStatus>;
   cancelCopilotLogin?(): ModelStatus;
-  /** Reuse a GitHub CLI login for Copilot. */
-  useGhLogin?(login: string): Promise<ModelStatus>;
   copilotLogout?(): Promise<ModelStatus>;
 }
 
@@ -459,13 +457,11 @@ export interface ModelStatus {
     connected: boolean;
     login?: string;
     plan?: string;
-    via?: "device" | "gh-cli";
+    via?: "device";
     /** Models the account can use (id + display name), when connected. */
     models: { id: string; name: string }[];
     /** "Sign in with GitHub" is available (Spencer's GitHub OAuth app is configured). */
     deviceLogin: boolean;
-    /** GitHub CLI accounts that can be reused. */
-    ghAccounts: { login: string; active: boolean }[];
     signIn?: LoginState;
   };
 }
