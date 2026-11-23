@@ -533,64 +533,75 @@ export function channelView(main, chId) {
   const send = async (text) => {
     const c = getC();
     if (!c || c.id !== chId) return false;
-    if (drafts.some((d) => d.status !== "sent")) {
-      const recipient = c.kind === "group" ? (draftState.recipient ?? recipientSelect?.value) : undefined;
-      if (c.kind === "group" && !recipient) {
-        toast("Choose who gets the files");
-        recipientSelect?.focus();
-        return false;
-      }
-      const batchOk = await uploadDraftBatch(drafts, {
-        isPresent: (draft) => draftState.drafts.includes(draft),
-        onUpdate: () => renderDrafts(),
-        upload: async (draft) => {
-          if (c.kind === "group") {
-            draftState.recipient = recipient;
-            draftState.recipientLocked = true;
-          }
-          draft.status = "uploading";
-          draft.progress = 0;
-          renderDrafts();
-          return api.uploadFile(c.id, draft.file, recipient, draft.uploadId, (fraction) => {
-            const progress = Math.floor(fraction * 10) * 10;
-            if (progress !== draft.progress) {
-              draft.progress = progress;
-              renderDrafts();
-            }
-          });
-        },
-        onSuccess: (draft, transfer) => {
-          draft.status = "sent";
-          draft.error = "";
-          draft.transfer = transfer;
-          upsertTransfer(transfer);
-          renderDrafts();
-        },
-        onFailure: (draft, error) => {
-          draft.status = "failed";
-          draft.error = error instanceof Error ? error.message : String(error);
-          renderDrafts();
-          toast(`Could not send ${draft.file.name}: ${draft.error}`);
-        },
-      });
-      if (!batchOk) return false;
-      for (let i = drafts.length - 1; i >= 0; i--) if (drafts[i].status === "sent") drafts.splice(i, 1);
-      if (!drafts.length) {
-        draftState.recipient = null;
-        draftState.recipientLocked = false;
-      }
-      renderDrafts();
-      comp.sync();
+    const hasAttachments = drafts.some((d) => d.status !== "sent");
+    const recipient = hasAttachments && c.kind === "group" ? (draftState.recipient ?? recipientSelect?.value) : undefined;
+    if (hasAttachments && c.kind === "group" && !recipient) {
+      toast("Choose who gets the files");
+      recipientSelect?.focus();
+      return false;
     }
-    if (!text) return true;
-    const res = await attempt(() => api.channelSend(c.id, text, mentionIds(c, text)));
-    if (res) keeper.toBottom();
-    return !!res;
+    draftState.sending = true;
+    renderDrafts();
+    try {
+      if (hasAttachments) {
+        const batchOk = await uploadDraftBatch(drafts, {
+          isPresent: (draft) => draftState.drafts.includes(draft),
+          onUpdate: () => renderDrafts(),
+          upload: async (draft) => {
+            if (c.kind === "group") {
+              draftState.recipient = recipient;
+              draftState.recipientLocked = true;
+            }
+            draft.status = "uploading";
+            draft.progress = 0;
+            renderDrafts();
+            return api.uploadFile(c.id, draft.file, recipient, draft.uploadId, (fraction) => {
+              const progress = Math.floor(fraction * 10) * 10;
+              if (progress !== draft.progress) {
+                draft.progress = progress;
+                renderDrafts();
+              }
+            });
+          },
+          onSuccess: (draft, transfer) => {
+            draft.status = "sent";
+            draft.error = "";
+            draft.transfer = transfer;
+            upsertTransfer(transfer);
+            renderDrafts();
+          },
+          onFailure: (draft, error) => {
+            draft.status = "failed";
+            draft.error = error instanceof Error ? error.message : String(error);
+            renderDrafts();
+            toast(`Could not send ${draft.file.name}: ${draft.error}`);
+          },
+        });
+        if (!batchOk) return false;
+        for (let i = drafts.length - 1; i >= 0; i--) if (drafts[i].status === "sent") drafts.splice(i, 1);
+        if (!drafts.length) {
+          draftState.recipient = null;
+          draftState.recipientLocked = false;
+        }
+        renderDrafts();
+        comp.sync();
+      }
+      if (!text) return true;
+      const res = await attempt(() => api.channelSend(c.id, text, mentionIds(c, text)));
+      if (res) {
+        draftState.messageText = "";
+        keeper.toBottom();
+      }
+      return !!res;
+    } finally {
+      draftState.sending = false;
+      renderDrafts();
+    }
   };
   const completerHolder = { onKey: () => false };
   const fileBtn = h("button.icon-btn.attach", { type: "button", "aria-label": "Send file", title: "Send file", on: { click: () => getC() && sendFileModal(getC()) } }, icon("paperclip", 18));
   const draftBox = h("div.draft-attachments", { hidden: true, "aria-live": "polite" });
-  const draftState = attachmentDraftsByChannel.get(chId) ?? { drafts: [], recipient: null, recipientLocked: false, renderers: new Set() };
+  const draftState = attachmentDraftsByChannel.get(chId) ?? { drafts: [], recipient: null, recipientLocked: false, messageText: "", sending: false, renderers: new Set() };
   attachmentDraftsByChannel.set(chId, draftState);
   const drafts = draftState.drafts;
   const cAtCreation = getC();
@@ -629,10 +640,17 @@ export function channelView(main, chId) {
     left: fileBtn,
     drafts: draftBox,
     canSend: () => drafts.length > 0,
+    initialText: draftState.messageText,
+    onTextChange: (value) => { draftState.messageText = value; renderDrafts(); },
+    isBusy: () => draftState.sending,
     onKey: (e) => completerHolder.onKey(e),
     onSend: send,
   });
-  const renderDraftsForView = () => { drawDrafts(); comp.sync(); };
+  const renderDraftsForView = () => {
+    if (!draftState.sending && document.activeElement !== comp.input && comp.input.value !== draftState.messageText) comp.input.value = draftState.messageText;
+    drawDrafts();
+    comp.sync();
+  };
   draftState.renderers.add(renderDraftsForView);
   renderDrafts();
   const addDroppedFiles = (e) => {
