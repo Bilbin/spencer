@@ -1,7 +1,7 @@
 // A channel (direct or group): the transcript between people and their Spencers, composer, members, files and settings.
 import { h, icon, iconButton, richText, shortFp, timeShort, timeFull, autoGrow, hue, avatar, selfAvatar, youAvatar, personOf, clear, append, relTime } from "./dom.js";
 import { api, attempt, toast } from "./api.js";
-import { S, on, setConversation, setMessages, upsertTransfer, upsertChannel, removeChannel, markRead, peers, channelTitle, allMcpTools, workingIn, workingOf, presenceOf } from "./state.js";
+import { S, on, isConversation, setConversation, setMessages, upsertTransfer, upsertChannel, removeChannel, markRead, peers, channelTitle, allMcpTools, workingIn, workingOf, presenceOf } from "./state.js";
 import { markdown } from "./md.js";
 import { viewHeader, composer, SEND_HINT, stage, skeleton, emptyState, trace, mark, presenceInfo, activityLine, followupList } from "./common.js";
 import { transferCard } from "./transfers.js";
@@ -412,7 +412,7 @@ function settingsModal(c) {
         ),
       ),
     ),
-    c.mode === "conversation"
+    isConversation(c)
       ? h(
           "label.switch-row",
           null,
@@ -473,7 +473,7 @@ function settingsModal(c) {
     if ((directLink.checked ? "auto" : "off") !== (c.directLink ?? "auto")) patch.directLink = directLink.checked ? "auto" : "off";
     if (allowLocal.checked !== !!c.allowLocalAddresses) patch.allowLocalAddresses = allowLocal.checked;
     if (autoReply.checked !== c.autoReply) patch.autoReply = autoReply.checked;
-    if (c.mode === "conversation" && heated.checked !== !!c.heated) patch.heated = heated.checked;
+    if (isConversation(c) && heated.checked !== !!c.heated) patch.heated = heated.checked;
     if (trust !== (c.trust ?? "standard")) patch.trust = trust;
     const tools = [...selected].sort();
     if (JSON.stringify(tools) !== JSON.stringify([...(c.allowedMcpTools ?? [])].sort())) patch.allowedMcpTools = tools;
@@ -645,7 +645,7 @@ export function channelView(main, chId) {
     members.replaceChildren(
       h("div.members-head", null, h("h2", null, c.kind === "group" ? "In this group" : "In this channel"), iconButton("close", "Close members", () => setMembersOpen(false), "members-close")),
       h("ul.member-list", null, c.members.map((m) => memberRow(c, m))),
-      c.mode === "conversation" ? conversationSection(c) : null,
+      isConversation(c) ? conversationSection(c) : null,
       ...[followupList(c.id, { title: "Your Spencer will follow up" })].filter(Boolean),
       h(
         "section.access",
@@ -670,7 +670,7 @@ export function channelView(main, chId) {
                 tools.length ? h("ul.access-tools", null, tools.map((t) => h("li", null, h("code", null, t.replace(/^mcp__/, "").replace(/__/, " · "))))) : null,
               ),
             ),
-        h("div.access-row", null, icon("reply", 15), h("div", null, h("strong", null, c.autoReply ? "Auto-reply on" : "Auto-reply off"), h("p", null, c.autoReply ? (c.mode === "conversation" ? "Your Spencer talks on its own, and answers anyone who writes here." : c.kind === "group" ? "Your Spencer answers when mentioned." : "Your Spencer answers on its own.") : "Your Spencer only listens."))),
+        h("div.access-row", null, icon("reply", 15), h("div", null, h("strong", null, c.autoReply ? "Auto-reply on" : "Auto-reply off"), h("p", null, c.autoReply ? (isConversation(c) ? "Your Spencer talks on its own, and answers anyone who writes here." : c.kind === "group" ? "Your Spencer answers when mentioned." : "Your Spencer answers on its own.") : "Your Spencer only listens."))),
         h("button.btn.sm", { type: "button", on: { click: () => settingsModal(c) } }, icon("gear", 14), "Channel settings"),
       ),
     );
@@ -715,8 +715,8 @@ export function channelView(main, chId) {
               "span.subtitle",
               null,
               h("span", null, status),
-              c.mode === "conversation" ? h("span.pill", { title: "The Spencers here start conversations on their own" }, icon("spark", 11), "conversations") : null,
-              c.mode === "conversation" && c.heated ? h("span.pill", { title: "Heated mode: your Spencer starts real arguments, with a moderator" }, "heated") : null,
+              isConversation(c) ? h("span.pill", { title: "The Spencers here start conversations on their own" }, icon("spark", 11), "conversations") : null,
+              isConversation(c) && c.heated ? h("span.pill", { title: "Heated mode: your Spencer starts real arguments, with a moderator" }, "heated") : null,
               c.trust === "full" ? h("span.pill.attn", { title: "Peers here can use your Spencer's MCP tools without approval" }, icon("shield", 11), "full trust") : null,
               c.autoReply ? null : h("span.pill.muted", null, "auto-reply off"),
             ),
@@ -886,7 +886,7 @@ export function channelView(main, chId) {
     on("followups", renderMembers),
     on(`conversation:${chId}`, renderMembers),
   ];
-  if (getC()?.mode === "conversation") {
+  if (isConversation(getC())) {
     api
       .conversation(chId)
       .then(setConversation)

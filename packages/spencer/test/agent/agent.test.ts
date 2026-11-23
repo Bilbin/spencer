@@ -1268,6 +1268,39 @@ test("conversations: people can write any time; it starts a new conversation the
   core.cleanup();
 });
 
+test("experimental off: no soul in the prompts, and a Conversations channel is a plain group until it is turned on", async () => {
+  const core = convoCore();
+  core.cfg.experimental = false;
+  try {
+    await withAgent(
+      async ({ core, agent, requests }) => {
+        await agent.setSoul("Speak like a pirate.");
+        const ch = core.getChannel("chConvo")!;
+        const id = convoId();
+        assert.deepEqual(await agent.onPeerChat(peerChat(ch, "yo", { by: "agent", convo: { id, start: true } })), { note: "not addressed" });
+        assert.throws(() => agent.conversationStatus("chConvo"), /not a Conversations channel/);
+        await agent.ownerSend("hello");
+        await agent.idle();
+        assert.ok(requests.every((r) => !r.systemPrompt.includes("pirate")));
+        assert.equal(core.sent.length, 0);
+
+        core.cfg.experimental = true;
+        await agent.experimentalChanged();
+        assert.equal(agent.conversationStatus("chConvo").active, undefined);
+        await agent.onPeerChat(peerChat(ch, "yo again", { by: "agent", convo: { id: convoId(), start: true } }));
+        await agent.idle();
+        const last = requests.at(-1)!;
+        assert.ok(last.systemPrompt.includes("pirate") && last.systemPrompt.includes("THIS IS A CONVERSATIONS CHANNEL"));
+        assert.ok(last.tools.includes("search_news"));
+        assert.equal(core.sent.length, 1);
+      },
+      { core },
+    );
+  } finally {
+    core.cleanup();
+  }
+});
+
 test("conversations store: start races settle on the smaller id, and a late opening cannot reset the count", () => {
   const db = new DatabaseSync(":memory:");
   let clock = 1_000_000;

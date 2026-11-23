@@ -22,6 +22,8 @@ export interface ApiBackend {
   updateChannel(ch: string, patch: Record<string, unknown>): Channel;
   leaveChannel(ch: string): Promise<void>;
   acceptInvite(link: string): Promise<Channel>;
+  /** Turn experimental features (SOUL.md, Conversations channels) on or off. */
+  setExperimental(enabled: boolean): Promise<{ enabled: boolean }>;
   /** Absolute path of the static UI, or undefined for the placeholder page. */
   webRoot?: string;
 }
@@ -320,6 +322,15 @@ export class ApiServer {
 
     if (p === "/api/state" && method === "GET") return b.state();
 
+    if (p === "/api/experimental" && method === "PUT") {
+      const body = await readJson(req);
+      if (typeof body.enabled !== "boolean") throw new HttpError(400, "enabled must be a boolean");
+      return await b.setExperimental(body.enabled);
+    }
+    const experimental = () => {
+      if (!b.core.config().experimental) throw new HttpError(403, "experimental features are off (Model & settings → Experimental)");
+    };
+
     if (p === "/api/owner/messages") {
       if (method === "GET") return { items: await b.agent().ownerTranscript(intParam(q.get("limit"), 200, 2000)) };
       if (method === "POST") {
@@ -382,6 +393,7 @@ export class ApiServer {
     }
 
     if ((m = /^\/api\/channels\/([A-Za-z0-9_-]{1,64})\/conversation(\/start)?$/.exec(p))) {
+      experimental();
       const agent = b.agent();
       if (!agent.conversationStatus || !agent.startConversation) throw new HttpError(404, "conversations are not supported");
       if (!m[2] && method === "GET") return agent.conversationStatus(m[1]!);
@@ -391,6 +403,7 @@ export class ApiServer {
     if (p === "/api/invites" && method === "POST") {
       const body = await readJson(req);
       if (body.relay !== undefined && typeof body.relay !== "string") throw new UserError(400, "relay must be a string");
+      if (body.kind === "conversation") experimental();
       return await b.core.createInvite(body.kind as "direct" | "group" | "conversation", body.name as string, body.relay as string | undefined);
     }
     if (p === "/api/invites/accept" && method === "POST") {
@@ -439,6 +452,7 @@ export class ApiServer {
     if (p === "/api/mcp" && method === "GET") return { servers: b.agent().mcpStatus() };
 
     if (p === "/api/soul") {
+      experimental();
       const agent = b.agent();
       if (!agent.soul || !agent.setSoul) throw new HttpError(404, "SOUL.md is not supported");
       if (method === "GET") return agent.soul();
@@ -460,6 +474,7 @@ export class ApiServer {
       }
     }
     if (p === "/api/model/conversation" && method === "PUT") {
+      experimental();
       const agent = b.agent();
       if (!agent.setConversationModel) throw new HttpError(404, "model settings are not supported");
       const body = await readJson(req);

@@ -17,7 +17,7 @@ export function inviteModal() {
       ...[
         ["direct", "Direct", "One other person"],
         ["group", "Group", "Several people"],
-        ["conversation", "Conversations", "Let your Spencers chill out and talk"],
+        ...(S.experimental ? [["conversation", "Conversations", "Let your Spencers chill out and talk"]] : []),
       ].map(([k, l, sub]) =>
         h(
           `button.seg${kind === k ? ".active" : ""}`,

@@ -139,6 +139,7 @@ const presence = new Map<string, Presence>([
   [carol.id, { online: false, lastSeenAt: now() - 47 * 60_000 }],
   [dave.id, { online: true, lastSeenAt: now() }],
 ]);
+let experimental = true;
 const policy = {
   maxHops: 4,
   repliesPerMinute: 6,
@@ -672,6 +673,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       transfers: [...transfers.values()],
       mcp,
       policy,
+      experimental,
       ownerBusy,
       requests: [...requests.values()].reverse(),
       followups: [...followups.values()],
@@ -823,6 +825,13 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     if (b && !c && method === "GET") return getTransfer(b);
   }
   if (a === "mcp" && method === "GET" && !b) return { servers: mcp };
+  if (a === "experimental" && !b && method === "PUT") {
+    const body = await readJson(req);
+    if (typeof body.enabled !== "boolean") throw new HttpError(400, "enabled must be a boolean");
+    experimental = body.enabled;
+    emit({ type: "experimental", enabled: experimental });
+    return { enabled: experimental };
+  }
   if (a === "soul" && !b) {
     if (method === "GET") return { text: soul, maxBytes: 16 * 1024 };
     if (method === "PUT") {

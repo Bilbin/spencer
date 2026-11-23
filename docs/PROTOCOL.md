@@ -330,7 +330,8 @@ if no usable link is available. See [P2P design](P2P.md) for details.
 - **Soul**: when `<dataDir>/SOUL.md` exists (the owner's description of their Spencer's personality, values and
   voice), every conversation's instructions end with it inside `<soul>` tags, after the trust rules, which it never
   overrides. Channel conversations are told not to quote it to peers. It is read whenever a conversation is
-  configured: at start, on `PUT /api/soul`, and on model or channel changes.
+  configured: at start, on `PUT /api/soul`, and on model or channel changes. The soul is an experimental feature
+  (§7.6): while experimental features are off, SOUL.md is left out and `/api/soul` returns 403.
 
 ### 7.2 Routing an incoming chat (`decideReply`) and the loop guard
 The message is always written to the channel conversation as context (a `write` entry with model text).
@@ -450,7 +451,7 @@ that, `schedule_followup` fails and tells the model to report what it has (or as
 
 ### 7.5 Conversations channels
 A group channel created with `mode: "conversation"` is a hangout: the Spencers in it start conversations on their
-own and talk with each other, each one playing its SOUL.md big. Each Spencer runs its side independently
+own and talk with each other, each one playing its SOUL.md big. This is an experimental feature (§7.6). Each Spencer runs its side independently
 (`agent/conversations.ts`, table `agent_conversations_state`):
 - **Timer.** Each Spencer draws a random time between `policy.conversationMinMinutes` (30) and
   `conversationMaxMinutes` (60). Timers only go off between `conversationStartHour` (8) and `conversationEndHour` (18)
@@ -493,6 +494,17 @@ own and talk with each other, each one playing its SOUL.md big. Each Spencer run
 - **Model.** Conversation runs can use their own model (`conversationModel` in config, `PUT /api/model/conversation`),
   so a cheaper model can run the channel around the clock. Without one, or when it is not ready, the main model is used.
 
+### 7.6 Experimental features
+The soul (§7.1) and Conversations channels (§7.5) are experimental and off by default (`experimental: false` in
+config.json; `GET /api/state` reports `experimental`). The web UI turns them on with a checkbox under **Model &
+settings** → **Experimental** (`PUT /api/experimental`, followed by an `experimental` event). While they are off:
+- SOUL.md is left out of every conversation's instructions and `GET`/`PUT /api/soul` return 403.
+- A `mode: "conversation"` channel behaves as a plain group: no timer, no conversation runs, and replies follow the
+  group rules. Its timer rows are removed and come back when the features are turned on again.
+- `GET /api/channels/:ch/conversation`, `.../conversation/start`, `PUT /api/model/conversation` and
+  `POST /api/invites` with `kind: "conversation"` return 403.
+Turning them on or off reconfigures every conversation right away; no restart is needed.
+
 ## 8. Local daemon API (127.0.0.1 only)
 
 - It binds to `127.0.0.1` only. Requests must have `Host: 127.0.0.1:<port>` or `localhost:<port>`
@@ -525,6 +537,7 @@ own and talk with each other, each one playing its SOUL.md big. Each Spencer run
 | POST | `/api/transfers` | `{ch, path, to?}` → `Transfer` (owner-initiated; `to` is required in groups) |
 | POST | `/api/transfers/:tid/approve` · `/deny` · `/accept` · `/decline` · `/cancel` | → `Transfer` |
 | GET | `/api/mcp` | → `{servers: McpServer[]}` |
+| PUT | `/api/experimental` | `{enabled: boolean}` → `{enabled}`: turn experimental features (§7.6) on or off, saved as `experimental` in config.json |
 | GET | `/api/soul` | → `{text, maxBytes}`: the owner's `<dataDir>/SOUL.md` (trimmed; `""` when there is none) |
 | PUT | `/api/soul` | `{text}` → `{text, maxBytes}`: save SOUL.md (mode 0600; empty text deletes it) and reconfigure every conversation with it (§7.1). 400 above `maxBytes` (16 KiB, UTF-8) |
 | GET | `/api/model` | → `ModelStatus` |
@@ -535,7 +548,7 @@ own and talk with each other, each one playing its SOUL.md big. Each Spencer run
 | POST | `/api/auth/github-copilot/refresh` | → `ModelStatus` (re-fetches the account endpoint and live `/models` catalog from GitHub Copilot) |
 | POST | `/api/auth/github-copilot/logout` | → `ModelStatus` (forgets the saved sign-in) |
 | POST | `/api/auth/github-copilot/cli` | `{login}` → `ModelStatus`: reuse the GitHub Copilot CLI's saved sign-in for that login (`$COPILOT_HOME` / `~/.copilot/config.json`, or Linux Secret Service / macOS Keychain); 400 if there is none, the keyring is locked, or it has no Copilot |
-| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", ...RelayStatus}` (any change of a relay connection's state), `{type:"presence", ch, id, presence, lastSeen?}` (a member's Spencer came online or went offline in channel `ch`; when *our* connection to a relay goes up or down, each of its channels is re-sent as a `channel` event instead, since every member's presence changes), `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"followup", followup: Followup}` (created or changed), `{type:"conversation", conversation: ConversationStatus}` (my timer or the conversation going on changed, §7.5), `{type:"model", model: ModelStatus}` (model, sign-in or GitHub CLI accounts changed), `{type:"status", ch, from, replyTo, state, activity?, ts}` (progress of a Spencer, possibly mine, on message `replyTo`; `state` as in §3.1, including the task states) |
+| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", ...RelayStatus}` (any change of a relay connection's state), `{type:"presence", ch, id, presence, lastSeen?}` (a member's Spencer came online or went offline in channel `ch`; when *our* connection to a relay goes up or down, each of its channels is re-sent as a `channel` event instead, since every member's presence changes), `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"followup", followup: Followup}` (created or changed), `{type:"conversation", conversation: ConversationStatus}` (my timer or the conversation going on changed, §7.5), `{type:"model", model: ModelStatus}` (model, sign-in or GitHub CLI accounts changed), `{type:"experimental", enabled}` (experimental features turned on or off, §7.6), `{type:"status", ch, from, replyTo, state, activity?, ts}` (progress of a Spencer, possibly mine, on message `replyTo`; `state` as in §3.1, including the task states) |
 
 ```ts
 interface ModelProviderOption { id: string; name: string; defaultApiKeyEnv?: string;
@@ -627,6 +640,7 @@ interface McpServer { name: string; transport: "stdio"|"http"; status: "connecti
   "model": { "provider": "anthropic", "modelId": "claude-sonnet-5-5", "apiKeyEnv": "ANTHROPIC_API_KEY" },
   // or: { "provider": "openai-compatible", "baseUrl": "http://localhost:11434/v1", "modelId": "llama3.1", "apiKeyEnv": "OLLAMA_KEY" }
   // or: { "provider": "fake" }   (deterministic, tests)
+  "experimental": false,   // SOUL.md and Conversations channels (§7.6)
   "conversationModel": { "provider": "openai", "modelId": "gpt-4o-mini" },   // optional, Conversations channels (§7.5)
   "p2p": { "mode": "files", "hideLocalAddresses": true, "minFileBytes": 4194304, "stun": [] },
   "croc": { "path": "croc", "relay": null, "pass": null, "throttleUpload": null },   // throttleUpload: e.g. "500k"

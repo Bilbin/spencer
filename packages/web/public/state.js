@@ -9,6 +9,7 @@ export const S = {
   relays: [], // {url, connected}[] when the daemon reports each relay in use
   p2p: null,
   policy: {},
+  experimental: false, // experimental features on (SOUL.md, Conversations channels)
   channels: new Map(), // id -> Channel
   transfers: new Map(), // tid -> Transfer
   mcp: [], // McpServerStatus[]
@@ -101,6 +102,7 @@ export function setState(st) {
   if (typeof st.ownerBusy === "boolean") setOwnerBusy(st.ownerBusy);
   S.p2p = st.p2p ?? null;
   S.policy = st.policy ?? {};
+  S.experimental = st.experimental === true;
   S.channels = new Map((st.channels ?? []).map((c) => [c.id, c]));
   S.transfers = new Map((st.transfers ?? []).map((t) => [t.tid, t]));
   S.mcp = st.mcp ?? [];
@@ -124,6 +126,18 @@ export function setState(st) {
   emit("owner");
   emit("requests");
   emit("followups");
+}
+
+export function setExperimental(enabled) {
+  if (S.experimental === !!enabled) return;
+  S.experimental = !!enabled;
+  emit("experimental");
+  emit("channels");
+}
+
+/** A Conversations channel, shown as one only while experimental features are on. */
+export function isConversation(c) {
+  return S.experimental && c?.mode === "conversation";
 }
 
 export function setModel(m) {
