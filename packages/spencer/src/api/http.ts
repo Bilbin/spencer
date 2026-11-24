@@ -5,7 +5,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { AgentService, Channel, ChannelMessage, CoreServices, OwnerAttachment, TransferService } from "../contracts.ts";
-import { OWNER_ATTACHMENT_MAX_FILES, OwnerAttachmentStore } from "./owner-attachments.ts";
+import { OWNER_ATTACHMENT_MAX_FILES, OwnerAttachmentStore, OwnerSendConflict } from "./owner-attachments.ts";
 import type { EventBus } from "../events.ts";
 import { UserError } from "../channels.ts";
 import { RelayError } from "../net/relay-client.ts";
@@ -393,9 +393,10 @@ export class ApiServer {
         const fingerprint = createHash("sha256").update(JSON.stringify([text, ids])).digest("hex");
         try {
           const previous = b.ownerAttachments.findOwnerSend(requestId, fingerprint);
-          if (previous) return { submissionId: previous };
+          if (previous?.state === "accepted") return { submissionId: previous.submissionId };
         } catch (error) {
-          throw new HttpError(409, error instanceof Error ? error.message : String(error));
+          if (error instanceof OwnerSendConflict) throw new HttpError(409, error.message);
+          throw error;
         }
         let attachments: (OwnerAttachment & { path: string })[];
         try {
@@ -403,8 +404,15 @@ export class ApiServer {
         } catch (error) {
           throw new HttpError(400, error instanceof Error ? error.message : String(error));
         }
+        try {
+          const reservation = b.ownerAttachments.reserveOwnerSend(requestId, fingerprint, ids as string[]);
+          if (reservation.state === "accepted") return { submissionId: reservation.submissionId };
+        } catch (error) {
+          if (error instanceof OwnerSendConflict) throw new HttpError(409, error.message);
+          throw error;
+        }
         const result = await b.agent().ownerSend(text, { requestId, attachments });
-        b.ownerAttachments.recordOwnerSend(requestId, fingerprint, result.submissionId);
+        b.ownerAttachments.completeOwnerSend(requestId, fingerprint, result.submissionId);
         return result;
       }
     }

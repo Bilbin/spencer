@@ -18,6 +18,17 @@ interface StoredAttachment extends OwnerAttachment {
   createdAt: number;
 }
 
+export type OwnerSendState =
+  | { state: "reserved" }
+  | { state: "accepted"; submissionId: string };
+
+export class OwnerSendConflict extends Error {
+  constructor() {
+    super("request ID was already used for different owner content");
+    this.name = "OwnerSendConflict";
+  }
+}
+
 /** Private, local-only storage for owner conversation attachments (never a channel transfer). */
 export class OwnerAttachmentStore {
   private readonly db: DatabaseSync;
@@ -33,7 +44,8 @@ export class OwnerAttachmentStore {
       CREATE TABLE IF NOT EXISTS owner_send_idempotency (
         request_id TEXT PRIMARY KEY,
         fingerprint TEXT NOT NULL,
-        submission_id TEXT NOT NULL
+        submission_id TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'accepted'
       );
       CREATE TABLE IF NOT EXISTS owner_attachments (
         id TEXT PRIMARY KEY,
@@ -42,9 +54,28 @@ export class OwnerAttachmentStore {
         size INTEGER NOT NULL,
         sha256 TEXT NOT NULL,
         path TEXT NOT NULL,
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
       );
     `);
+    const columns = this.db.prepare("PRAGMA table_info(owner_send_idempotency)").all() as { name: string }[];
+    const names = new Set(columns.map((column) => column.name));
+    if (!names.has("state")) {
+      this.db.exec("ALTER TABLE owner_send_idempotency ADD COLUMN state TEXT NOT NULL DEFAULT 'accepted'");
+    }
+    const attachmentColumns = this.db.prepare("PRAGMA table_info(owner_attachments)").all() as { name: string }[];
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!attachmentColumns.some((column) => column.name === "expires_at")) {
+        this.db.exec("ALTER TABLE owner_attachments ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0");
+      }
+      // Also repairs a shutdown after the column was added but before its old rows were backfilled.
+      this.db.prepare("UPDATE owner_attachments SET expires_at = created_at + ? WHERE expires_at = 0").run(OWNER_ATTACHMENT_TTL_MS);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   async initialize(): Promise<void> {
@@ -58,31 +89,97 @@ export class OwnerAttachmentStore {
   }
 
   private async cleanupExpired(): Promise<void> {
-    const cutoff = Date.now() - OWNER_ATTACHMENT_TTL_MS;
-    const expired = this.db.prepare("SELECT id, path FROM owner_attachments WHERE created_at < ?").all(cutoff) as { id: string; path: string }[];
-    for (const item of expired) {
-      await rm(item.path, { force: true });
-      this.db.prepare("DELETE FROM owner_attachments WHERE id = ?").run(item.id);
+    // Expiration is bounded even for abandoned reservations; each send/retry renews it before the runtime side effect.
+    const now = Date.now();
+    const expired = this.db.prepare("SELECT id, path FROM owner_attachments WHERE expires_at < ?").all(now) as { id: string; path: string }[];
+    const paths: string[] = [];
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const item of expired) {
+        const removed = this.db.prepare("DELETE FROM owner_attachments WHERE id = ? AND expires_at < ?").run(item.id, now);
+        if (Number(removed.changes) > 0) paths.push(item.path);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    await Promise.all(paths.map((path) => rm(path, { force: true })));
+  }
+
+  findOwnerSend(requestId: string, fingerprint: string): OwnerSendState | undefined {
+    const row = this.db.prepare("SELECT fingerprint, submission_id, state FROM owner_send_idempotency WHERE request_id = ?").get(requestId) as
+      | { fingerprint: string; submission_id: string; state: string }
+      | undefined;
+    if (!row) return undefined;
+    if (row.fingerprint !== fingerprint) throw new OwnerSendConflict();
+    if (row.state === "accepted" && row.submission_id) return { state: "accepted", submissionId: row.submission_id };
+    if (row.state === "reserved") return { state: "reserved" };
+    throw new Error("owner send idempotency record is invalid");
+  }
+
+  reserveOwnerSend(requestId: string, fingerprint: string, attachmentIds: string[]): OwnerSendState {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare(`
+        INSERT OR IGNORE INTO owner_send_idempotency (request_id, fingerprint, submission_id, state)
+        VALUES (?, ?, '', 'reserved')
+      `).run(requestId, fingerprint);
+      const row = this.db.prepare("SELECT fingerprint, submission_id, state FROM owner_send_idempotency WHERE request_id = ?").get(requestId) as
+        | { fingerprint: string; submission_id: string; state: string }
+        | undefined;
+      if (!row) throw new Error("owner send reservation was not stored");
+      if (row.fingerprint !== fingerprint) throw new OwnerSendConflict();
+      let state: OwnerSendState;
+      if (row.state === "accepted" && row.submission_id) {
+        state = { state: "accepted", submissionId: row.submission_id };
+      } else if (row.state === "reserved") {
+        state = { state: "reserved" };
+      } else {
+        throw new Error("owner send idempotency record is invalid");
+      }
+      if (state.state === "reserved") {
+        const touch = this.db.prepare("UPDATE owner_attachments SET expires_at = ? WHERE id = ?");
+        const expiresAt = Date.now() + OWNER_ATTACHMENT_TTL_MS;
+        for (const attachmentId of attachmentIds) touch.run(expiresAt, attachmentId);
+      }
+      this.db.exec("COMMIT");
+      return state;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
   }
 
-  findOwnerSend(requestId: string, fingerprint: string): string | undefined {
-    const row = this.db.prepare("SELECT fingerprint, submission_id FROM owner_send_idempotency WHERE request_id = ?").get(requestId) as
-      | { fingerprint: string; submission_id: string }
-      | undefined;
-    if (!row) return undefined;
-    if (row.fingerprint !== fingerprint) throw new Error("request ID was already used for different owner content");
-    return row.submission_id;
-  }
-
-  recordOwnerSend(requestId: string, fingerprint: string, submissionId: string): void {
-    this.db.prepare("INSERT OR IGNORE INTO owner_send_idempotency (request_id, fingerprint, submission_id) VALUES (?, ?, ?)")
-      .run(requestId, fingerprint, submissionId);
-    const row = this.db.prepare("SELECT fingerprint, submission_id FROM owner_send_idempotency WHERE request_id = ?").get(requestId) as
-      | { fingerprint: string; submission_id: string }
-      | undefined;
-    if (!row || row.fingerprint !== fingerprint || row.submission_id !== submissionId) {
-      throw new Error("request ID was already used for different owner content");
+  completeOwnerSend(requestId: string, fingerprint: string, submissionId: string): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT fingerprint, submission_id, state FROM owner_send_idempotency WHERE request_id = ?").get(requestId) as
+        | { fingerprint: string; submission_id: string; state: string }
+        | undefined;
+      if (!row || row.fingerprint !== fingerprint) throw new Error("owner send reservation does not match its result");
+      if (row.state === "accepted") {
+        if (row.submission_id !== submissionId) throw new Error("owner send result changed for the same request ID");
+      } else if (row.state === "reserved") {
+        // Keep the request binding indefinitely, but let its files expire on the attachment retention schedule.
+        this.db.prepare(`
+          UPDATE owner_send_idempotency
+          SET submission_id = ?, state = 'accepted'
+          WHERE request_id = ? AND fingerprint = ? AND state = 'reserved'
+        `).run(submissionId, requestId, fingerprint);
+      } else {
+        throw new Error("owner send idempotency record is invalid");
+      }
+      const completed = this.db.prepare("SELECT submission_id, state FROM owner_send_idempotency WHERE request_id = ?").get(requestId) as
+        | { submission_id: string; state: string }
+        | undefined;
+      if (!completed || completed.state !== "accepted" || completed.submission_id !== submissionId) {
+        throw new Error("owner send result was not stored");
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
   }
 
@@ -113,9 +210,10 @@ export class OwnerAttachmentStore {
       await writeFile(temp, content, { flag: "wx", mode: 0o600 });
       await rename(temp, path);
       const createdAt = Date.now();
+      const expiresAt = createdAt + OWNER_ATTACHMENT_TTL_MS;
       try {
-        this.db.prepare("INSERT INTO owner_attachments (id, upload_id, name, size, sha256, path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-          .run(id, uploadId, name, size, sha256, path, createdAt);
+        this.db.prepare("INSERT INTO owner_attachments (id, upload_id, name, size, sha256, path, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+          .run(id, uploadId, name, size, sha256, path, createdAt, expiresAt);
       } catch (error) {
         await rm(path, { force: true });
         throw error;
