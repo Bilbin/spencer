@@ -21,6 +21,27 @@ test("HTML previews retain self-contained styles and static report structure onl
   assert.doesNotMatch(document, /compromised/, "script payload text is discarded");
 });
 
+test("HTML forms preserve static descendants while removing controls and submission behavior", () => {
+  const output = staticHtmlPreviewDocument(`<form action="https://example.invalid/submit" method="post"><h1>Invoice</h1><p>Total: $150</p><table><tr><th>Item</th><td>Consulting</td></tr></table><input name="token" value="secret"><button>Pay now</button><textarea>draft</textarea><select><option>Choose</option></select></form><p>Footer</p>`);
+
+  assert.match(output, /<h1>Invoice<\/h1><p>Total: \$150<\/p>/);
+  assert.match(output, /<table>[\s\S]*<th>Item<\/th><td>Consulting<\/td>[\s\S]*<\/table>/);
+  assert.match(output, /<p>Footer<\/p>/);
+  assert.doesNotMatch(output, /<\/?(?:form|input|button|textarea|select|option)\b/i);
+  assert.doesNotMatch(output, /(?:action|method|formaction)\s*=/i);
+  assert.doesNotMatch(output, /Pay now|draft|Choose|secret/);
+});
+
+test("HTML previews retain safe content through nested or unclosed forms without exposing dropped subtrees", () => {
+  const source = `<form action="https://example.invalid/outer"><h2>Outer heading</h2><form method="post"><p>Nested total: $25</p><script>discard this script</script><object>discard object contents</object><textarea>discard control contents</textarea><p>After removed content</p>`;
+  const output = staticHtmlPreviewDocument(source);
+
+  assert.match(output, /<h2>Outer heading<\/h2>[\s\S]*<p>Nested total: \$25<\/p>/);
+  assert.match(output, /<p>After removed content<\/p>/);
+  assert.doesNotMatch(output, /<\/?form\b|\b(?:action|method)\s*=|<\/?(?:script|object|textarea)\b/i);
+  assert.doesNotMatch(output, /discard this script|discard object contents|discard control contents/);
+});
+
 test("HTML previews preserve following content after Unicode before raw-text tags", () => {
   const styled = staticHtmlPreviewDocument("<p>İ</p><style>p{color:red}</style><p>AFTER</p>");
   const scripted = staticHtmlPreviewDocument("<p>İ</p><script>discarded</script><p>AFTER</p>");

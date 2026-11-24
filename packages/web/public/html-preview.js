@@ -134,6 +134,7 @@ export function staticHtmlPreviewDocument(source) {
       const tag = readTag(source, pos);
       if (tag) {
         pos = tag.end;
+        if (tag.name === "form") continue; // Strip form behavior, but keep parsing its inert descendants.
         if (tag.name === "style" && !tag.closing) {
           const close = findClosingTag(source, "style", pos);
           const css = source.slice(pos, close?.start ?? source.length);
