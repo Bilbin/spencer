@@ -7,6 +7,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { AgentService, Channel, ChannelMessage, CoreServices, TransferService } from "../contracts.ts";
 import type { EventBus } from "../events.ts";
 import { UserError } from "../channels.ts";
+import { TransferError } from "../transfers/service.ts";
 import { RelayError } from "../net/relay-client.ts";
 
 /** What the HTTP layer needs from the daemon. */
@@ -78,10 +79,10 @@ function errorStatus(e: unknown): number {
   for (const s of [err?.status, err?.statusCode]) {
     if (typeof s === "number" && s >= 400 && s < 600) return s;
   }
-  if (err?.code === "not_found") return 404;
-  if (err?.code === "bad_request" || err?.code === "invalid_text") return 400;
-  if (err?.code === "bad_state") return 409;
-  if (err?.code === "too_large") return 413;
+  if (e instanceof TransferError) {
+    if (e.code === "invalid_text") return 400;
+    if (e.code === "too_large") return 413;
+  }
   if (e instanceof RelayError) {
     switch (e.code) {
       case "full":
