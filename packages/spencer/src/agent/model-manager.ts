@@ -178,6 +178,18 @@ export class ModelManager {
     this.convSetup = conv ? await setupModels(conv, opts) : undefined;
     if (this.convSetup?.error) this.opts.log(`Conversations model not available (using the main model): ${this.convSetup.error}`);
     const ref = this.convSetup?.ref;
+    const main = this.setup.ref;
+    if (ref && main && ref.provider === main.provider && ref.modelId === main.modelId) {
+      // The same model as the main one: its requests cannot be told apart, so it runs as the main model.
+      const a = this.opts.core.config().model as { baseUrl?: string; apiKeyEnv?: string };
+      const b = conv as { baseUrl?: string; apiKeyEnv?: string };
+      if (a.baseUrl !== b.baseUrl || a.apiKeyEnv !== b.apiKeyEnv) {
+        this.convSetup = { models: this.setup.models, error: "same provider and model as the main model but other settings; using the main model" };
+        this.opts.log(`Conversations model not available: ${this.convSetup.error}`);
+      }
+      this.combined = this.setup.models;
+      return;
+    }
     this.combined = withExtraModel(this.setup.models, ref ? { models: this.convSetup!.models, ref } : undefined);
   }
 
@@ -214,7 +226,8 @@ export class ModelManager {
     return this.catalog;
   }
 
-  private providerOptions(cur: { provider: string; apiKeyEnv?: string }): ModelProviderOption[] {
+  private providerOptions(...configured: ({ provider: string; apiKeyEnv?: string } | undefined)[]): ModelProviderOption[] {
+    const cur = configured[0]!;
     const list: ModelProviderOption[] = PICKER_PROVIDERS.map((p) => {
       if (p.id === COPILOT_PROVIDER) {
         return { id: p.id, name: p.name, models: this.copilot ? this.copilotModels() : [] };
@@ -240,13 +253,15 @@ export class ModelManager {
         models: this.catalogs.get(p.id)?.models ?? [],
       };
     });
-    if (cur.provider && cur.provider !== "fake" && !list.some((p) => p.id === cur.provider)) {
-      const cat = this.catalogs.get(cur.provider);
+    // Providers set in config.json that the picker does not offer (the main model's, then the Conversations model's).
+    for (const c of configured) {
+      if (!c?.provider || c.provider === "fake" || list.some((p) => p.id === c.provider)) continue;
+      const cat = this.catalogs.get(c.provider);
       list.push({
-        id: cur.provider,
-        name: cat?.name ?? cur.provider,
-        ...(cur.apiKeyEnv ? { defaultApiKeyEnv: cur.apiKeyEnv, hasEnvKey: Boolean(process.env[cur.apiKeyEnv]) } : {}),
-        hasSavedKey: this.savedKeys.has(cur.provider),
+        id: c.provider,
+        name: cat?.name ?? c.provider,
+        ...(c.apiKeyEnv ? { defaultApiKeyEnv: c.apiKeyEnv, hasEnvKey: Boolean(process.env[c.apiKeyEnv]) } : {}),
+        hasSavedKey: this.savedKeys.has(c.provider),
         models: cat?.models ?? [],
       });
     }
@@ -271,7 +286,7 @@ export class ModelManager {
       ...(m.apiKeyEnv ? { apiKeyEnv: m.apiKeyEnv } : {}),
       ready: !!this.setup?.ref,
       ...(this.setup?.error ? { error: this.setup.error } : {}),
-      providers: this.providerOptions(m),
+      providers: this.providerOptions(m, this.opts.core.config().conversationModel as { provider: string; apiKeyEnv?: string } | undefined),
       copilot: {
         connected: !!c,
         ...(c ? { login: c.login, via: c.source, ...(c.plan ? { plan: c.plan } : {}) } : {}),

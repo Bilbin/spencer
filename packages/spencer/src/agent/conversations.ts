@@ -107,7 +107,9 @@ export class ConversationStore {
     const random = this.o.random ?? Math.random;
     const at = this.now() + Math.round((minMinutes + random() * Math.max(0, maxMinutes - minMinutes)) * 60_000);
     if (!hours || inHours(at, hours)) return at;
-    return nextWindowStart(at, hours) + Math.round(random() * maxMinutes * 60_000);
+    // The spread stays inside the window, however narrow it is.
+    const spread = Math.min(maxMinutes, Math.max(0, (hours.end - hours.start) * 60 - 1));
+    return nextWindowStart(at, hours) + Math.round(random() * spread * 60_000);
   }
 
   /** Whether timers may open conversations now. */
@@ -179,17 +181,20 @@ export class ConversationStore {
     this.db.prepare("UPDATE agent_conversations_state SET ended = 1, last_at = ? WHERE ch = ? AND convo_id = ?").run(this.now(), ch, id);
   }
 
-  /** Whether `id` is the conversation that was just ended in `ch` (its late messages are ignored). */
-  isEnded(ch: string, id: string): boolean {
+  /** Whether `id` is the last conversation in `ch` and it is over (ended or gone quiet): its late messages are ignored. */
+  isOver(ch: string, id: string): boolean {
     const row = this.get(ch);
-    return !!row?.ended && row.convo_id === id;
+    if (!row || row.convo_id !== id) return false;
+    return !!row.ended || row.last_at === null || this.now() - row.last_at >= IDLE_MS;
   }
 
   /** I send one more message in conversation `id`. False when it is not the current one, it ended or my messages are used up. */
   spend(ch: string, id: string): boolean {
     const r = this.db
-      .prepare("UPDATE agent_conversations_state SET used = used + 1, last_at = ? WHERE ch = ? AND convo_id = ? AND ended = 0 AND used < ?")
-      .run(this.now(), ch, id, this.max());
+      .prepare(
+        "UPDATE agent_conversations_state SET used = used + 1, last_at = ? WHERE ch = ? AND convo_id = ? AND ended = 0 AND used < ? AND last_at > ?",
+      )
+      .run(this.now(), ch, id, this.max(), this.now() - IDLE_MS);
     return Number(r.changes) > 0;
   }
 

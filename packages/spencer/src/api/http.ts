@@ -385,7 +385,11 @@ export class ApiServer {
         if (!c) throw new HttpError(404, "unknown channel");
         return c;
       }
-      if (method === "PATCH") return b.updateChannel(ch, await readJson(req));
+      if (method === "PATCH") {
+        const body = await readJson(req);
+        if (body.heated !== undefined) experimental();
+        return b.updateChannel(ch, body);
+      }
       if (method === "DELETE") {
         await b.leaveChannel(ch);
         return {};

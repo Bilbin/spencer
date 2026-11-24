@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import WebSocket from "ws";
 import { http, relayAt, startNode, tempDir, waitFor } from "./helpers.ts";
 
@@ -170,6 +170,72 @@ test("http api: guards, state, owner + channel messages, invites, events ws", as
     assert.ok(events.some((e) => e.type === "channel_removed" && e.ch === ch));
   } finally {
     for (const s of sockets) s.terminate();
+    await A.daemon.stop();
+    await B.daemon.stop();
+    await relay.close();
+    t.cleanup();
+  }
+});
+
+test("http api: experimental features are off by default; the gates answer 403 until they are turned on", async () => {
+  const t = tempDir();
+  const relay = await relayAt(t.dir);
+  mkdirSync(join(t.dir, "a"));
+  mkdirSync(join(t.dir, "b"));
+  const A = await startNode(join(t.dir, "a"), relay.url, "Alice");
+  const B = await startNode(join(t.dir, "b"), relay.url, "Bob");
+  try {
+    const port = A.daemon.port;
+    const H = { "X-Spencer-Token": A.daemon.token };
+    const direct = (await http(port, "POST", "/api/invites", { headers: H, body: { kind: "group", name: "Plain" } })).json().channel;
+
+    assert.equal((await http(port, "GET", "/api/state", { headers: H })).json().experimental, false);
+    assert.equal((await http(port, "GET", "/api/soul", { headers: H })).status, 403);
+    assert.equal((await http(port, "PUT", "/api/model/conversation", { headers: H, body: { provider: null } })).status, 403);
+    assert.equal((await http(port, "POST", "/api/invites", { headers: H, body: { kind: "conversation", name: "Debates" } })).status, 403);
+    assert.equal((await http(port, "GET", `/api/channels/${direct.id}/conversation`, { headers: H })).status, 403);
+    assert.equal((await http(port, "PATCH", `/api/channels/${direct.id}`, { headers: H, body: { heated: true } })).status, 403);
+    await assert.rejects(A.daemon.core.createInvite("conversation", "Debates"), /experimental/, "the agent's create_invite path too");
+
+    assert.equal((await http(port, "PUT", "/api/experimental", { headers: H, body: { enabled: "yes" } })).status, 400);
+    const on = await http(port, "PUT", "/api/experimental", { headers: H, body: { enabled: true } });
+    assert.deepEqual(on.json(), { enabled: true });
+    assert.equal(A.agent().experimentalChanges, 1);
+    assert.equal(JSON.parse(readFileSync(join(t.dir, "a", "config.json"), "utf8")).experimental, true, "saved in config.json");
+    assert.equal((await http(port, "GET", "/api/state", { headers: H })).json().experimental, true);
+    await http(port, "PUT", "/api/experimental", { headers: H, body: { enabled: true } });
+    assert.equal(A.agent().experimentalChanges, 1, "no change, nothing re-applied");
+
+    const inv = await http(port, "POST", "/api/invites", { headers: H, body: { kind: "conversation", name: "Debates" } });
+    assert.equal(inv.status, 200);
+    const convo = inv.json().channel;
+    assert.equal(convo.mode, "conversation");
+    assert.equal(convo.heated, false);
+    assert.equal((await http(port, "PATCH", `/api/channels/${direct.id}`, { headers: H, body: { heated: true } })).status, 400, "only Conversations channels");
+    const hot = await http(port, "PATCH", `/api/channels/${convo.id}`, { headers: H, body: { heated: true } });
+    assert.equal(hot.status, 200);
+    assert.equal(hot.json().heated, true);
+
+    // A person writing in a Conversations channel: the agent gives the message its conversation, peers get it.
+    const ok = await http(B.daemon.port, "POST", "/api/invites/accept", { headers: { "X-Spencer-Token": B.daemon.token }, body: { link: inv.json().link } });
+    assert.equal(ok.status, 200);
+    await waitFor(() => A.daemon.core.getChannel(convo.id)!.members.length === 2, "joined");
+    const ref = { id: "C".repeat(22), start: true as const, heated: true as const };
+    A.agent().convoRef = ref;
+    const sent = (await http(port, "POST", `/api/channels/${convo.id}/messages`, { headers: H, body: { text: "yo" } })).json();
+    await waitFor(() => A.agent().outgoing.some((o) => o.id === sent.id), "outgoing");
+    assert.deepEqual(A.agent().outgoing.find((o) => o.id === sent.id)!.convo, ref, "the agent learns which conversation it started");
+    await waitFor(() => B.agent().peerChats.some((c) => c.id === sent.id), "B got it");
+    assert.deepEqual(B.agent().peerChats.find((c) => c.id === sent.id)!.body.convo, ref);
+    // Not in a plain group.
+    const plain = (await http(port, "POST", `/api/channels/${direct.id}/messages`, { headers: H, body: { text: "hi" } })).json();
+    await waitFor(() => A.agent().outgoing.some((o) => o.id === plain.id), "outgoing plain");
+    assert.equal(A.agent().outgoing.find((o) => o.id === plain.id)!.convo, undefined);
+
+    await http(port, "PUT", "/api/experimental", { headers: H, body: { enabled: false } });
+    assert.equal((await http(port, "PATCH", `/api/channels/${convo.id}`, { headers: H, body: { heated: false } })).status, 403);
+    assert.equal((await http(port, "PATCH", `/api/channels/${convo.id}`, { headers: H, body: { name: "Still renamable" } })).status, 200);
+  } finally {
     await A.daemon.stop();
     await B.daemon.stop();
     await relay.close();

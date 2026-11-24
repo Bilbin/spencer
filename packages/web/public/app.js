@@ -232,6 +232,18 @@ function mount() {
     clear(main).append(skeleton(5));
     return;
   }
+  // The soul page needs experimental features; until the state arrives we do not know yet.
+  if (view.name === "soul" && !S.experimental) {
+    if (S.loaded) {
+      navigate({ name: "owner" });
+      return;
+    }
+    current?.destroy?.();
+    current = null;
+    mountedKey = "";
+    clear(main).append(skeleton(5));
+    return;
+  }
   if (key === mountedKey && current) return;
   current?.destroy?.();
   clear(main);
@@ -240,7 +252,7 @@ function mount() {
   if (view.name === "channel") current = channelView(main, view.ch);
   else if (view.name === "transfers") current = transfersView(main);
   else if (view.name === "mcp") current = mcpView(main);
-  else if (view.name === "soul" && S.experimental) current = soulView(main);
+  else if (view.name === "soul") current = soulView(main);
   else if (view.name === "model") current = modelView(main);
   else if (view.name === "inbox") current = inboxView(main);
   else current = ownerView(main);
@@ -441,7 +453,7 @@ setTimeout(() => {
 // Experimental features turned on or off: the soul page and Conversations channels appear or go away.
 on("experimental", () => {
   if (S.view.name === "soul" && !S.experimental) navigate({ name: "owner" });
-  else if (S.view.name === "channel") {
+  else if (S.view.name === "channel" || S.view.name === "soul") {
     mountedKey = "";
     mount();
   }

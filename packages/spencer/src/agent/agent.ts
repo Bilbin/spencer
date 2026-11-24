@@ -40,7 +40,7 @@ import { OWNER_KEY, PiRuntime, channelKey, type AgentRuntime, type ToolSpec } fr
 import { FollowupStore, toFollowup, type FollowupRow } from "./followups.ts";
 import { MAX_SOUL_BYTES, readSoul, soulInstructions, writeSoul } from "./soul.ts";
 import { fetchNews, formatNews, type FetchLike } from "./news.ts";
-import { MAX_CHAT_TEXT, channelTools, conversationTools, followupTools, ownerTools, resolveChannel } from "./tools.ts";
+import { MAX_CHAT_TEXT, channelTools, conversationTools, followupTools, inviteTool, ownerTools, resolveChannel } from "./tools.ts";
 import { escapeBody, wrapPeerMessage, wrapUntrustedNote } from "./untrusted.ts";
 
 export interface AgentOptions {
@@ -106,6 +106,7 @@ export class SpencerAgent implements AgentService {
   private convos: ConversationStore;
   private convoSpecs: ToolSpec[] = [];
   private ownerSpecs: ToolSpec[] = [];
+  private convoInviteSpec: ToolSpec | undefined;
   private channelSpecs: ToolSpec[] = [];
   private configured = new Set<string>();
   private audited = new Map<string, { inner: ToolSpec; spec: ToolSpec }>();
@@ -120,8 +121,10 @@ export class SpencerAgent implements AgentService {
   /** Heated conversations I moderate: messages the moderator has not seen yet, and checks to run again. */
   private modLines = new Map<string, string[]>();
   private modAgain = new Set<string>();
+  /** Channel → the conversation whose moderator has a model conversation (dropped when it is over). */
+  private modKeys = new Map<string, string>();
   /** The channel whose "Start now" is being handled (it opens a conversation even outside the hours). */
-  private startNow: string | undefined;
+  private startNow = new Set<string>();
   private routing = new Map<string, Promise<{ note?: string }>>();
   private ownerWaits = new Set<Promise<void>>();
   private stopWatch: (() => Promise<void>) | undefined;
@@ -235,6 +238,7 @@ export class SpencerAgent implements AgentService {
     // One spec per tool name, shared by every conversation that offers it (tools are global by name).
     const followup = followupTools(deps);
     this.ownerSpecs = [...ownerTools(deps), ...followup];
+    this.convoInviteSpec = inviteTool(this.core, true);
     this.channelSpecs = [...channelTools(deps), ...followup];
     this.convoSpecs = conversationTools(deps);
 
@@ -259,6 +263,7 @@ export class SpencerAgent implements AgentService {
     // …and conversation openings; then the Conversations timers.
     for (const row of this.convos.openers()) this.kickOpener(row.ch, row.opener!, row.opener_sid);
     this.convos.start();
+    for (const ch of this.convos.channels()) this.watchIdle(ch);
   }
 
   async stop(): Promise<void> {
@@ -332,7 +337,7 @@ export class SpencerAgent implements AgentService {
     const policy = this.core.config().policy;
     const mcpTools = this.mcpTools();
     await this.rt().configure(OWNER_KEY, {
-      tools: [...this.ownerSpecs, ...mcpTools],
+      tools: [...this.ownerSpecs.map((t) => (t.name === "create_invite" && this.experimental() ? this.convoInviteSpec! : t)), ...mcpTools],
       instructions: this.ownerInstructions(policy.ownerCodingTools, mcpTools.length > 0),
       ...(policy.ownerCodingTools ? { codingTools: {} } : {}),
       ...this.thinking(),
@@ -761,9 +766,9 @@ export class SpencerAgent implements AgentService {
       // Context only. The write dedupes on requestId; the row makes a redelivery return the same note.
       await rt.appendNote(key, { kind: display.kind, data: display.data, modelText: content, requestId: msg.id });
       db.prepare(
-        `INSERT OR IGNORE INTO agent_pending_replies (msg_id, ch, from_id, hop, state, note, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'skipped', ?, ?, ?)`,
-      ).run(msg.id, msg.ch, msg.from, msg.body.hop, note, now, now);
+        `INSERT OR IGNORE INTO agent_pending_replies (msg_id, ch, from_id, hop, state, note, convo, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'skipped', ?, ?, ?, ?)`,
+      ).run(msg.id, msg.ch, msg.from, msg.body.hop, note, convo?.id ?? null, now, now);
       if (paused) await this.pauseChannel(msg, ch, paused);
       return { note };
     }
@@ -1117,7 +1122,8 @@ export class SpencerAgent implements AgentService {
 
   /** A message of conversation `ref` arrived in Conversations channel `ch`. */
   private conversationSeen(ch: string, ref: ConvoRef, final: boolean, by?: "human" | "agent"): void {
-    if (this.convos.isEnded(ch, ref.id)) return;
+    // Over (ended or gone quiet): late messages neither revive it nor reset its cap.
+    if (this.convos.isOver(ch, ref.id)) return;
     const active = this.convos.active(ch);
     if (active?.convo_id === ref.id) {
       this.convos.touch(ch, ref.id);
@@ -1129,7 +1135,9 @@ export class SpencerAgent implements AgentService {
       return;
     }
     // A new conversation (unless it lost a start race), or one going on whose opening I missed: I join it, and my
-    // timer starts over. A person writing always starts a new one.
+    // timer starts over. A person writing always starts a new one. Not the last message of one I never saw, and not
+    // while my auto-reply is off (I do not take part).
+    if (final || !this.core.getChannel(ch)?.autoReply) return;
     if (ref.start ? by === "human" || this.convos.accepts(ch, ref.id) : !active) {
       this.convos.begin(ch, ref.id, { heated: ref.heated === true });
       this.emitConversation(ch);
@@ -1147,7 +1155,7 @@ export class SpencerAgent implements AgentService {
       }
       const others = ch.members.some((m) => m.id !== this.core.me().id);
       const rate = this.budget.check(ch.id, { ...loopLimits(this.core.config().policy, ch.trust), maxTurns: 0, perMinute: Infinity });
-      if (ch.autoReply && others && rate.ok && !row.opener && !this.convos.active(ch.id) && (row.ch === this.startNow || this.convos.inHours())) {
+      if (ch.autoReply && others && rate.ok && !row.opener && !this.convos.active(ch.id) && (this.startNow.has(row.ch) || this.convos.inHours())) {
         const id = randomBytes(16).toString("base64url");
         if (this.convos.startOpener(ch.id, id, ch.heated === true)) {
           this.budget.record(ch.id, { streak: false });
@@ -1183,8 +1191,14 @@ export class SpencerAgent implements AgentService {
       const answer = await rt.waitAnswer(sid);
       if (this.stopping) return;
       // Someone else opened a conversation in the meantime (begin() dropped my opening): mine is not sent.
+      if (this.convos.get(chId)?.opener !== id) return;
+      // Nor when the channel went away, stopped being a Conversations channel or my owner turned auto-reply off.
       const ch = this.core.getChannel(chId);
-      if (this.convos.get(chId)?.opener !== id || !ch) return;
+      if (!ch || !this.isConversation(ch) || !ch.autoReply) {
+        this.convos.endOpener(chId, id);
+        if (ch) this.emitConversation(chId);
+        return;
+      }
       const out = answer.status === "done" ? parseAgentAnswer(answer.text) : undefined;
       if (answer.status !== "done") this.log(`conversation opening in ${chId}: no answer: ${answer.reason}`);
       if (out?.send) {
@@ -1204,8 +1218,12 @@ export class SpencerAgent implements AgentService {
       }
       this.emitConversation(chId);
     } catch (e) {
-      // Left as the opening in progress: the next start() resumes it.
-      if (!this.stopping) this.log(`conversation opening in ${chId} failed: ${(e as Error).message}`);
+      // While stopping: left as the opening in progress, the next start() resumes it. Otherwise it is given up, so the
+      // channel does not show "opening" forever; the timer tries again later.
+      if (this.stopping) return;
+      this.log(`conversation opening in ${chId} failed: ${(e as Error).message}`);
+      this.convos.endOpener(chId, id);
+      this.emitConversation(chId);
     }
   }
 
@@ -1284,6 +1302,8 @@ export class SpencerAgent implements AgentService {
     const ch = this.core.getChannel(chId);
     if (this.stopping || !this.started || !ch || !this.isConversation(ch)) return undefined;
     const id = randomBytes(16).toString("base64url");
+    // Auto-reply off: my Spencer sits this one out (no moderator, so never heated); the others still answer.
+    if (!ch.autoReply) return { id, start: true };
     const heated = ch.heated === true;
     this.convos.begin(chId, id, { heated, moderating: true });
     this.emitConversation(chId);
@@ -1296,8 +1316,9 @@ export class SpencerAgent implements AgentService {
    * rails. Checks run one at a time; messages that arrive meanwhile go into the next check.
    */
   private moderate(chId: string, convoId: string, line: string): void {
-    const row = this.convos.get(chId);
-    if (this.stopping || !row?.moderating || row.convo_id !== convoId || row.ended) return;
+    const a = this.convos.active(chId);
+    if (this.stopping || !a?.moderating || a.convo_id !== convoId) return;
+    this.modKeys.set(chId, convoId);
     const lines = this.modLines.get(convoId) ?? [];
     lines.push(line.slice(0, 1000));
     this.modLines.set(convoId, lines);
@@ -1314,6 +1335,7 @@ export class SpencerAgent implements AgentService {
     })().finally(() => {
       this.inflight.delete(key);
       this.modLines.delete(convoId);
+      if (this.convos.active(chId)?.convo_id !== convoId) this.dropModerator(chId);
     });
     this.inflight.set(key, p);
   }
@@ -1321,7 +1343,7 @@ export class SpencerAgent implements AgentService {
   private async runModerator(chId: string, convoId: string): Promise<void> {
     const lines = this.modLines.get(convoId) ?? [];
     this.modLines.set(convoId, []);
-    if (!lines.length) return;
+    if (!lines.length || this.convos.active(chId)?.convo_id !== convoId) return;
     try {
       const rt = this.rt();
       const key = `${channelKey(chId)}#mod:${convoId}`;
@@ -1341,8 +1363,7 @@ export class SpencerAgent implements AgentService {
       const answer = await rt.waitAnswer(sid);
       if (answer.status !== "done") return this.log(`moderator in ${chId}: no answer: ${answer.reason}`);
       const stop = /^\s*STOP\b[\s:.\-–—]*([\s\S]*)$/i.exec(answer.text);
-      const row = this.convos.get(chId);
-      if (!stop || this.stopping || row?.convo_id !== convoId || row.ended) return;
+      if (!stop || this.stopping || this.convos.active(chId)?.convo_id !== convoId) return;
       const text = clip(stop[1]!.trim().split("\n")[0]!.trim() || "ok thats enough, im ending this one");
       this.core.sendChat(chId, {
         text,
@@ -1365,18 +1386,29 @@ export class SpencerAgent implements AgentService {
   private emitConversation(ch: string): void {
     const status = this.conversationStatusOf(ch);
     if (status) this.core.events.emit({ type: "conversation", conversation: status });
+    if (!status?.active) this.dropModerator(ch);
     this.watchIdle(ch);
+  }
+
+  /** The moderator of the conversation that was going on in `ch` is done: forget its model conversation. */
+  private dropModerator(ch: string): void {
+    const id = this.modKeys.get(ch);
+    if (id === undefined || this.inflight.has(`convo-mod:${id}`) || this.convos.active(ch)?.convo_id === id) return;
+    this.modKeys.delete(ch);
+    this.runtime?.forget(`${channelKey(ch)}#mod:${id}`);
   }
 
   /** Re-send the status when the conversation going on in `ch` goes quiet for `IDLE_MS`, so the UI shows it is over. */
   private watchIdle(ch: string): void {
     clearTimeout(this.idleTimers.get(ch));
     this.idleTimers.delete(ch);
-    const a = this.convos.active(ch);
+    const c = this.core.getChannel(ch);
+    const a = c && this.isConversation(c) ? this.convos.active(ch) : undefined;
     if (!a || this.stopping) return;
     const t = setTimeout(() => {
       this.idleTimers.delete(ch);
-      if (!this.stopping) this.emitConversation(ch);
+      const c = this.core.getChannel(ch);
+      if (!this.stopping && c && this.isConversation(c)) this.emitConversation(ch);
     }, Math.max(0, a.last_at + IDLE_MS - this.now()) + 1_000);
     t.unref?.();
     this.idleTimers.set(ch, t);
@@ -1423,12 +1455,14 @@ export class SpencerAgent implements AgentService {
     const c = this.core.getChannel(ch)!;
     if (!c.autoReply) throw new AgentHttpError(409, "auto-reply is off in this channel");
     if (!c.members.some((m) => m.id !== this.core.me().id)) throw new AgentHttpError(409, "nobody else is in this channel yet");
+    const rate = this.budget.check(ch, { ...loopLimits(this.core.config().policy, c.trust), maxTurns: 0, perMinute: Infinity });
+    if (!rate.ok) throw new AgentHttpError(429, `cannot start a conversation now: ${rate.why}`);
     this.convos.dueNow(ch);
-    this.startNow = ch;
+    this.startNow.add(ch);
     try {
       await this.convos.tick();
     } finally {
-      this.startNow = undefined;
+      this.startNow.delete(ch);
     }
     return this.conversationStatusOf(ch)!;
   }
@@ -1489,6 +1523,7 @@ export class SpencerAgent implements AgentService {
 
   async experimentalChanged(): Promise<void> {
     await this.reconfigureAll();
+    for (const ch of this.convos.channels()) this.watchIdle(ch);
   }
 
   soul(): SoulStatus {
@@ -1577,8 +1612,9 @@ export class SpencerAgent implements AgentService {
     await this.ensureChannel(msg.ch);
     // §7.5: in a Conversations channel my owner is one of the people in the chat: my Spencer may answer them too.
     const ch = this.core.getChannel(msg.ch);
-    const active = ch && this.isConversation(ch) && msg.origin === "human" ? this.convos.active(msg.ch) : undefined;
-    if (ch && active && active.started_at >= msg.ts - 60_000) {
+    // Only the message that started the conversation (humanConversationRef gave it its convo): my Spencer answers it.
+    const active = ch && this.isConversation(ch) && msg.origin === "human" && msg.convo?.start ? this.convos.active(msg.ch) : undefined;
+    if (ch && active && active.convo_id === msg.convo!.id) {
       await this.route({
         id: msg.id,
         ch: msg.ch,
@@ -1586,7 +1622,7 @@ export class SpencerAgent implements AgentService {
         from: this.core.me().id,
         fromName: "your owner",
         ts: msg.ts,
-        body: { type: "chat", text: msg.text, hop: 0, by: "human", convo: { id: active.convo_id, start: true } },
+        body: { type: "chat", text: msg.text, hop: 0, by: "human", convo: msg.convo! },
         channelKind: ch.kind,
         channelName: ch.name,
       });

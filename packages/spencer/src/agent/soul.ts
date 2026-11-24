@@ -3,7 +3,7 @@
  * convention OpenClaw popularised. It lives at `<dataDir>/SOUL.md` and is added to the instructions of every
  * conversation (owner and channels). It is prompt-only: it shapes style, never the trust rules.
  */
-import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, openSync, readSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const SOUL_FILE = "SOUL.md";
@@ -16,10 +16,18 @@ export class SoulError extends Error {
 
 /** The soul's text, trimmed; "" when there is none (or it can't be read). */
 export function readSoul(dataDir: string): string {
+  // At most MAX_SOUL_BYTES, even when the file was edited by hand: it goes into every request.
+  let fd: number | undefined;
   try {
-    return readFileSync(join(dataDir, SOUL_FILE), "utf8").trim();
+    fd = openSync(join(dataDir, SOUL_FILE), "r");
+    const buf = Buffer.alloc(MAX_SOUL_BYTES);
+    const n = readSync(fd, buf, 0, MAX_SOUL_BYTES, 0);
+    // A character cut in half at the limit decodes as U+FFFD: drop it.
+    return new TextDecoder().decode(buf.subarray(0, n)).replace(/\uFFFD+$/, "").trim();
   } catch {
     return "";
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 

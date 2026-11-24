@@ -16,7 +16,7 @@ import type {
   TransferRequest,
   TransferService,
 } from "../../src/contracts.ts";
-import type { FileBody } from "@spencer/protocol";
+import type { ConvoRef, FileBody } from "@spencer/protocol";
 
 export const quietLog = (_m: string): void => {};
 export const log = process.env.SPENCER_TEST_LOG ? (m: string) => console.error(`  · ${m}`) : quietLog;
@@ -65,6 +65,9 @@ export class StubAgent implements AgentService {
   ownerSends: string[] = [];
   notes: string[] = [];
   changed: string[] = [];
+  /** What `humanConversationRef` hands the daemon for a person's message in a Conversations channel. */
+  convoRef?: ConvoRef;
+  experimentalChanges = 0;
   started = false;
   stopped = false;
   /** Optional hook: return a note, or throw to simulate a crash before the hand-off. */
@@ -105,6 +108,12 @@ export class StubAgent implements AgentService {
   }
   mcpStatus() {
     return [];
+  }
+  humanConversationRef(_ch: string) {
+    return this.convoRef;
+  }
+  async experimentalChanged() {
+    this.experimentalChanges++;
   }
 }
 

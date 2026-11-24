@@ -402,7 +402,7 @@ export function modelView(main) {
   };
 
   // Conversations channels run constantly: they can use their own (cheaper) model. API keys are shared with the picker above.
-  const cdraft = { same: true, provider: "", modelId: "", thinking: "off", baseUrl: "", lastKey: null };
+  const cdraft = { same: true, provider: "", modelId: "", thinking: "off", baseUrl: "", filter: "", lastKey: null };
   const syncConvoDraft = (m, force = false) => {
     const c = m.conversation;
     const key = JSON.stringify(c ?? null);
@@ -445,8 +445,34 @@ export function modelView(main) {
     if (!cdraft.same) {
       if (!providers.some((p) => p.id === cdraft.provider)) cdraft.provider = providers[0]?.id ?? "";
       const prov = providers.find((p) => p.id === cdraft.provider);
-      const models = prov?.models ?? [];
+      const allModels = prov?.models ?? [];
+      const q = cdraft.filter.trim().toLowerCase();
+      const models = q ? allModels.filter((x) => x.id.toLowerCase().includes(q) || x.name.toLowerCase().includes(q)) : allModels;
       if (prov && !prov.custom && models.length && !models.some((x) => x.id === cdraft.modelId)) cdraft.modelId = models[0].id;
+      // Copilot's Claude models refuse requests with thinking off (see the main picker).
+      const copilotClaude = cdraft.provider === "github-copilot" && /^claude-/i.test(cdraft.modelId);
+      if (copilotClaude && cdraft.thinking === "off") cdraft.thinking = "medium";
+      const filterInput =
+        !prov?.custom && allModels.length > 15
+          ? h("input.input.model-filter", {
+              type: "search",
+              placeholder: `Filter ${allModels.length} models…`,
+              value: cdraft.filter,
+              disabled: busy,
+              on: {
+                input: (e) => {
+                  cdraft.filter = e.target.value;
+                  const pos = e.target.selectionStart;
+                  renderConvo(m);
+                  const again = convo.querySelector(".model-filter");
+                  if (again) {
+                    again.focus();
+                    if (pos !== null) again.setSelectionRange(pos, pos);
+                  }
+                },
+              },
+            })
+          : null;
       fields.push(
         h(
           "div.model-row",
@@ -457,7 +483,7 @@ export function modelView(main) {
             "Provider",
             h(
               "select.input.model-select",
-              { disabled: busy, on: { change: (e) => ((cdraft.provider = e.target.value), (cdraft.modelId = ""), renderConvo(m)) } },
+              { disabled: busy, on: { change: (e) => ((cdraft.provider = e.target.value), (cdraft.modelId = ""), (cdraft.filter = ""), renderConvo(m)) } },
               providers.map((p) => h("option", { value: p.id, selected: p.id === cdraft.provider }, p.name)),
             ),
           ),
@@ -468,7 +494,7 @@ export function modelView(main) {
             h(
               "select.input.model-select",
               { disabled: busy, on: { change: (e) => (cdraft.thinking = e.target.value) } },
-              THINKING_OPTIONS.map(([v, label]) => h("option", { value: v, selected: cdraft.thinking === v }, label)),
+              THINKING_OPTIONS.filter(([v]) => !copilotClaude || v !== "off").map(([v, label]) => h("option", { value: v, selected: cdraft.thinking === v }, label)),
             ),
           ),
         ),
@@ -481,9 +507,10 @@ export function modelView(main) {
               "label.model-pick-label",
               null,
               "Model",
+              filterInput,
               h(
                 "select.input.model-select",
-                { disabled: busy || !models.length, on: { change: (e) => (cdraft.modelId = e.target.value) } },
+                { disabled: busy || !models.length, on: { change: (e) => ((cdraft.modelId = e.target.value), renderConvo(m)) } },
                 models.length ? models.map((x) => h("option", { value: x.id, selected: x.id === cdraft.modelId }, x.name === x.id ? x.id : `${x.name} (${x.id})`)) : h("option", { value: "" }, "No models available"),
               ),
             ),
@@ -501,7 +528,8 @@ export function modelView(main) {
             if (!mid) return toast("Pick or enter a model ID");
             const prov = providers.find((p) => p.id === cdraft.provider);
             if (prov?.custom && !cdraft.baseUrl.trim()) return toast("Base URL is required for OpenAI-compatible servers");
-            const opts = { thinking: cdraft.thinking, ...(prov?.custom ? { baseUrl: cdraft.baseUrl.trim() } : {}) };
+            const claude = cdraft.provider === "github-copilot" && /^claude-/i.test(mid);
+            const opts = { thinking: claude && cdraft.thinking === "off" ? "medium" : cdraft.thinking, ...(prov?.custom ? { baseUrl: cdraft.baseUrl.trim() } : {}) };
             void act(() => api.setConversationModel(cdraft.provider, mid, opts), `Conversations now use ${mid}`);
           },
         },

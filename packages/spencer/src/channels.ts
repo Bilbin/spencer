@@ -485,6 +485,9 @@ export class ChannelManager {
     if (requested !== "direct" && requested !== "group" && requested !== "conversation") {
       throw new UserError(400, "kind must be direct, group or conversation");
     }
+    if (requested === "conversation" && !this.d.config().experimental) {
+      throw new UserError(403, "Conversations channels are experimental: turn on Experimental in settings first");
+    }
     const kind = requested === "direct" ? "direct" : "group";
     const mode = requested === "conversation" ? "conversation" : "chat";
     const label = typeof name === "string" ? name.trim().slice(0, MAX_NAME) : "";

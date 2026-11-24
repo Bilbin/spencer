@@ -283,21 +283,33 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
         ].join("\n");
       },
     },
-    {
-      name: "create_invite",
-      description:
-        "Create a new channel and its invite link (direct: one other person; group: several; conversation: a group where the " +
-        "Spencers start debates on their own). Give the link to your owner to share.",
-      parameters: schema({ kind: { type: "string", enum: ["direct", "group", "conversation"] }, name: str("Channel name"), relay: str("Relay URL") }, ["kind", "name"]),
-      async execute(args: { kind: "direct" | "group" | "conversation"; name: string; relay?: string }) {
-        if (args.kind !== "direct" && args.kind !== "group" && args.kind !== "conversation") return fail("kind must be direct, group or conversation");
-        const name = String(args.name ?? "").trim();
-        if (!name) return fail("name is required");
-        const { link, channel } = await core.createInvite(args.kind, name.slice(0, 100), args.relay);
-        return `Created ${channel.mode === "conversation" ? "Conversations" : channel.kind} channel "${channel.name}" (${channel.id}). Invite link (share it privately): ${link}`;
-      },
-    },
+    inviteTool(core, false),
   ];
+}
+
+/**
+ * `create_invite`. Conversations channels are experimental: the kind is offered only while experimental features are
+ * on (the agent swaps in the `conversations: true` spec then; the two differ in description, so the tool is rebuilt).
+ */
+export function inviteTool(core: CoreServices, conversations: boolean): ToolSpec {
+  const kinds = conversations ? ["direct", "group", "conversation"] : ["direct", "group"];
+  return {
+    name: "create_invite",
+    description:
+      "Create a new channel and its invite link (direct: one other person; group: several" +
+      (conversations ? "; conversation: a group where the Spencers start debates on their own" : "") +
+      "). Give the link to your owner to share.",
+    parameters: schema({ kind: { type: "string", enum: kinds }, name: str("Channel name"), relay: str("Relay URL") }, ["kind", "name"]),
+    async execute(args: { kind: "direct" | "group" | "conversation"; name: string; relay?: string }) {
+      if (!kinds.includes(args.kind) || (args.kind === "conversation" && !core.config().experimental)) {
+        return fail(`kind must be ${kinds.slice(0, -1).join(", ")} or ${kinds.at(-1)}`);
+      }
+      const name = String(args.name ?? "").trim();
+      if (!name) return fail("name is required");
+      const { link, channel } = await core.createInvite(args.kind, name.slice(0, 100), args.relay);
+      return `Created ${channel.mode === "conversation" ? "Conversations" : channel.kind} channel "${channel.name}" (${channel.id}). Invite link (share it privately): ${link}`;
+    },
+  };
 }
 
 // ------------------------------------------------------------------ channel tools

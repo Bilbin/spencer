@@ -15,6 +15,8 @@ export type FetchLike = (url: string, init?: { signal?: AbortSignal; headers?: R
   ok: boolean;
   status: number;
   text(): Promise<string>;
+  /** When present, read as a stream so a huge answer is cut at `MAX_BYTES` instead of buffered whole. */
+  body?: ReadableStream<Uint8Array> | null;
 }>;
 
 const FEED = "https://news.google.com/rss";
@@ -32,7 +34,9 @@ const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"'
 
 function decode(s: string): string {
   const raw = s.replace(/^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/, "$1");
+  // Tags first: an encoded "&lt;b&gt;" is text, not markup.
   return raw
+    .replace(/<[^>]*>/g, "")
     .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e: string) => {
       if (e[0] === "#") {
         const n = e[1] === "x" || e[1] === "X" ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
@@ -40,7 +44,6 @@ function decode(s: string): string {
       }
       return ENTITIES[e.toLowerCase()] ?? m;
     })
-    .replace(/<[^>]*>/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -59,13 +62,15 @@ export function parseNewsRss(xml: string, limit = MAX_ITEMS): NewsItem[] {
     let title = tag(item, "title");
     if (!title) continue;
     const source = tag(item, "source");
+    const published = tag(item, "pubDate");
+    const link = tag(item, "link");
     // Google News titles end with " - <source>".
     if (source && title.endsWith(` - ${source}`)) title = title.slice(0, -(source.length + 3)).trim();
     out.push({
       title: title.slice(0, 300),
       ...(source ? { source: source.slice(0, 100) } : {}),
-      ...(tag(item, "pubDate") ? { published: tag(item, "pubDate")!.slice(0, 64) } : {}),
-      ...(tag(item, "link") ? { link: tag(item, "link")!.slice(0, 500) } : {}),
+      ...(published ? { published: published.slice(0, 64) } : {}),
+      ...(link ? { link: link.slice(0, 500) } : {}),
     });
     if (out.length >= limit) break;
   }
@@ -78,8 +83,29 @@ export async function fetchNews(query: string | undefined, fetchImpl: FetchLike 
     headers: { "user-agent": "Mozilla/5.0 (compatible; Spencer)", accept: "application/rss+xml, application/xml, text/xml" },
   });
   if (!res.ok) throw new Error(`Google News answered HTTP ${res.status}`);
-  const text = await res.text();
-  return parseNewsRss(text.length > MAX_BYTES ? text.slice(0, MAX_BYTES) : text);
+  return parseNewsRss(await readCapped(res));
+}
+
+/** The answer's text, at most `MAX_BYTES` of it (the rest is never read). */
+async function readCapped(res: Awaited<ReturnType<FetchLike>>): Promise<string> {
+  if (!res.body) {
+    const text = await res.text();
+    return text.length > MAX_BYTES ? text.slice(0, MAX_BYTES) : text;
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (size < MAX_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      size += value.byteLength;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks).subarray(0, MAX_BYTES));
 }
 
 /** What the model sees: the headlines as untrusted data. */

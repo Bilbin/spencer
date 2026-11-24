@@ -193,6 +193,8 @@ export function resolveConfig(raw: Partial<SpencerConfig> & Record<string, unkno
     throw new Error("policy.conversationStartHour and conversationEndHour must be whole hours with 0 <= start < end <= 24");
   }
   try {
+    // Intl takes undefined (the system zone) and "" quietly: only a real zone name counts.
+    if (typeof tz !== "string" || !tz.trim()) throw new Error();
     new Intl.DateTimeFormat("en-US", { timeZone: tz });
   } catch {
     throw new Error(`policy.conversationTimeZone: unknown time zone ${JSON.stringify(tz)}`);

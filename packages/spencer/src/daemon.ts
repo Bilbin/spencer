@@ -581,7 +581,7 @@ export class Daemon {
             const ts = Date.now();
             queueMicrotask(() => {
               agent
-                .onOutgoingChat({ id: res.id, ch, text: msg.text, origin: msg.origin, ts })
+                .onOutgoingChat({ id: res.id, ch, text: msg.text, origin: msg.origin, ts, ...(body.convo ? { convo: body.convo } : {}) })
                 .catch((e: Error) => log(`agent.onOutgoingChat: ${e.message}`));
             });
           }

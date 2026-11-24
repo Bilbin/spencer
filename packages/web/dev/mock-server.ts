@@ -140,6 +140,10 @@ const presence = new Map<string, Presence>([
   [dave.id, { online: true, lastSeenAt: now() }],
 ]);
 let experimental = true;
+/** Like the daemon: experimental endpoints answer 403 while the features are off. */
+function needExperimental(): void {
+  if (!experimental) throw new HttpError(403, "experimental features are off (Model & settings → Experimental)");
+}
 const policy = {
   maxHops: 4,
   repliesPerMinute: 6,
@@ -700,6 +704,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
   if (a === "channels" && b) {
     const ch = getChannel(b);
     if (c === "conversation") {
+      needExperimental();
       if (ch.mode !== "conversation") throw new HttpError(400, "not a Conversations channel");
       const st = convos.get(ch.id) ?? { ch: ch.id, nextAt: now() + 45 * MIN, opening: false, hours: HOURS };
       convos.set(ch.id, st);
@@ -740,6 +745,12 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     }
     if (!c && method === "PATCH") {
       const body = await readJson(req);
+      if (body.heated !== undefined) {
+        needExperimental();
+        if (typeof body.heated !== "boolean") throw new HttpError(400, "heated must be a boolean");
+        if (ch.mode !== "conversation") throw new HttpError(400, "heated is only for Conversations channels");
+        ch.heated = body.heated;
+      }
       if (typeof body.name === "string" && body.name.trim()) ch.name = body.name.trim();
       if (body.directLink === "auto" || body.directLink === "off") ch.directLink = body.directLink;
       if (typeof body.allowLocalAddresses === "boolean") ch.allowLocalAddresses = body.allowLocalAddresses;
@@ -759,9 +770,10 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
   if (a === "invites" && method === "POST") {
     const body = await readJson(req);
     if (!b) {
-      const kind = body.kind === "group" ? "group" : body.kind === "direct" ? "direct" : null;
+      const kind = body.kind === "group" || body.kind === "conversation" ? "group" : body.kind === "direct" ? "direct" : null;
       const name = typeof body.name === "string" ? body.name.trim() : "";
-      if (!kind) throw new HttpError(400, "kind must be direct or group");
+      if (!kind) throw new HttpError(400, "kind must be direct, group or conversation");
+      if (body.kind === "conversation") needExperimental();
       if (!name) throw new HttpError(400, "name is required");
       let hub = relay.url;
       if (body.relay !== undefined) {
@@ -776,7 +788,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
           hub = url.toString();
         } catch { throw new HttpError(400, "invalid hub URL"); }
       }
-      const chn = addChannel(kind, name, [], { createdAt: now(), relayUrl: hub });
+      const chn = addChannel(kind, name, [], { createdAt: now(), relayUrl: hub, ...(body.kind === "conversation" ? { mode: "conversation" as const } : {}) });
       emitChannel(chn);
       // Simulate the friend joining a little later.
       later(12_000, () => {
@@ -833,6 +845,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     return { enabled: experimental };
   }
   if (a === "soul" && !b) {
+    needExperimental();
     if (method === "GET") return { text: soul, maxBytes: 16 * 1024 };
     if (method === "PUT") {
       const body = await readJson(req);
@@ -843,6 +856,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     }
   }
   if (a === "model" && b === "conversation" && method === "PUT") {
+    needExperimental();
     const body = await readJson(req);
     if (body.provider === null) delete model.conversation;
     else {
