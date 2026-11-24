@@ -263,7 +263,7 @@ export function ownerView(main) {
 
   const { input: fileInput, button: fileBtn } = createFilePicker((files) => addFiles(files));
   comp = composer({
-    placeholder: "Message Spencer…", label: "Message Spencer", hint: `${SEND_HINT()} Attach or drop files.`, drafts: draftArea, left: fileBtn,
+    placeholder: "Message Spencer…", label: "Message Spencer", hint: [...SEND_HINT(), ". Attach or drop files."], drafts: draftArea, left: fileBtn,
     canSend: () => drafts.length > 0, isBusy: () => ownerDraftState.sending,
     initialText: ownerDraftState.messageText,
     onTextChange: (text) => { ownerDraftState.messageText = text; },

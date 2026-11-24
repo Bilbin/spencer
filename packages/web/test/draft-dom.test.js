@@ -224,3 +224,18 @@ test("file picker opens and passes multiple selected files to the draft queue", 
   input.dispatchEvent(new browser.Event("change"));
   assert.deepEqual(received, files);
 });
+
+test("owner composer renders kbd send hint cleanly and includes an attach button", async () => {
+  globalThis.requestAnimationFrame ??= () => 0;
+  const { ownerView } = await import("../public/owner.js");
+  const main = document.createElement("main");
+  const view = ownerView(main);
+  const hint = main.querySelector(".composer-hint");
+  assert.ok(hint);
+  assert.doesNotMatch(hint.textContent, /\[object /);
+  assert.match(hint.textContent, /Attach or drop files/);
+  assert.ok(hint.querySelector("kbd"));
+  assert.ok(main.querySelector("button.attach"));
+  assert.ok(main.querySelector("input[type=file]"));
+  view.destroy();
+});
