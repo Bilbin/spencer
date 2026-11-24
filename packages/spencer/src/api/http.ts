@@ -462,6 +462,44 @@ export class ApiServer {
       if (method === "GET") return b.core.bio();
       if (method === "PUT") return b.core.setBio((await readJson(req)).text);
     }
+    if ((m = /^\/api\/peers\/([^/]+)\/memoir\/seen$/.exec(p)) && method === "POST") {
+      const scope = { kind: "peer" as const, id: m[1]! };
+      b.core.memoir.profile(scope);
+      b.core.memoir.markSeen(scope);
+      return {};
+    }
+    if ((m = /^\/api\/(peers|channels)\/([^/]+)\/(memoir|rules|notes)$/.exec(p))) {
+      const scope = {
+        kind: m[1] === "peers" ? ("peer" as const) : ("channel" as const),
+        id: m[2]!,
+      };
+      const store = b.core.memoir;
+      const profile = store.profile(scope); // validate identity and group boundary before every action
+      if (m[3] === "memoir" && method === "GET") {
+        if (q.get("markSeen") === "1") store.markSeen(scope);
+        return store.profile(scope);
+      }
+      if (m[3] === "rules" && method === "PUT") {
+        store.writeRules(scope, (await readJson(req)).text);
+        return {
+          ...profile,
+          rules: store.readRules(scope),
+          hasRules: !!store.readRules(scope),
+        };
+      }
+      if (m[3] === "notes" && method === "POST") {
+        const body = await readJson(req);
+        return store.addOwnerNote(scope, body.text, body.pinned);
+      }
+    }
+    if ((m = /^\/api\/memoir\/notes\/([^/]+)$/.exec(p))) {
+      if (method === "PATCH")
+        return b.core.memoir.update(m[1]!, await readJson(req));
+      if (method === "DELETE") {
+        b.core.memoir.delete(m[1]!);
+        return {};
+      }
+    }
     if (p === "/api/peers" && method === "GET") return { peers: b.core.listPeerDirectory() };
     if (p === "/api/channels" && method === "GET") return { items: b.core.listChannels() };
 

@@ -19,6 +19,7 @@ const peer = { ...c.members[0], about: "# Public bio\n<script>bad()</script>", a
 function mount() { document.body.innerHTML = '<div id="modal-root"></div><main></main>'; return document.querySelector("main"); }
 function button(root, text) { return [...root.querySelectorAll("button")].find(b => b.textContent === text); }
 api.peers = async () => ({ peers: [peer] });
+api.memoir = async () => ({...peer,bio:peer.about,rules:"",notes:[]});
 api.mcp = async () => ({ servers: [] });
 
 test("Bio route works without Experimental; editor counts UTF-16 and saves/reverts", async () => {
@@ -57,7 +58,7 @@ test("Peers directory renders safe markdown and updates from peer_bio events", a
 test("DM Peer BIO snippet, peer row cards, channel-specific bio, and share toggle", async () => {
   const main = mount(); S.channels.set(c.id, c); S.messages.set(c.id, []);
   S.peerBios.clear(); const view = channelView(main, c.id); await flush();
-  assert.match(main.querySelector(".members").textContent, /Peer BIO[\s\S]*Channel-specific scope/);
+  assert.match(main.querySelector(".members").textContent, /Bio & Memoir[\s\S]*Channel-specific scope/);
   main.querySelector(".member[role=button]").click(); await flush();
   assert.match(document.querySelector('[role="dialog"]').textContent, /Channel-specific scope/); closeModal();
   const settings = button(main, "Channel settings"); settings.click(); await flush();

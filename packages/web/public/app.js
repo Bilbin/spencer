@@ -1,3 +1,4 @@
+import { unseenMemoirCount } from "./memoir.js";
 // Spencer local UI: entry point. Sidebar, routing, keyboard shortcuts, and the events stream.
 import { h, icon, shortFp, avatar, selfAvatar, clear, append } from "./dom.js";
 import { api, attempt, toast, connectEvents } from "./api.js";
@@ -80,6 +81,16 @@ function linkStatus() {
   return { state: "down", text: "Relay offline", title: `Relay disconnected: ${urls}. Messages are queued until it is back.${why}` };
 }
 
+let unseenMemoir = 0, memoirSeq = 0, memoirTimer;
+function refreshMemoirBadge() {
+  const seq = ++memoirSeq;
+  clearTimeout(memoirTimer);
+  memoirTimer = setTimeout(async () => {
+    const result = await attempt(() => api.peers());
+    if(result && seq === memoirSeq) { unseenMemoir = unseenMemoirCount(result.peers); renderSidebar(); }
+  },150);
+}
+refreshMemoirBadge();
 function renderSidebar() {
   const me = S.me;
   const link = linkStatus();
@@ -182,7 +193,7 @@ function renderSidebar() {
       navItem({ name: "transfers" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("transfer", 16)), h("span.nav-name", null, "Transfers"), badge(pending, "need action", "attn")], { cls: "foot" }),
       navItem({ name: "mcp" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("plug", 16)), h("span.nav-name", null, "MCP servers"), mcpBad ? h("span.pdot.inline.bad", { role: "img", "aria-label": "a server has an error" }) : null], { cls: "foot" }),
       navItem({ name: "bio" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("file", 16)), h("span.nav-name", null, "Bio")], { cls: "foot" }),
-      navItem({ name: "peers" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("users", 16)), h("span.nav-name", null, "Peers")], { cls: "foot" }),
+      navItem({ name: "peers" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("users", 16)), h("span.nav-name", null, "Peers"), badge(unseenMemoir, "unseen memoir notes", "attn")], { cls: "foot" }),
       S.experimental ? navItem({ name: "soul" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("heart", 16)), h("span.nav-name", null, "Soul")], { cls: "foot" }) : null,
       navItem(
         { name: "model" },
@@ -286,8 +297,9 @@ function syncTitle() {
 
 function handleEvent(ev) {
   switch (ev.type) {
+    case "memoir": emit("memoir", ev); refreshMemoirBadge(); break;
     case "bio":
-    case "peer_bio": applyBioEvent(ev); break;
+    case "peer_bio": applyBioEvent(ev); refreshMemoirBadge(); break;
     case "channel":
       if (ev.channel?.id) upsertChannel(ev.channel);
       break;
@@ -445,7 +457,7 @@ mount();
 refresh(false);
 connectEvents({
   onEvent: handleEvent,
-  onOpen: (isReconnect) => refresh(isReconnect),
+  onOpen: (isReconnect) => { refreshMemoirBadge(); return refresh(isReconnect); },
   onStatus: (up) => {
     S.wsUp = up;
     if (up) everConnected = true;

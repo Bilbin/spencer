@@ -684,11 +684,106 @@ function transferAction(t: Transfer, action: string): Transfer {
   return t;
 }
 
+const memoirRules = new Map<string, string>();
+const memoirNotes = new Map<string, {id:string; scopeKind:string; scopeId:string; text:string; pinned:boolean; seen:boolean; author:string; trustAtWrite:string; createdAt:number}[]>();
+function evictMockNotes(key: string) {
+  const list = memoirNotes.get(key) ?? [];
+  const pinned = list.filter((n) => n.pinned);
+  const unpinned = list.filter((n) => !n.pinned);
+  let chars = unpinned.reduce((s, n) => s + n.text.length, 0);
+  while (unpinned.length > 20 || chars > 4000) {
+    const oldest = unpinned.pop()!;
+    chars -= oldest.text.length;
+  }
+  const kept = [...pinned, ...unpinned];
+  if (kept.length) memoirNotes.set(key, kept);
+  else memoirNotes.delete(key);
+}
+function memoirProfile(kind: string, id: string) {
+  const key = `${kind}:${id}`;
+  const shared = [...channels.values()].filter(c=>c.members.some(m=>!m.me && m.id===id));
+  const member = shared.flatMap(c=>c.members).find(m=>m.id===id);
+  const channel = channels.get(id);
+  if (kind === "channel") {
+    if (!channel) throw new HttpError(404, "unknown channel");
+    if (channel.kind !== "group" || channel.mode === "conversation") throw new HttpError(400,"group chat required");
+  }
+  if (kind === "peer" && !member && !memoirRules.has(key) && !(memoirNotes.get(key)?.length)) throw new HttpError(404,"unknown peer");
+  return {kind,id,ch:kind === "channel" ? id : undefined,name:kind === "peer" ? member?.name : channel?.name,
+    fingerprint:member?.fingerprint, active:shared.length>0, bio:"I help with planning and research.",bioAt:mockPeerAboutAt,
+    rules:memoirRules.get(key) ?? "", maxRulesBytes:2048,notes:memoirNotes.get(key) ?? [],
+    channels:shared.map(c=>({id:c.id,name:c.name,kind:c.kind,about:"I help with planning and research.",aboutAt:mockPeerAboutAt}))};
+}
 async function api(req: IncomingMessage, url: URL): Promise<unknown> {
   const method = req.method ?? "GET";
   const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent); // ["api", ...]
   const [, a, b, c, d] = parts;
 
+  if (a === "peers" && b && c === "memoir" && d === "seen" && parts.length === 5 && method === "POST") {
+    const profile = memoirProfile("peer", b);
+    profile.notes.forEach((n) => (n.seen = true));
+    emit({ type: "memoir", scopeKind: "peer", scopeId: b });
+    return {};
+  }
+  if ((a === "peers" || a === "channels") && b && ["memoir","rules","notes"].includes(c ?? "") && parts.length === 4) {
+    const kind=a === "peers" ? "peer" : "channel", key=`${kind}:${b}`;
+    const profile=memoirProfile(kind,b);
+    if (c === "rules" && method === "PUT") {
+      const body=await readJson(req);
+      if(typeof body.text !== "string" || Buffer.byteLength(body.text.trim())>2048) throw new HttpError(400,"rules must fit 2048 bytes");
+      const trimmed = body.text.trim();
+      if (trimmed) memoirRules.set(key, trimmed);
+      else memoirRules.delete(key);
+      emit({type:"memoir",scopeKind:kind,scopeId:b});
+      return { ...profile, rules: trimmed, hasRules: !!trimmed };
+    }
+    if(c === "notes" && method === "POST") {
+      const body=await readJson(req);
+      if(typeof body.text !== "string" || !body.text.trim() || body.text.trim().length>500) throw new HttpError(400,"note must contain 1 to 500 characters");
+      if(body.pinned !== undefined && typeof body.pinned !== "boolean") throw new HttpError(400,"pinned must be boolean");
+      const note={id:b64u(16),scopeKind:kind,scopeId:b,text:body.text.trim(),pinned:body.pinned===true,seen:true,author:"owner",trustAtWrite:"owner",createdAt:Date.now()};
+      memoirNotes.set(key,[note,...profile.notes]);
+      evictMockNotes(key);
+      emit({type:"memoir",scopeKind:kind,scopeId:b});return note;
+    }
+    if(c === "memoir" && method === "GET") {
+      if(url.searchParams.get("markSeen")==="1") {
+        profile.notes.forEach(n=>n.seen=true);emit({type:"memoir",scopeKind:kind,scopeId:b});
+      }
+      return profile;
+    }
+  }
+  if(a === "memoir" && b === "notes" && c && parts.length === 4) {
+    for(const [key,notes] of memoirNotes) {
+      const note=notes.find(n=>n.id===c);if(!note) continue;
+      if(method === "DELETE") {
+        const next = notes.filter(n=>n.id!==c);
+        if (next.length) memoirNotes.set(key, next);
+        else memoirNotes.delete(key);
+        emit({type:"memoir",scopeKind:note.scopeKind,scopeId:note.scopeId});
+        return {};
+      }
+      if(method === "PATCH") {
+        const body=await readJson(req);
+        if (body.text !== undefined) {
+          if (typeof body.text !== "string" || !body.text.trim() || body.text.trim().length > 500) throw new HttpError(400, "note must contain 1 to 500 characters");
+          note.text = body.text.trim();
+        }
+        if (body.pinned !== undefined) {
+          if (typeof body.pinned !== "boolean") throw new HttpError(400, "pinned must be boolean");
+          note.pinned = body.pinned;
+        }
+        if (body.seen !== undefined) {
+          if (typeof body.seen !== "boolean") throw new HttpError(400, "seen must be boolean");
+          note.seen = body.seen;
+        }
+        evictMockNotes(key);
+        emit({type:"memoir",scopeKind:note.scopeKind,scopeId:note.scopeId});
+        return note;
+      }
+    }
+    throw new HttpError(404,"unknown note");
+  }
   if (method === "GET" && a === "state" && !b) {
     return {
       me,
@@ -818,6 +913,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     if (!c && method === "DELETE") {
       channels.delete(ch.id);
       messages.delete(ch.id);
+      memoirRules.delete(`channel:${ch.id}`); memoirNotes.delete(`channel:${ch.id}`);
       emit({ type: "channel_removed", ch: ch.id });
       return {};
     }
@@ -935,7 +1031,12 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       peer.channels.push({ id: ch.id, name: ch.name, kind: ch.kind, about: peer.about, aboutAt: peer.aboutAt });
       directory.set(m.id, peer);
     }
-    return { peers: [...directory.values()] };
+    for(const key of new Set([...memoirRules.keys(),...memoirNotes.keys()])) {
+      if(!key.startsWith("peer:")) continue;
+      const id=key.slice(5);
+      if(!directory.has(id) && (memoirRules.get(key) || memoirNotes.get(key)?.length)) directory.set(id,{id,fingerprint:id,name:null,about:null,aboutAt:null,channels:[]});
+    }
+    return { peers: [...directory.values()].map(p=>({...p,active:p.channels.length>0,hasRules:!!memoirRules.get(`peer:${p.id}`),noteCount:memoirNotes.get(`peer:${p.id}`)?.length ?? 0,unseenNotes:memoirNotes.get(`peer:${p.id}`)?.filter(n=>!n.seen).length ?? 0})) };
   }
   if (a === "bio" && !b) {
     if (method === "PUT") {

@@ -1,3 +1,4 @@
+import type { Memoir } from "./memoir.ts";
 /**
  * Internal contracts between the parts of the Spencer daemon.
  *
@@ -43,6 +44,7 @@ export interface BioStatus {
 }
 export interface PeerBio { id: string; name: string | null; about: string | null; aboutAt: number | null }
 export interface PeerSummary extends PeerBio {
+  active: boolean; hasRules: boolean; noteCount: number; unseenNotes: number;
   fingerprint: string;
   channels: { id: string; name: string; kind: Channel["kind"]; about: string | null; aboutAt: number | null }[];
 }
@@ -236,6 +238,7 @@ export interface McpServerStatus {
 // ---------------------------------------------------------------- events
 
 export type DaemonEvent =
+  | { type: "memoir"; scopeKind: "peer" | "channel"; scopeId: string }
   | { type: "bio"; bio: BioStatus }
   | { type: "peer_bio"; ch: string; id: string; about: string | null; aboutAt: number | null }
   | { type: "experimental"; enabled: boolean }
@@ -389,6 +392,7 @@ export interface OutgoingChat {
 
 /** What the agent layer needs from the core. */
 export interface CoreServices {
+  memoir: Memoir;
   bio(): BioStatus;
   bioText(): string;
   setBio(text: unknown): Promise<BioStatus>;

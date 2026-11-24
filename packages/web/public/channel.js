@@ -1,3 +1,4 @@
+import { groupMemoirSnippet } from "./memoir.js";
 // A channel (direct or group): the transcript between people and their Spencers, composer, members, files and settings.
 import { peerCard, peerBioSnippet } from "./peers.js";
 import { h, icon, iconButton, richText, shortFp, timeShort, timeFull, autoGrow, hue, avatar, selfAvatar, youAvatar, personOf, clear, append, relTime } from "./dom.js";
@@ -853,7 +854,7 @@ export function channelView(main, chId) {
     members.replaceChildren(...[
       h("div.members-head", null, h("h2", null, c.kind === "group" ? "In this group" : "In this channel"), iconButton("close", "Close members", () => setMembersOpen(false), "members-close")),
       h("ul.member-list", null, c.members.map((m) => memberRow(c, m))),
-      c.kind === "direct" ? peerBioSnippet(c) : null,
+      c.mode === "conversation" ? null : c.kind === "direct" ? peerBioSnippet(c) : groupMemoirSnippet(c),
       isConversation(c) ? conversationSection(c) : null,
       followupList(c.id, { title: "Your Spencer will follow up" }),
       h(
@@ -1097,6 +1098,7 @@ export function channelView(main, chId) {
     renderMembers();
   });
   const offs = [
+    on("memoir", () => renderMembers()),
     on("peer_bio", ev => { if (ev.ch === chId) renderMembers(); }),
     on(`channel:${chId}`, onChannel),
     on(`messages:${chId}`, onMessages),
