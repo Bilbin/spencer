@@ -5,6 +5,7 @@
 import { chmodSync, constants as fsc, existsSync, lstatSync, readdirSync, renameSync } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { openFrom, random, randomId, sanitizeFileName, sealFor } from "@spencer/protocol";
 import type { FileBody } from "@spencer/protocol";
 import { TERMINAL_STATES } from "../contracts.ts";
@@ -730,20 +731,33 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
 
     async request(ch, req: TransferRequest) {
       if (stopped) throw new TransferError("stopped", "transfer service is stopped");
-      if (typeof req.path !== "string" || !isAbsolute(req.path)) throw new TransferError("bad_request", "path must be absolute");
+      if (typeof req.path !== "string") throw new TransferError("bad_request", "path must be absolute");
+      let path = req.path;
+      try {
+        if (path.startsWith("file:")) path = fileURLToPath(path);
+      } catch {
+        throw new TransferError("bad_request", "invalid file URL");
+      }
+      if (!isAbsolute(path)) throw new TransferError("bad_request", "path must be absolute");
       let st;
       try {
-        st = await stat(req.path); // follows symlinks: a symlink to a regular file is fine, to a dir is not
+        st = await stat(path);
       } catch {
-        throw new TransferError("bad_request", `cannot read ${req.path}`);
+        try {
+          const decoded = decodeURIComponent(path);
+          st = await stat(decoded);
+          path = decoded;
+        } catch {
+          throw new TransferError("bad_request", `cannot read ${path}`);
+        }
       }
-      if (!st.isFile()) throw new TransferError("bad_request", `${req.path} is not a regular file`);
-      const name = sanitizeFileName(basename(req.path));
+      if (!st.isFile()) throw new TransferError("bad_request", `${path} is not a regular file`);
+      const name = sanitizeFileName(basename(path));
       if (req.uploadId !== undefined) {
         if (!/^[A-Za-z0-9_-]{16,64}$/.test(req.uploadId)) throw new TransferError("bad_request", "invalid upload retry id");
         const previous = store.byUploadId(req.uploadId);
         if (previous) {
-          const sha256 = await sha256File(req.path);
+          const sha256 = await sha256File(path);
           if (previous.ch !== ch || (req.to !== undefined && previous.peer !== req.to) || previous.name !== name || previous.size !== st.size || previous.sha256 !== sha256) {
             throw new TransferError("conflict", "upload retry id was already used for different content or recipient");
           }
@@ -769,7 +783,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
       try {
         await ensureDirAsync(dirs.outgoing);
         await ensureDirAsync(dir);
-        size = await stageCopy(req.path, staged);
+        size = await stageCopy(path, staged);
         sha256 = await sha256File(staged);
       } catch (e) {
         rmrf(dir);

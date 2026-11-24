@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { TransferStore } from "../../src/transfers/store.ts";
 import { generateIdentity, pairKey, randomId } from "@spencer/protocol";
@@ -48,6 +49,19 @@ afterEach(async () => {
 const noApproval = { policy: { requireApprovalForOutgoingFiles: false } };
 
 describe("transfers (fake croc)", () => {
+  it("accepts file URLs and encoded paths while preserving literal percent filenames", async () => {
+    const { A, ch } = await setup({ a: noApproval });
+    const spaced = makeFile(A, "file name.txt");
+    const literal = makeFile(A, "file%20name.txt");
+    const url = await A.s.request(ch, { path: pathToFileURL(spaced.path).href, initiatedBy: "owner" });
+    assert.equal(url.sha256, sha(spaced.data));
+    const raw = await A.s.request(ch, { path: literal.path, initiatedBy: "owner" });
+    assert.equal(raw.sha256, sha(literal.data));
+    unlinkSync(literal.path);
+    const decoded = await A.s.request(ch, { path: literal.path, initiatedBy: "owner" });
+    assert.equal(decoded.sha256, sha(spaced.data));
+  });
+
   it("writes every byte when a writer reports partial progress", async () => {
     const output: number[] = [];
     const writer = {

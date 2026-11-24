@@ -12,7 +12,7 @@ Object.assign(globalThis, {
   KeyboardEvent: browser.KeyboardEvent,
   localStorage: browser.localStorage,
 });
-const { createDraftRecipientSelect, createDraftRemoveButton, refreshDraftRecipientOptions, scrollAfterAcceptedFile } = await import("../public/draft-dom.js");
+const { createFilePicker, createDraftRecipientSelect, createDraftRemoveButton, refreshDraftRecipientOptions, scrollAfterAcceptedFile } = await import("../public/draft-dom.js");
 const { getChannelDraftState, releaseRecipientAfterDefiniteFailure, removeDraft } = await import("../public/draft-state.js");
 const { scrollKeeper } = await import("../public/scroll.js");
 const originalSetInterval = globalThis.setInterval;
@@ -210,4 +210,32 @@ test("a successful file remains scrolled into view when a later file in the batc
   assert.equal(drafts[0].status, "sent");
   assert.equal(oldScroller.scrollTop, 0);
   assert.equal(scroller.scrollTop, 900);
+});
+
+test("file picker opens and passes multiple selected files to the draft queue", () => {
+  const received = [];
+  const { input, button } = createFilePicker((files) => received.push(...files));
+  let opened = false;
+  input.click = () => { opened = true; };
+  button.click();
+  assert.equal(opened, true);
+  const files = [new browser.File(["a"], "a.txt"), new browser.File(["b"], "b.txt")];
+  Object.defineProperty(input, "files", { value: files });
+  input.dispatchEvent(new browser.Event("change"));
+  assert.deepEqual(received, files);
+});
+
+test("owner composer renders kbd send hint cleanly and includes an attach button", async () => {
+  globalThis.requestAnimationFrame ??= () => 0;
+  const { ownerView } = await import("../public/owner.js");
+  const main = document.createElement("main");
+  const view = ownerView(main);
+  const hint = main.querySelector(".composer-hint");
+  assert.ok(hint);
+  assert.doesNotMatch(hint.textContent, /\[object /);
+  assert.match(hint.textContent, /Attach or drop files/);
+  assert.ok(hint.querySelector("kbd"));
+  assert.ok(main.querySelector("button.attach"));
+  assert.ok(main.querySelector("input[type=file]"));
+  view.destroy();
 });

@@ -7,6 +7,7 @@ import { viewHeader, composer, SEND_HINT, stage, skeleton, trace, mark, activity
 import { markdown } from "./md.js";
 import { scrollKeeper } from "./scroll.js";
 import { requestCard } from "./requests.js";
+import { createFilePicker } from "./draft-dom.js";
 import { hasDraftFile, uploadDraftBatch } from "./draft-batch.js";
 
 const MAX_DRAFT_FILES = 10;
@@ -260,8 +261,9 @@ export function ownerView(main) {
     await send(pending.text, ownerDraftState.messageText);
   }
 
+  const { input: fileInput, button: fileBtn } = createFilePicker((files) => addFiles(files));
   comp = composer({
-    placeholder: "Message Spencer…", label: "Message Spencer", hint: SEND_HINT(), drafts: draftArea,
+    placeholder: "Message Spencer…", label: "Message Spencer", hint: [...SEND_HINT(), ". Attach or drop files."], drafts: draftArea, left: fileBtn,
     canSend: () => drafts.length > 0, isBusy: () => ownerDraftState.sending,
     initialText: ownerDraftState.messageText,
     onTextChange: (text) => { ownerDraftState.messageText = text; },
@@ -283,6 +285,9 @@ export function ownerView(main) {
       }
     } else files.push(...Array.from(event.dataTransfer.files ?? []));
     if (folderDropped) toast("Folders can’t be attached; drop regular files instead");
+    addFiles(files);
+  };
+  const addFiles = (files) => {
     let total = drafts.reduce((sum, draft) => sum + draft.file.size, 0);
     for (const file of files) {
       if (!file.name || file.size > MAX_FILE_BYTES) { toast(`${file.name || "File"} exceeds the 25 MiB limit`); continue; }
@@ -294,6 +299,7 @@ export function ownerView(main) {
     }
     renderDrafts();
   };
+  comp.form.append(fileInput);
   comp.form.addEventListener("dragover", (event) => {
     if (Array.from(event.dataTransfer?.types ?? []).includes("Files")) { event.preventDefault(); comp.form.classList.add("file-drop-target"); }
   });
