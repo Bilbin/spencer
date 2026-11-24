@@ -5,6 +5,16 @@ export const MAX_LINK_SEALED = 16 * 1024;
 export const MAX_CHAT_TEXT = 16_000;
 export const AGENT_VERSION = "spencer/0.1";
 
+export const MAX_ABOUT = 2000;
+
+/** Truncate by UTF-16 code units without cutting a surrogate pair. */
+export function truncateUtf16(s: string, max: number): string {
+  const end = Math.max(0, Math.floor(max));
+  if (s.length <= end) return s;
+  const code = s.charCodeAt(end - 1);
+  return s.slice(0, code >= 0xd800 && code <= 0xdbff && s.charCodeAt(end) >= 0xdc00 && s.charCodeAt(end) <= 0xdfff ? end - 1 : end);
+}
+
 export type HelloBody = { type: "hello"; name: string; about?: string; agent: string; features?: string[] };
 export type ChatBody = {
   type: "chat";
@@ -112,7 +122,7 @@ export function parseBody(raw: unknown): Body | null {
   switch (b.type) {
     case "hello":
       if (!isStr(b.name, 200) || !isStr(b.agent, 100)) return null;
-      if (b.about !== undefined && !isStr(b.about, 2000)) return null;
+      if (b.about !== undefined && !isStr(b.about, MAX_ABOUT)) return null;
       if (b.features !== undefined && (!Array.isArray(b.features) || b.features.length > 8 || !b.features.every((f: unknown) => isStr(f, 32) && f.length > 0))) return null;
       return { type: "hello", name: b.name, agent: b.agent, ...(b.features !== undefined ? { features: b.features as string[] } : {}), ...(b.about !== undefined ? { about: b.about as string } : {}) };
     case "chat": {

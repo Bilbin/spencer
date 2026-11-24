@@ -458,6 +458,11 @@ export class ApiServer {
       return await agent.decideRequest(m[1]!, m[2] === "approve");
     }
 
+    if (p === "/api/bio") {
+      if (method === "GET") return b.core.bio();
+      if (method === "PUT") return b.core.setBio((await readJson(req)).text);
+    }
+    if (p === "/api/peers" && method === "GET") return { peers: b.core.listPeerDirectory() };
     if (p === "/api/channels" && method === "GET") return { items: b.core.listChannels() };
 
     if ((m = /^\/api\/channels\/([A-Za-z0-9_-]{1,64})\/messages$/.exec(p))) {

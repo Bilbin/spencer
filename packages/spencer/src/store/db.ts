@@ -78,6 +78,10 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE channels ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat'`,
   // 5: Conversations channels: heated mode (spicy debates with a moderator)
   `ALTER TABLE channels ADD COLUMN heated INTEGER NOT NULL DEFAULT 0`,
+  // 6: Public BIO sharing and peer bio timestamps
+  `ALTER TABLE channels ADD COLUMN share_bio INTEGER NOT NULL DEFAULT 1;
+   ALTER TABLE channels ADD COLUMN last_hello_about TEXT;
+   ALTER TABLE members ADD COLUMN about_at INTEGER;`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

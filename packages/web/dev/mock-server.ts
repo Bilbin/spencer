@@ -172,6 +172,8 @@ const working = new Map<string, Extract<DaemonEvent, { type: "status" }>>();
 let ownerBusy = false;
 const people = new Map<string, Person>([me, bob, carol, dave].map((p) => [p.id, p]));
 
+let bio = "# Who I am\nA helpful Spencer.";
+const mockPeerAboutAt = Date.now() - 60_000;
 let soul = "# Soul\n\n## Vibe\n- Warm, direct and concise. A little dry humor is welcome.";
 const mcp: McpServerStatus[] = [
   {
@@ -239,6 +241,7 @@ function addChannel(kind: "direct" | "group", name: string, ps: Person[], extra:
     relayUrl: relay.url,
     members: [me, ...ps].map(member),
     mode: "chat",
+    shareBio: true,
     autoReply: true,
     directLink: "auto",
     allowLocalAddresses: false,
@@ -801,6 +804,11 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       if (typeof body.name === "string" && body.name.trim()) ch.name = body.name.trim();
       if (body.directLink === "auto" || body.directLink === "off") ch.directLink = body.directLink;
       if (typeof body.allowLocalAddresses === "boolean") ch.allowLocalAddresses = body.allowLocalAddresses;
+      if (body.shareBio !== undefined) {
+        if (typeof body.shareBio !== "boolean") throw new HttpError(400, "shareBio must be a boolean");
+        ch.shareBio = body.shareBio;
+        emit({ type: "bio", bio: bioStatus() });
+      }
       if (typeof body.autoReply === "boolean") ch.autoReply = body.autoReply;
       if (body.trust === "standard" || body.trust === "full") ch.trust = body.trust;
       if (Array.isArray(body.allowedMcpTools)) ch.allowedMcpTools = body.allowedMcpTools.filter((x): x is string => typeof x === "string");
@@ -919,6 +927,24 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     experimental = body.enabled;
     emit({ type: "experimental", enabled: experimental });
     return { enabled: experimental };
+  }
+  if (a === "peers" && !b && method === "GET") {
+    const directory = new Map<string, { id: string; fingerprint: string; name: string | null; about: string | null; aboutAt: number | null; channels: { id: string; name: string; kind: string; about: string | null; aboutAt: number | null }[] }>();
+    for (const ch of channels.values()) for (const m of ch.members.filter(m => !m.me)) {
+      const peer = directory.get(m.id) ?? { id: m.id, fingerprint: m.fingerprint, name: m.name ?? null, about: "I help with planning and research.", aboutAt: mockPeerAboutAt, channels: [] };
+      peer.channels.push({ id: ch.id, name: ch.name, kind: ch.kind, about: peer.about, aboutAt: peer.aboutAt });
+      directory.set(m.id, peer);
+    }
+    return { peers: [...directory.values()] };
+  }
+  if (a === "bio" && !b) {
+    if (method === "PUT") {
+      const body = await readJson(req);
+      if (typeof body.text !== "string" || body.text.trim().length > 2000) throw new HttpError(400, "text must be at most 2000 chars");
+      bio = body.text.trim();
+      emit({ type: "bio", bio: bioStatus() });
+    }
+    return bioStatus();
   }
   if (a === "soul" && !b) {
     needExperimental();
@@ -1136,3 +1162,7 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`Spencer mock UI: http://127.0.0.1:${PORT}/`);
   console.log(`token: ${TOKEN}`);
 });
+
+function bioStatus() {
+  return { text: bio, maxChars: 2000, sharedChannels: [...channels.values()].filter(c => c.shareBio).map(({ id, name, kind, trust }) => ({ id, name, kind, trust })) };
+}

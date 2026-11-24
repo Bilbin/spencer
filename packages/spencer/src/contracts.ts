@@ -36,7 +36,19 @@ export type ChannelTrust = "standard" | "full";
 
 export type ChannelDirectLink = "auto" | "off";
 export type P2pStatus = { mode: "files" | "off"; available: boolean; error?: string };
+export interface BioStatus {
+  text: string;
+  maxChars: number;
+  sharedChannels: Pick<Channel, "id" | "name" | "kind" | "trust">[];
+}
+export interface PeerBio { id: string; name: string | null; about: string | null; aboutAt: number | null }
+export interface PeerSummary extends PeerBio {
+  fingerprint: string;
+  channels: { id: string; name: string; kind: Channel["kind"]; about: string | null; aboutAt: number | null }[];
+}
+
 export interface Channel {
+  shareBio: boolean;
   directLink: ChannelDirectLink;
   allowLocalAddresses: boolean;
   /** Conversations channels only: heated mode (spicy debates with a moderator) for the conversations I open. */
@@ -224,6 +236,8 @@ export interface McpServerStatus {
 // ---------------------------------------------------------------- events
 
 export type DaemonEvent =
+  | { type: "bio"; bio: BioStatus }
+  | { type: "peer_bio"; ch: string; id: string; about: string | null; aboutAt: number | null }
   | { type: "experimental"; enabled: boolean }
   | { type: "channel"; channel: Channel }
   | { type: "channel_removed"; ch: string }
@@ -375,6 +389,11 @@ export interface OutgoingChat {
 
 /** What the agent layer needs from the core. */
 export interface CoreServices {
+  bio(): BioStatus;
+  bioText(): string;
+  setBio(text: unknown): Promise<BioStatus>;
+  peerBios(ch: string): PeerBio[];
+  listPeerDirectory(): PeerSummary[];
   db: DatabaseSync;
   dataDir: string;
   config: () => SpencerConfig;
@@ -435,6 +454,7 @@ export interface AgentService {
   ownerNote(text: string, opts?: { untrusted?: boolean }): Promise<void>;
   /** A channel was created/joined/updated (settings, members): reconfigure its conversation. */
   channelChanged(ch: string): Promise<void>;
+  bioChanged?(): Promise<void>;
   mcpStatus(): McpServerStatus[];
   /** Add, replace or (`undefined`) remove an MCP server while running. */
   setMcpServer?(name: string, config: McpServerConfig | undefined): Promise<void>;

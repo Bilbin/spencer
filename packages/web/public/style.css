@@ -3445,3 +3445,9 @@ details[open] > summary > .icon:last-child,
   margin: 8px 0 14px;
   font-size: 13.5px;
 }
+
+.peer-directory { display: grid; gap: 24px; padding: 24px; max-width: 980px; }
+.peer-card { padding: 24px; border: 1px solid var(--border); border-radius: 12px; overflow-wrap: anywhere; }
+.peer-heading { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.peer-bio { padding: 12px; overflow-wrap: anywhere; }
+.member[role="button"] { cursor: pointer; }

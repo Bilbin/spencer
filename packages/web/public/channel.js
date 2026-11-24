@@ -1,4 +1,5 @@
 // A channel (direct or group): the transcript between people and their Spencers, composer, members, files and settings.
+import { peerCard, peerBioSnippet } from "./peers.js";
 import { h, icon, iconButton, richText, shortFp, timeShort, timeFull, autoGrow, hue, avatar, selfAvatar, youAvatar, personOf, clear, append, relTime } from "./dom.js";
 import { api, attempt, toast } from "./api.js";
 import { S, on, isConversation, setConversation, setMessages, upsertTransfer, upsertChannel, removeChannel, markRead, peers, channelTitle, allMcpTools, workingIn, workingOf, presenceOf } from "./state.js";
@@ -314,6 +315,7 @@ function sendFileModal(c) {
 
 function settingsModal(c) {
   const name = h("input.input", { type: "text", value: c.name, maxlength: "100" });
+  const shareBio = h("input", { type: "checkbox", checked: c.shareBio !== false, role: "switch" });
   const autoReply = h("input", { type: "checkbox", checked: c.autoReply, role: "switch" });
   const heated = h("input", { type: "checkbox", checked: !!c.heated, role: "switch" });
   const directLink = h("input", { type: "checkbox", checked: c.directLink !== "off", role: "switch" });
@@ -419,6 +421,7 @@ function settingsModal(c) {
     S.p2p?.available === false ? h("div.callout.warn", null, icon("warn", 16), h("span", null, `Direct file transfers aren't available on this machine${S.p2p.error ? ": " + S.p2p.error : "."}`)) : null,
     S.p2p?.mode === "off" ? h("span.hint.block", null, `Direct file transfers are currently disabled in Spencer's config (p2p.mode = "off").`) : null,
     h("label.switch-row", null, allowLocal, h("span", null, h("strong", null, "Allow local network addresses"), h("span.hint.block", null, "Share local LAN addresses in this channel for faster transfers between machines on the same Wi-Fi or network."))),
+    h("label.switch-row", null, shareBio, h("span", null, "Share my BIO in this channel", h("span.hint.block", null, "Turning this off clears it for peers going forward. Peers may already have an older copy."))),
     field("Name", name, c.kind === "direct" ? "Your private label for this channel. Peers don't see it." : "Your label for this group."),
     h(
       "label.switch-row",
@@ -495,6 +498,7 @@ function settingsModal(c) {
     if (n && n !== c.name) patch.name = n;
     if ((directLink.checked ? "auto" : "off") !== (c.directLink ?? "auto")) patch.directLink = directLink.checked ? "auto" : "off";
     if (allowLocal.checked !== !!c.allowLocalAddresses) patch.allowLocalAddresses = allowLocal.checked;
+    if (shareBio.checked !== (c.shareBio !== false)) patch.shareBio = shareBio.checked;
     if (autoReply.checked !== c.autoReply) patch.autoReply = autoReply.checked;
     if (isConversation(c) && heated.checked !== !!c.heated) patch.heated = heated.checked;
     if (trust !== (c.trust ?? "standard")) patch.trust = trust;
@@ -605,7 +609,7 @@ function memberRow(c, m) {
   else status = h("span.member-status", null, m.name ? "presence unknown" : "has not said hello yet");
   return h(
     "li.member",
-    null,
+    m.me ? null : { tabindex: "0", role: "button", on: { click: () => peerCard(m.id, c.id), keydown: e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); peerCard(m.id, c.id); } } } },
     mark(av, w ? { state: /^thinking/i.test(w.activity) ? "thinking" : "working", text: w.activity.replace(/…$/, "") } : info),
     h("div.member-text", null, h("div.member-name", null, name), status),
     h("code.fp", { title: `Fingerprint ${m.fingerprint}\nid ${m.id}` }, shortFp(m.fingerprint)),
@@ -849,6 +853,7 @@ export function channelView(main, chId) {
     members.replaceChildren(...[
       h("div.members-head", null, h("h2", null, c.kind === "group" ? "In this group" : "In this channel"), iconButton("close", "Close members", () => setMembersOpen(false), "members-close")),
       h("ul.member-list", null, c.members.map((m) => memberRow(c, m))),
+      c.kind === "direct" ? peerBioSnippet(c) : null,
       isConversation(c) ? conversationSection(c) : null,
       followupList(c.id, { title: "Your Spencer will follow up" }),
       h(
@@ -1083,7 +1088,16 @@ export function channelView(main, chId) {
     renderMembers(); // "seen 5m ago" ages
     if (workingIn(chId).length) renderWorking();
   }, 15_000);
+  attempt(() => api.peers()).then(result => {
+    if (!result || !main.isConnected) return;
+    for (const p of result.peers) for (const ch of p.channels) {
+      if (!S.peerBios.has(ch.id)) S.peerBios.set(ch.id, new Map());
+      if (!S.peerBios.get(ch.id).has(p.id) || (ch.aboutAt ?? 0) > (S.peerBios.get(ch.id).get(p.id).aboutAt ?? 0)) S.peerBios.get(ch.id).set(p.id, ch);
+    }
+    renderMembers();
+  });
   const offs = [
+    on("peer_bio", ev => { if (ev.ch === chId) renderMembers(); }),
     on(`channel:${chId}`, onChannel),
     on(`messages:${chId}`, onMessages),
     on("transfers", onTransfer),
