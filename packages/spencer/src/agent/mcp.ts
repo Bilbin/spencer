@@ -8,6 +8,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServerConfig } from "../config.ts";
 import type { EventSink, McpServerStatus } from "../contracts.ts";
+import { spencerVersion } from "../version.ts";
 import type { ToolSpec } from "./runtime.ts";
 
 export const MCP_RESULT_CAP = 32 * 1024;
@@ -164,7 +165,7 @@ export class McpManager {
     s.status = "connecting";
     s.error = undefined;
     this.changed();
-    const client = new Client({ name: "spencer", version: "0.1.0" });
+    const client = new Client({ name: "spencer", version: spencerVersion() });
     let stderrTail = "";
     try {
       let transport: StdioClientTransport | StreamableHTTPClientTransport;

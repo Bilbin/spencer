@@ -44,6 +44,7 @@ export function modelView(main) {
   const now = h("section.model-now", { "aria-live": "polite" });
   const picker = h("section.model-card", { "aria-labelledby": "picker-title" });
   const copilot = h("section.model-card", { "aria-labelledby": "copilot-title" });
+  const about = h("section.model-card", { "aria-labelledby": "about-title" });
   main.append(
     viewHeader([
       h("span.title-icon", { "aria-hidden": "true" }, icon("spark", 18)),
@@ -60,6 +61,8 @@ export function modelView(main) {
         picker,
         h("h2.section-title", { id: "copilot-title" }, "GitHub Copilot"),
         copilot,
+        h("h2.section-title", { id: "about-title" }, "About Spencer"),
+        about,
         h("p.model-foot", null, "Changes take effect immediately without restarting Spencer. Saved API keys live in ", h("code", null, "secrets/credentials.json"), " (mode 0600), never in config.json."),
       ),
     ),
@@ -482,9 +485,45 @@ export function modelView(main) {
     );
   };
 
+  const renderAbout = () => {
+    const raw = S.version?.trim() || "";
+    const verLabel = raw ? (/^\d/.test(raw) ? `v${raw}` : raw) : "Unknown";
+    const rows = [
+      h(
+        "div.about-row",
+        null,
+        h("span.about-label", null, "Version"),
+        h(
+          "div.about-val",
+          null,
+          h("code.mono", null, verLabel),
+          raw
+            ? h(
+                "button.btn.sm.ghost",
+                {
+                  type: "button",
+                  on: { click: async () => toast((await copyText(verLabel)) ? "Version copied" : "Couldn't copy version", "info") },
+                },
+                icon("copy", 13),
+                "Copy",
+              )
+            : null,
+        ),
+      ),
+    ];
+    if (S.relay?.url) {
+      rows.push(h("div.about-row", null, h("span.about-label", null, "Default hub"), h("div.about-val", null, h("code.mono", null, S.relay.url))));
+    }
+    if (S.me?.fingerprint) {
+      rows.push(h("div.about-row", null, h("span.about-label", null, "Fingerprint"), h("div.about-val", null, h("code.mono", null, S.me.fingerprint))));
+    }
+    about.replaceChildren(h("div.about-list", null, ...rows));
+  };
+
   const render = () => {
     const m = S.model;
     renderNow(m);
+    renderAbout();
     if (!m) {
       picker.replaceChildren();
       copilot.replaceChildren();

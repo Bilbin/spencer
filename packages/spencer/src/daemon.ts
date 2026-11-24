@@ -21,6 +21,7 @@ import {
   type ServerFrame,
 } from "@spencer/protocol";
 import { loadConfig, resolveConfig, type ModelConfig, type SpencerConfig } from "./config.ts";
+import { spencerVersion } from "./version.ts";
 import type {
   AgentService,
   Channel,
@@ -664,6 +665,7 @@ export class Daemon {
     );
     const agent = this.s.agent;
     return {
+      version: spencerVersion(),
       me: this.identity,
       p2p: { mode: cfg.p2p.mode, ...(this.s.links?.status() ?? getP2pAddonStatus()) },
       relay: { url: cfg.relay, connected: relays.length > 0 && relays.every((r) => r.connected) },

@@ -672,6 +672,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       followups: [...followups.values()],
       model,
       p2p: { mode: "files", available: true },
+      version: "0.1.5-dev",
     };
   }
   if (a === "owner" && b === "messages" && !c) {

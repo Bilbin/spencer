@@ -23,6 +23,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createProvider, type Api, type Model, type OAuthAuth, type OAuthCredential, type Provider } from "@earendil-works/pi-ai";
+import { spencerVersion } from "../version.ts";
 import { osCopilotKeyring, type CopilotKeyring } from "./copilot-keyring.ts";
 
 export { osCopilotKeyring, parseDbusUnixAddress, type CopilotKeyring, type KeyringLookupResult } from "./copilot-keyring.ts";
@@ -64,7 +65,7 @@ export const PREFERRED_COPILOT_MODELS = [
 ];
 
 export function userAgent(): string {
-  return `spencer/${process.env.SPENCER_BUILD ?? "dev"}`;
+  return `spencer/${spencerVersion()}`;
 }
 
 export function githubClientId(configured?: string): string | undefined {

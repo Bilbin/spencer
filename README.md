@@ -40,6 +40,7 @@ Then run it:
 
 ```sh
 spencer                                                               # opens the web UI in your browser
+spencer --version                                                     # print installed version
 spencer --no-open --port 7420 --name "Alice's Spencer" --relay wss://hub.example.com/ws
 spencer service install                                               # optional: start at login (systemd user unit)
 spencer service uninstall
@@ -47,7 +48,7 @@ spencer service uninstall
 
 ### Single binary (manual download or build)
 
-You can also download `spencer-linux-x64` or `spencer-linux-arm64` directly from [Releases](https://github.com/PJalv/spencer/releases), `chmod +x` it, and run it.
+You can also download `spencer-linux-x64.tar.gz` or `spencer-linux-arm64.tar.gz` directly from [Releases](https://github.com/PJalv/spencer/releases), extract (`tar -xzf spencer-linux-x64.tar.gz`), and run `./spencer-linux-x64`.
 
 The binary bundles Node 24, Spencer, its web UI, the pinned `node-datachannel` native addon (for direct P2P file transfers), and pinned `croc` v10.3.1. On first start it unpacks them into `~/.cache/spencer/<build>/` (macOS: `~/Library/Caches/spencer/`); data lives in `~/.local/share/spencer` as usual. On macOS, use Nix, npm, or build the single binary locally:
 

@@ -9,6 +9,7 @@ import { writeSecretFile } from "./store/files.ts";
 import { spawn } from "node:child_process";
 import { isBinary } from "./sea.ts";
 import { serviceCommand } from "./service.ts";
+import { spencerVersion } from "./version.ts";
 
 const SELF = isBinary() ? "spencer" : "node packages/spencer/src/main.ts";
 const USAGE = `usage: ${SELF} [--data-dir DIR] [--port N] [--name NAME] [--relay URL] [--no-open]
@@ -20,7 +21,7 @@ const USAGE = `usage: ${SELF} [--data-dir DIR] [--port N] [--name NAME] [--relay
   --relay URL     relay URL (env SPENCER_RELAY; saved on first run)
   --open          open the web UI in a browser once started (default when run from a terminal)
   --no-open       don't
-  --version       print the version
+  -v, --version   print the version
 `;
 
 /** Best-effort: open the UI in the default browser. */
@@ -48,6 +49,7 @@ async function main(): Promise<void> {
         open: { type: "boolean" },
         "no-open": { type: "boolean" },
         version: { type: "boolean", short: "v" },
+        V: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
       strict: true,
@@ -62,8 +64,8 @@ async function main(): Promise<void> {
     process.stdout.write(USAGE);
     return;
   }
-  if (opts.version) {
-    process.stdout.write(`spencer ${process.env.SPENCER_BUILD ?? "dev"} (node ${process.versions.node})\n`);
+  if (opts.version || opts.V) {
+    process.stdout.write(`spencer ${spencerVersion()} (node ${process.versions.node})\n`);
     return;
   }
   const dataDir = resolve(opts["data-dir"] ?? defaultDataDir());

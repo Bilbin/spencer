@@ -14,7 +14,7 @@ let
   workspace = pkgs.buildNpmPackage {
     pname = "spencer-workspace";
     inherit version src nodejs;
-    npmDepsHash = "sha256-QJV8LR8+CERf+I4eRcJAXKS5tOdPSBWB5CNGSij+BmM=";
+    npmDepsHash = "sha256-wZQ5uCxVv1u/J4vsKkeruIwIWAnkuBy1pLRyPpqtrTk=";
     # Install scripts are not needed (esbuild finds its platform binary package directly).
     npmFlags = [ "--ignore-scripts" ];
     npmBuildScript = "build:relay";
@@ -46,6 +46,7 @@ let
       }
       ''
         makeWrapper ${lib.getExe nodejs} $out/bin/spencer \
+          --set-default SPENCER_BUILD "${version}" \
           --add-flags "--disable-warning=ExperimentalWarning" \
           --add-flags "${workspace}/lib/spencer/packages/spencer/src/main.ts" \
           --prefix PATH : ${lib.makeBinPath [ croc ]}

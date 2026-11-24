@@ -3,6 +3,7 @@
 export const TERMINAL = new Set(["completed", "denied", "declined", "failed", "expired", "cancelled"]);
 
 export const S = {
+  version: "",
   me: null, // {id, name, fingerprint}
   relay: { url: "", connected: false },
   relays: [], // {url, connected}[] when the daemon reports each relay in use
@@ -92,6 +93,7 @@ export function isViewing(ch) {
 // ---------------------------------------------------------------- mutations
 
 export function setState(st) {
+  if (typeof st.version === "string") S.version = st.version;
   S.me = st.me ?? S.me;
   S.relay = st.relay ?? S.relay;
   S.relays = Array.isArray(st.relays) ? st.relays : [];
