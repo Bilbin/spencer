@@ -1018,7 +1018,7 @@ test("conversations: the timer opens a chill one on the news, alone, with the se
       clock += 20 * 60_000;
       await agent.onPeerChat(peerChat(core.getChannel("chConvo")!, "Wrong!", { by: "agent", convo: { id: open.convo!.id } }));
       await agent.idle();
-      clock += 10 * 60_000;
+      clock += 30_000;
       await agent.conversationTick();
       await agent.idle();
       assert.equal(core.sent.length, 2);
@@ -1315,7 +1315,7 @@ test("conversations store: start races settle on the smaller id, and a late open
   store.begin("c", "m");
   assert.equal(store.accepts("c", "z"), false, "a larger id loses the race");
   assert.equal(store.accepts("c", "a"), true, "a smaller id within the race window wins");
-  clock += 3 * 60_000;
+  clock += 45_000;
   assert.equal(store.accepts("c", "a"), false, "after the race window nobody takes over");
   assert.equal(store.spend("c", "m"), true);
   assert.equal(store.spend("c", "m"), true);

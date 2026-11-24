@@ -19,9 +19,9 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /** A conversation with no message for this long is over. */
-export const IDLE_MS = 15 * 60_000;
+export const IDLE_MS = 60_000;
 /** Two conversations opened this close together (timers that went off at once) settle on the one with the smaller id. */
-export const START_RACE_MS = 2 * 60_000;
+export const START_RACE_MS = 30_000;
 
 export interface ConvoRow {
   ch: string;

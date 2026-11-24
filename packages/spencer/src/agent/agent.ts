@@ -32,7 +32,7 @@ import type {
 } from "../contracts.ts";
 import { END_MARKER, REPEAT_WINDOW, decideConversationReply, decideReply, isRepeat, loopLimits, parseAgentAnswer } from "../policy.ts";
 import { TurnBudget } from "./budget.ts";
-import { ConversationStore, type ConvoRow } from "./conversations.ts";
+import { ConversationStore, IDLE_MS, type ConvoRow } from "./conversations.ts";
 import type { FakeBrainHooks } from "./fake-brain.ts";
 import { McpManager } from "./mcp.ts";
 import { ModelManager } from "./model-manager.ts";
@@ -128,6 +128,7 @@ export class SpencerAgent implements AgentService {
   private configChain: Promise<void> = Promise.resolve();
   private started = false;
   private stopping = false;
+  private readonly idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(core: CoreServices, opts: AgentOptions = {}) {
     this.core = core;
@@ -266,6 +267,8 @@ export class SpencerAgent implements AgentService {
     this.models?.stop();
     await this.followups.stop();
     await this.convos.stop();
+    for (const t of this.idleTimers.values()) clearTimeout(t);
+    this.idleTimers.clear();
     await this.stopWatch?.().catch(() => {});
     for (const w of this.chWatches.values()) await w.then((stop) => stop()).catch(() => {});
     // Closing the runtime cancels every pending wait, so the background tasks below settle.
@@ -719,7 +722,8 @@ export class SpencerAgent implements AgentService {
     else if (msg.body.by === "agent" && isRepeat(msg.body.text, this.recentAgentTexts(msg.ch, msg.from, msg.id))) note = "repeated";
     else {
       // Conversations have their own cap (messages per agent): only the rate windows apply, not the streak.
-      const verdict = this.budget.check(msg.ch, convo ? { ...limits, maxTurns: 0 } : limits);
+      // Nor the per-minute rate: a quick back-and-forth would cut the chat short, and the cap already bounds it.
+      const verdict = this.budget.check(msg.ch, convo ? { ...limits, maxTurns: 0, perMinute: Infinity } : limits);
       if (verdict.ok) this.budget.record(msg.ch, { streak: !convo });
       else {
         note = verdict.why;
@@ -1113,6 +1117,7 @@ export class SpencerAgent implements AgentService {
     const active = this.convos.active(ch);
     if (active?.convo_id === ref.id) {
       this.convos.touch(ch, ref.id);
+      this.watchIdle(ch);
       if (final) {
         this.convos.end(ch, ref.id);
         this.emitConversation(ch);
@@ -1137,7 +1142,7 @@ export class SpencerAgent implements AgentService {
         continue;
       }
       const others = ch.members.some((m) => m.id !== this.core.me().id);
-      const rate = this.budget.check(ch.id, { ...loopLimits(this.core.config().policy, ch.trust), maxTurns: 0 });
+      const rate = this.budget.check(ch.id, { ...loopLimits(this.core.config().policy, ch.trust), maxTurns: 0, perMinute: Infinity });
       if (ch.autoReply && others && rate.ok && !row.opener && !this.convos.active(ch.id) && (row.ch === this.startNow || this.convos.inHours())) {
         const id = randomBytes(16).toString("base64url");
         if (this.convos.startOpener(ch.id, id, ch.heated === true)) {
@@ -1354,6 +1359,21 @@ export class SpencerAgent implements AgentService {
   private emitConversation(ch: string): void {
     const status = this.conversationStatusOf(ch);
     if (status) this.core.events.emit({ type: "conversation", conversation: status });
+    this.watchIdle(ch);
+  }
+
+  /** Re-send the status when the conversation going on in `ch` goes quiet for `IDLE_MS`, so the UI shows it is over. */
+  private watchIdle(ch: string): void {
+    clearTimeout(this.idleTimers.get(ch));
+    this.idleTimers.delete(ch);
+    const a = this.convos.active(ch);
+    if (!a || this.stopping) return;
+    const t = setTimeout(() => {
+      this.idleTimers.delete(ch);
+      if (!this.stopping) this.emitConversation(ch);
+    }, Math.max(0, a.last_at + IDLE_MS - this.now()) + 1_000);
+    t.unref?.();
+    this.idleTimers.set(ch, t);
   }
 
   private conversationStatusOf(ch: string): ConversationStatus | undefined {
