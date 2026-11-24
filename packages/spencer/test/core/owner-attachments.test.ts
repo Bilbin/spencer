@@ -145,3 +145,31 @@ test("owner attachment storage is private, safe from filename paths, and retries
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("owner uploads stream to disk and remove partial files on failure", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spencer-owner-stream-"));
+  const db = new DatabaseSync(join(dir, "core.sqlite"));
+  try {
+    const store = new OwnerAttachmentStore(db, dir);
+    async function* chunks() {
+      yield Buffer.from("first");
+      const { readdirSync } = await import("node:fs");
+      const entries = readdirSync(join(dir, "owner-attachments"));
+      assert.equal(entries.length, 1);
+      assert.equal(readFileSync(join(dir, "owner-attachments", entries[0]!), "utf8"), "first");
+      yield Buffer.from(" second");
+    }
+    const attachment = await store.upload("stream.txt", "stream-upload-0001", chunks());
+    assert.equal(readFileSync(attachment.path, "utf8"), "first second");
+    async function* broken() {
+      yield Buffer.from("partial");
+      throw new Error("interrupted");
+    }
+    await assert.rejects(store.upload("broken.txt", "stream-upload-0002", broken()), /interrupted/);
+    const { readdirSync } = await import("node:fs");
+    assert.deepEqual(readdirSync(join(dir, "owner-attachments")), [attachment.id]);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
