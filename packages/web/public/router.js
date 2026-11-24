@@ -6,6 +6,7 @@ export function parseHash(hash = location.hash) {
   if (parts[0] === "inbox") return { name: "inbox" };
   if (parts[0] === "transfers") return { name: "transfers" };
   if (parts[0] === "mcp") return { name: "mcp" };
+  if (["bio", "peers"].includes(parts[0])) return { name: parts[0] };
   if (parts[0] === "soul") return { name: "soul" };
   if (parts[0] === "model") return { name: "model" };
   return { name: "owner" };
@@ -21,6 +22,8 @@ export function hashFor(view) {
       return "#/transfers";
     case "mcp":
       return "#/mcp";
+    case "bio": return "#/bio";
+    case "peers": return "#/peers";
     case "soul":
       return "#/soul";
     case "model":

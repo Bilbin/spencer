@@ -96,6 +96,15 @@ export function openDb(dataDir: string): DatabaseSync {
     db.exec("PRAGMA synchronous = NORMAL");
     db.exec("PRAGMA foreign_keys = ON");
     migrate(db);
+    for (const [table, column, declaration] of [
+      ["channels", "share_bio", "INTEGER NOT NULL DEFAULT 1"],
+      ["channels", "last_hello_about", "TEXT"],
+      ["members", "about_at", "INTEGER"],
+    ]) {
+      if (!db.prepare(`PRAGMA table_info(${table})`).all().some(row => row.name === column)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${declaration}`);
+      }
+    }
   } catch (e) {
     db.close();
     throw e;

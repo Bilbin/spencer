@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   AGENT_VERSION,
   DIRECT_MAX_MEMBERS,
@@ -20,7 +21,7 @@ import {
 } from "@spencer/protocol";
 import type { Sql } from "./store/db.ts";
 import type { SpencerConfig } from "./config.ts";
-import type { Channel, ChannelMember, ChannelMessage, EventSink, Presence } from "./contracts.ts";
+import type { Channel, ChannelMember, ChannelMessage, EventSink, Presence, PeerBio, PeerSummary } from "./contracts.ts";
 import type { Outbox, ChannelKeyInfo } from "./net/outbox.ts";
 import { RelayError, type RelayConnection, type RelayPool } from "./net/relay-client.ts";
 
@@ -40,6 +41,8 @@ export interface ChannelRow {
   trust: string;
   last_hello_members: string;
   last_hello_features: string;
+  share_bio: number;
+  last_hello_about: string | null;
   direct_link: string;
   allow_local_addresses: number;
   heated: number;
@@ -73,6 +76,8 @@ export class UserError extends Error {
 }
 
 export interface ChannelManagerDeps {
+  bioText?: () => string;
+  bioChanged?: () => void;
   localFeatures?: () => string[];
   sql: Sql;
   me: Identity;
@@ -155,8 +160,8 @@ export class ChannelManager {
 
   // ------------------------------------------------------------- views
 
-  memberRows(ch: string): { id: string; name: string | null; about: string | null; agent: string | null; present: number; features: string }[] {
-    return this.d.sql.all("SELECT id, name, about, agent, present, features FROM members WHERE ch = ? ORDER BY joined_at, rowid", ch);
+  memberRows(ch: string): { id: string; name: string | null; about: string | null; about_at: number | null; agent: string | null; present: number; features: string }[] {
+    return this.d.sql.all("SELECT id, name, about, about_at, agent, present, features FROM members WHERE ch = ? ORDER BY joined_at, rowid", ch);
   }
 
   peers(ch: string): string[] {
@@ -245,6 +250,7 @@ export class ChannelManager {
       }));
     return {
       id: r.id,
+      shareBio: !!r.share_bio,
       kind: r.kind,
       mode: r.kind === "group" && r.mode === "conversation" ? "conversation" : "chat",
       name: this.displayName(r),
@@ -406,29 +412,91 @@ export class ChannelManager {
     const greeted = new Set(safeJsonArray(r.last_hello_members));
     const newcomer = present.some((id) => !greeted.has(id));
     const next = JSON.stringify([...present].sort());
-    const feats = [...new Set(this.d.localFeatures?.() ?? [])].sort();
+    const hello = this.buildHello(ch);
+    const aboutHash = createHash("sha256").update(hello.about ?? "").digest("hex");
+    const feats = hello.features ?? [];
     const featsJson = JSON.stringify(feats);
-    if (!newcomer && !(present.length > 0 && featsJson !== r.last_hello_features)) {
+    if (!newcomer && !(present.length > 0 && (featsJson !== r.last_hello_features || aboutHash !== r.last_hello_about))) {
       if (next !== r.last_hello_members && present.length < greeted.size) {
         // Someone left: shrink the set so a rejoin gets a fresh hello.
         this.d.sql.run("UPDATE channels SET last_hello_members = ? WHERE id = ?", next, ch);
       }
       return;
     }
-    const hello: HelloBody = { type: "hello", name: this.d.config().name, agent: AGENT_VERSION, ...(feats.length ? { features: feats } : {}) };
     this.d.outbox().enqueue(ch, hello, newcomer ? {} : { origin: "feature-hello" });
-    this.d.sql.run("UPDATE channels SET last_hello_members = ?, last_hello_features = ? WHERE id = ?", next, featsJson, ch);
+    this.d.sql.run("UPDATE channels SET last_hello_members = ?, last_hello_features = ?, last_hello_about = ? WHERE id = ?", next, featsJson, aboutHash, ch);
   }
 
-  recheckHellos(): void { for (const r of this.rows()) this.maybeHello(r.id); }
+  buildHello(ch: string): HelloBody {
+    const feats = [...new Set(this.d.localFeatures?.() ?? [])].sort();
+    const about = this.row(ch)?.share_bio ? this.d.bioText?.() : "";
+    return { type: "hello", name: this.d.config().name, agent: AGENT_VERSION,
+      ...(feats.length ? { features: feats } : {}), ...(about ? { about } : {}) };
+  }
+
+  private helloTimers = new Set<ReturnType<typeof setTimeout>>();
+  stop(): void {
+    for (const timer of this.helloTimers) clearTimeout(timer);
+    this.helloTimers.clear();
+    for (const state of this.bioRefresh.values()) if (state.timer) clearTimeout(state.timer);
+    this.bioRefresh.clear();
+  }
+
+  recheckHellos(): void {
+    const rows = this.rows();
+    rows.forEach((r, i) => {
+      if (rows.length <= 15 || i === 0) this.maybeHello(r.id);
+      else {
+        const timer = setTimeout(() => { this.helloTimers.delete(timer); this.maybeHello(r.id); }, i * 150);
+        timer.unref(); this.helloTimers.add(timer);
+      }
+    });
+  }
+
+  peerBios(ch: string): PeerBio[] {
+    return this.memberRows(ch).filter(m => m.present && m.id !== this.d.me.id)
+      .map(m => ({ id: m.id, name: m.name, about: m.about, aboutAt: m.about_at }));
+  }
+
+  listPeerDirectory(): PeerSummary[] {
+    const peers = new Map<string, PeerSummary>();
+    for (const ch of this.list()) for (const row of this.peerBios(ch.id)) {
+      let peer = peers.get(row.id);
+      if (!peer) { peer = { ...row, fingerprint: fingerprint(row.id), channels: [] }; peers.set(row.id, peer); }
+      else if ((row.aboutAt ?? 0) > (peer.aboutAt ?? 0)) Object.assign(peer, row);
+      peer.channels.push({ id: ch.id, name: ch.name, kind: ch.kind, about: row.about, aboutAt: row.aboutAt });
+    }
+    return [...peers.values()];
+  }
+
+  private bioRefresh = new Map<string, { at: number; timer?: ReturnType<typeof setTimeout> }>();
+  private refreshPeerBio(ch: string, id: string): void {
+    const key = `${ch}:${id}`;
+    const state = this.bioRefresh.get(key);
+    const now = Date.now();
+    if (!state || now - state.at >= 120_000) {
+      if (state?.timer) clearTimeout(state.timer);
+      this.bioRefresh.set(key, { at: now });
+      this.d.channelChanged(ch);
+    } else if (!state.timer) {
+      state.timer = setTimeout(() => {
+        this.bioRefresh.delete(key);
+        if (this.row(ch)) this.refreshPeerBio(ch, id);
+      }, 120_000 - (now - state.at));
+      state.timer.unref();
+    }
+  }
 
   /** A hello from a peer: update its self-asserted name/about. */
   onHello(ch: string, from: string, body: HelloBody): { featureOnly: boolean } {
     const previous = this.memberRows(ch).find(m => m.id === from);
     const name = body.name.trim().slice(0, MAX_NAME) || null;
+    const about = body.about ?? null;
+    const aboutChanged = previous?.about !== about;
+    const aboutAt = aboutChanged ? Date.now() : previous?.about_at ?? (about !== null ? Date.now() : null);
     const r = this.d.sql.run(
-      `INSERT INTO members (ch, id, name, about, agent, present, joined_at, features) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-       ON CONFLICT (ch, id) DO UPDATE SET name = excluded.name, about = excluded.about, agent = excluded.agent, features = excluded.features`,
+      `INSERT INTO members (ch, id, name, about, agent, present, joined_at, features, about_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+       ON CONFLICT (ch, id) DO UPDATE SET name = excluded.name, about = excluded.about, agent = excluded.agent, features = excluded.features, about_at = excluded.about_at`,
       ch,
       from,
       name,
@@ -436,12 +504,16 @@ export class ChannelManager {
       body.agent,
       Date.now(),
       JSON.stringify(body.features ?? []),
+      aboutAt,
     );
     if (r.changes > 0) {
       this.emitChannel(ch);
-      this.d.channelChanged(ch);
+      if (aboutChanged) {
+        this.d.events.emit({ type: "peer_bio", ch, id: from, about, aboutAt });
+        this.refreshPeerBio(ch, from);
+      } else if (!previous || previous.name !== name) this.d.channelChanged(ch);
     }
-    return { featureOnly: !!previous && previous.agent !== null && previous.name === name && previous.about === (body.about ?? null) };
+    return { featureOnly: !!previous && previous.agent !== null && previous.name === name };
   }
 
   // ------------------------------------------------------------- relay sync
@@ -618,7 +690,7 @@ export class ChannelManager {
     void this.pruneRelays();
   }
 
-  update(ch: string, patch: { name?: unknown; autoReply?: unknown; allowedMcpTools?: unknown; trust?: unknown; directLink?: unknown; allowLocalAddresses?: unknown; heated?: unknown }): Channel {
+  update(ch: string, patch: { shareBio?: unknown; name?: unknown; autoReply?: unknown; allowedMcpTools?: unknown; trust?: unknown; directLink?: unknown; allowLocalAddresses?: unknown; heated?: unknown }): Channel {
     const r = this.row(ch);
     if (!r) throw new UserError(404, "unknown channel");
     const sets: string[] = [];
@@ -628,6 +700,10 @@ export class ChannelManager {
       const n = typeof patch.name === "string" ? patch.name.trim().slice(0, MAX_NAME) : "";
       sets.push("custom_name = ?");
       args.push(n || null);
+    }
+    if (patch.shareBio !== undefined) {
+      if (typeof patch.shareBio !== "boolean") throw new UserError(400, "shareBio must be a boolean");
+      sets.push("share_bio = ?"); args.push(patch.shareBio ? 1 : 0);
     }
     if (patch.autoReply !== undefined) {
       if (typeof patch.autoReply !== "boolean") throw new UserError(400, "autoReply must be a boolean");
@@ -659,6 +735,10 @@ export class ChannelManager {
       this.d.sql.run(`UPDATE channels SET ${sets.join(", ")} WHERE id = ?`, ...args, ch);
       this.emitChannel(ch);
       this.d.channelChanged(ch);
+    }
+    if (patch.shareBio !== undefined && Number(patch.shareBio) !== r.share_bio) {
+      this.recheckHellos();
+      this.d.bioChanged?.();
     }
     return this.get(ch)!;
   }

@@ -7,6 +7,11 @@
 
 const TAGS = /<(\/?)\s*(peer_message|channel_transcript|untrusted_note)/gi;
 
+/** Peer biographies can contain arbitrary tag names; neutralize every angle bracket. */
+export function escapeBio(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 export function escapeAttr(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/[\r\n]+/g, " ");
 }

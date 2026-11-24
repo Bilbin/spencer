@@ -3,6 +3,8 @@
 export const TERMINAL = new Set(["completed", "denied", "declined", "failed", "expired", "cancelled"]);
 
 export const S = {
+  bio: null,
+  peerBios: new Map(), // channel id -> Map(peer id -> latest received bio)
   version: "",
   me: null, // {id, name, fingerprint}
   relay: { url: "", connected: false },
@@ -411,4 +413,13 @@ export function channelStatus(c) {
   const p = presenceOf(others[0]);
   if (!p.known) return { state: "unknown", text: "" };
   return p.online ? { state: "idle", text: "Online" } : { state: "offline", text: "" };
+}
+
+export function applyBioEvent(ev) {
+  if (ev.type === "bio") { S.bio = ev.bio; emit("bio", ev.bio); }
+  if (ev.type === "peer_bio") {
+    if (!S.peerBios.has(ev.ch)) S.peerBios.set(ev.ch, new Map());
+    S.peerBios.get(ev.ch).set(ev.id, ev);
+    emit("peer_bio", ev);
+  }
 }

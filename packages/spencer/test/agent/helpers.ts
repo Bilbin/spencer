@@ -57,6 +57,7 @@ export function channel(id: string, kind: "direct" | "group", name: string, extr
   const peers = kind === "direct" ? [BOB] : [BOB, CAROL];
   return {
     id,
+    shareBio: true,
     kind,
     mode: "chat",
     name,
@@ -84,6 +85,10 @@ export function makeCore(opts: { dir?: string; channels?: Channel[]; config?: Pa
   const channels = new Map<string, Channel>((opts.channels ?? [channel("chDirect", "direct", "Bob chat"), channel("chGroup", "group", "Team")]).map((c) => [c.id, c]));
   const byKey = new Map<string, string>();
   const core: StubCore = {
+    bio: () => ({ text: "", maxChars: 2000, sharedChannels: [] }),
+    setBio: async () => ({ text: "", maxChars: 2000, sharedChannels: [] }),
+    peerBios: () => [],
+    listPeerDirectory: () => [],
     dir,
     db,
     dataDir: dir,

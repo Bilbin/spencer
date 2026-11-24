@@ -15,7 +15,7 @@ import type { Channel, ChannelMember, CoreServices } from "../contracts.ts";
 import { nameHandles } from "../policy.ts";
 import type { ToolSpec, ToolContext } from "./runtime.ts";
 import { fetchNews, formatNews, type FetchLike } from "./news.ts";
-import { escapeAttr, escapeBody, wrapPeerMessage } from "./untrusted.ts";
+import { escapeAttr, escapeBody, escapeBio, wrapPeerMessage } from "./untrusted.ts";
 
 export const MAX_CHAT_TEXT = 16_000;
 
@@ -129,13 +129,19 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
         'presence says whether a member\'s Spencer is reachable now ("online", "offline" with lastSeen, or "unknown").',
       parameters: schema({}),
       async execute() {
-        const list = core.listChannels().map((c) => ({
-          id: c.id,
-          kind: c.kind,
-          name: c.name,
-          autoReply: c.autoReply,
-          members: c.members.map(describeMember),
-        }));
+        const list = core.listChannels().map((c) => {
+          const bios = new Map(core.peerBios(c.id).map(p => [p.id, p.about]));
+          return {
+            id: c.id,
+            kind: c.kind,
+            name: c.name,
+            autoReply: c.autoReply,
+            members: c.members.map(m => ({
+              ...describeMember(m),
+              bio: { untrusted: true, text: escapeBio(bios.get(m.id) ?? "") },
+            })),
+          };
+        });
         return JSON.stringify(list, null, 1);
       },
     },

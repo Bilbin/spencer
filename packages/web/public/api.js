@@ -42,6 +42,9 @@ async function request(method, path, body) {
 const enc = encodeURIComponent;
 
 export const api = {
+  bio: () => request("GET", "/api/bio"),
+  setBio: text => request("PUT", "/api/bio", { text }),
+  peers: () => request("GET", "/api/peers"),
   state: () => request("GET", "/api/state"),
   ownerMessages: (limit = 200) => request("GET", `/api/owner/messages?limit=${limit}`),
   ownerSend: (text, attachments = [], requestId) => request("POST", "/api/owner/messages", { text, attachments, ...(requestId ? { requestId } : {}) }),

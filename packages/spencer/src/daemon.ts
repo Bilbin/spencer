@@ -1,3 +1,5 @@
+import { readBio, writeBio } from "./bio.ts";
+import { MAX_ABOUT } from "@spencer/protocol";
 import { LinkManager, createTransferP2pAdapter, type LinkManagerTuning } from "./p2p/index.ts";
 import { getP2pAddonStatus } from "./p2p/addon.ts";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -272,6 +274,8 @@ export class Daemon {
       events: this.events,
       log,
       channelChanged,
+      bioText: () => readBio(dir),
+      bioChanged: () => this.events.emit({ type: "bio", bio: this.core.bio() }),
       localFeatures: () => this.need("cfg").p2p.mode === "files" && this.s.links?.status().available ? [P2P_FILES_FEATURE] : [],
     }));
     s.outbox = new Outbox({
@@ -393,6 +397,7 @@ export class Daemon {
     if (s.transfers) await step("transfers", () => s.transfers!.stop());
     if (s.p2pAdapter) await step("p2p adapter", () => s.p2pAdapter!.stop());
     if (s.links) await step("links", () => s.links!.stop());
+    s.channels?.stop();
     if (s.db) await step("db", () => s.db!.close());
     if (s.lock) await step("lock", () => s.lock!.release());
     this.s = {};
@@ -554,6 +559,18 @@ export class Daemon {
       saveModel: (model) => this.saveModel(model),
       saveConversationModel: (model) => this.saveConversationModel(model),
       me: () => this.identity,
+      bio: () => ({ text: readBio(this.dataDir), maxChars: MAX_ABOUT,
+        sharedChannels: channels.list().filter(c => c.shareBio).map(({ id, name, kind, trust }) => ({ id, name, kind, trust })) }),
+      setBio: async (text) => {
+        writeBio(this.dataDir, text);
+        channels.recheckHellos();
+        const bio = this.core.bio();
+        this.events.emit({ type: "bio", bio });
+        await this.s.agent?.bioChanged?.();
+        return bio;
+      },
+      peerBios: ch => channels.peerBios(ch),
+      listPeerDirectory: () => channels.listPeerDirectory(),
       listChannels: () => channels.list(),
       getChannel: (ch) => channels.get(ch),
       readChannel: (ch, limit) => channels.messages(ch, limit),

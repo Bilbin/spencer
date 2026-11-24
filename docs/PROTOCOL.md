@@ -102,6 +102,7 @@ type Body =
 ```
 
 - `link_offer` and `link_answer` carry pairwise-sealed SDP of at most 16 KiB. All `link_*` bodies are ephemeral only and addressed to one peer.
+- `hello.about` carries the owner's public `BIO.md`, at most `MAX_ABOUT = 2000` UTF-16 code units. Omission clears the previous bio. BIO updates with the same known sender name are silent membership updates. Every hello includes the current bio when sharing is enabled, including newcomer and capability hellos.
 - `hello.features` advertises capabilities such as `["p2p-files/1"]`. A hello is also sent when local features change.
 - `file_ready.via: "link"` selects the direct transport; an omitted `via` selects croc.
 - `status`: an ephemeral "working on it" indicator while a Spencer's channel agent prepares a reply to `replyTo`:
@@ -527,7 +528,7 @@ Turning them on or off reconfigures every conversation right away; no restart is
 | GET | `/api/channels/:ch` | → `Channel` |
 | GET | `/api/channels/:ch/messages?limit=&before=` | → `{items: ChannelMessage[]}`: chat and hello messages, oldest first, default 100, max 1000. `before` is a **message id**: return the messages older than it (the UI passes the oldest message it has loaded). An unknown id → 404. Without `before`, the channel is marked read. |
 | POST | `/api/channels/:ch/messages` | `{text, mentions?}` → `{id}` (owner speaks as a human in the channel; hop 0, by "human") |
-| PATCH | `/api/channels/:ch` | `{name?, autoReply?, allowedMcpTools?: string[], trust?: "standard"\|"full", directLink?: "auto"\|"off", allowLocalAddresses?: boolean, heated?: boolean}` → `Channel` (`heated`: Conversations channels only, §7.5) |
+| PATCH | `/api/channels/:ch` | `{name?, autoReply?, shareBio?: boolean, allowedMcpTools?: string[], trust?: "standard"\|"full", directLink?: "auto"\|"off", allowLocalAddresses?: boolean, heated?: boolean}` → `Channel` (`heated`: Conversations channels only, §7.5) |
 | GET | `/api/requests` | → `{items: OwnerRequest[]}` (newest first, max 200) |
 | POST | `/api/requests/:id/approve` · `/deny` | → `OwnerRequest` (409 if already decided) |
 | GET | `/api/followups` | → `{items: Followup[]}`: pending and running ones (by `dueAt`), then the 20 most recently finished |
@@ -545,6 +546,9 @@ Turning them on or off reconfigures every conversation right away; no restart is
 | PUT | `/api/mcp/servers/:name` | `{command, args?, env?, cwd?, disabled?, disabledTools?}` or `{url, headers?, disabled?, disabledTools?}` → same as `GET /api/mcp`. Adds or replaces the server, saved in config.json and (re)connected right away (400 on a bad name or config). A change to `disabledTools` only (the server's own tool names to hide and refuse) keeps the connection |
 | DELETE | `/api/mcp/servers/:name` | → same as `GET /api/mcp` (404 if unknown). Stops and removes it |
 | PUT | `/api/experimental` | `{enabled: boolean}` → `{enabled}`: turn experimental features (§7.6) on or off, saved as `experimental` in config.json |
+| GET | `/api/bio` | → `{text, maxChars: 2000, sharedChannels: {id, name, kind, trust}[]}`. Always available, independent of Experimental. |
+| PUT | `/api/bio` | `{text}` → updated BIO status. Trims text, validates UTF-16 `.length`, and writes `<dataDir>/BIO.md` atomically with mode 0600. Empty text deletes the file. Rechecks hellos and refreshes agent instructions. |
+| GET | `/api/peers` | → `{peers: PeerSummary[]}`. Present peers deduplicated by identity, excluding self. Each peer has `id`, `fingerprint`, `name`, `about`, `aboutAt`, and `channels: {id, name, kind, about, aboutAt}[]`. Top-level about comes from the newest channel row by `aboutAt`, including clearing updates. |
 | GET | `/api/soul` | → `{text, maxBytes}`: the owner's `<dataDir>/SOUL.md` (trimmed; `""` when there is none) |
 | PUT | `/api/soul` | `{text}` → `{text, maxBytes}`: save SOUL.md (mode 0600; empty text deletes it) and reconfigure every conversation with it (§7.1). 400 above `maxBytes` (16 KiB, UTF-8) |
 | GET | `/api/model` | → `ModelStatus` |
@@ -583,7 +587,7 @@ interface ConversationStatus { ch: string; nextAt: number;   // when my timer go
     heated?: true; moderating?: true };                      // moderating: I opened it, so I run its moderator
   hours: { start: number; end: number; timeZone: string } }  // when timers may open conversations
 interface Channel { id: string; kind: "direct"|"group"; mode?: "conversation"; name: string; relayUrl: string;
-  members: ChannelMember[]; directLink: "auto"|"off"; allowLocalAddresses: boolean;
+  members: ChannelMember[]; shareBio: boolean; directLink: "auto"|"off"; allowLocalAddresses: boolean;
   autoReply: boolean; allowedMcpTools: string[]; trust: "standard"|"full"; unread: number; lastSeq: number; createdAt: number;
   heated?: boolean }   // Conversations channels: heated mode (§7.5)
 interface OwnerRequest { id: string;
@@ -679,3 +683,15 @@ WS(S) and are normalized to the WebSocket endpoint.
 
 The data dir is mode 0700. Secrets and databases in it (`identity.json`, `api-token`, `config.json`,
 `spencer.sqlite`, `pi.sqlite` and their `-wal`/`-shm` files) are mode 0600, as is `SOUL.md` when Spencer writes it.
+
+### Public BIO and peer discovery
+
+BIO is a core feature. `SOUL.md` remains private and experimental. The Bio page publishes the owner's scope. The Peers page and channel Peer Cards display received biographies as safe Markdown.
+
+Channels have `shareBio: boolean`, enabled by default. `PATCH /api/channels/:ch` accepts this field. Disabling sharing sends a hello without `about` to clear the current bio at peers. Peers can retain an older copy. BIO must not contain secrets, private IP addresses, or sensitive paths.
+
+The daemon emits `{type: "bio", bio: BioStatus}` after a BIO save or sharing change. A changed peer biography emits `{type: "peer_bio", ch, id, about, aboutAt}`. Cleared biographies use `about: null`. `aboutAt` is a local receive timestamp in milliseconds. Routine `ChannelMember` payloads omit biography text.
+
+The database stores `channels.share_bio`, `channels.last_hello_about` as a SHA-256 digest, and `members.about_at`. Startup adds missing columns idempotently. BIO changes recheck hellos across channels. Rechecks stagger channels when there are more than 15.
+
+The owner's BIO narrows channel trust rules, including Full Trust. Conversations channels omit that scope restriction. Owner instructions include the published scope. Peer BIO blocks come last in channel instructions, after trust, scope, and Soul. They contain only that channel's member biographies. Every angle bracket in peer text is escaped. Peer self-descriptions never grant permissions or override rules. Direct channels include the complete bio. Groups truncate each biography to 400 UTF-16 code units without splitting surrogate pairs. Incoming BIO changes are stored immediately. Agent refreshes occur at most once per peer per channel every two minutes, with a trailing refresh.

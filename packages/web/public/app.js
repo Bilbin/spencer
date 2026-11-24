@@ -37,6 +37,9 @@ import { ownerView } from "./owner.js";
 import { channelView } from "./channel.js";
 import { transfersView } from "./transfers.js";
 import { mcpView } from "./mcp.js";
+import { bioView } from "./bio.js";
+import { peersView } from "./peers.js";
+import { applyBioEvent } from "./state.js";
 import { soulView } from "./soul.js";
 import { modelView, modelName } from "./model.js";
 import { inboxView } from "./inbox.js";
@@ -178,6 +181,8 @@ function renderSidebar() {
       null,
       navItem({ name: "transfers" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("transfer", 16)), h("span.nav-name", null, "Transfers"), badge(pending, "need action", "attn")], { cls: "foot" }),
       navItem({ name: "mcp" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("plug", 16)), h("span.nav-name", null, "MCP servers"), mcpBad ? h("span.pdot.inline.bad", { role: "img", "aria-label": "a server has an error" }) : null], { cls: "foot" }),
+      navItem({ name: "bio" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("heart", 16)), h("span.nav-name", null, "Bio")], { cls: "foot" }),
+      navItem({ name: "peers" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("users", 16)), h("span.nav-name", null, "Peers")], { cls: "foot" }),
       S.experimental ? navItem({ name: "soul" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("heart", 16)), h("span.nav-name", null, "Soul")], { cls: "foot" }) : null,
       navItem(
         { name: "model" },
@@ -252,6 +257,8 @@ function mount() {
   if (view.name === "channel") current = channelView(main, view.ch);
   else if (view.name === "transfers") current = transfersView(main);
   else if (view.name === "mcp") current = mcpView(main);
+  else if (view.name === "bio") current = bioView(main);
+  else if (view.name === "peers") current = peersView(main);
   else if (view.name === "soul") current = soulView(main);
   else if (view.name === "model") current = modelView(main);
   else if (view.name === "inbox") current = inboxView(main);
@@ -266,7 +273,7 @@ function onRoute() {
   syncTitle();
 }
 
-const PAGE_TITLES = { model: "Model", mcp: "MCP servers", soul: "Soul", transfers: "Transfers", inbox: "Needs you" };
+const PAGE_TITLES = { bio: "Bio", peers: "Peers", model: "Model", mcp: "MCP servers", soul: "Soul", transfers: "Transfers", inbox: "Needs you" };
 
 function syncTitle() {
   const c = S.view.name === "channel" ? S.channels.get(S.view.ch) : null;
@@ -279,6 +286,8 @@ function syncTitle() {
 
 function handleEvent(ev) {
   switch (ev.type) {
+    case "bio":
+    case "peer_bio": applyBioEvent(ev); break;
     case "channel":
       if (ev.channel?.id) upsertChannel(ev.channel);
       break;
