@@ -421,7 +421,7 @@ export interface AgentService {
   onOutgoingChat(msg: OutgoingChat): Promise<void>;
   ownerSend(text: string): Promise<{ submissionId: string }>;
   /** The answer to one owner submission, waiting at most `waitMs`; "pending" when it is not ready yet. */
-  ownerAnswer?(submissionId: string, waitMs: number): Promise<OwnerAnswer>;
+  ownerAnswer?(submissionId: string, waitMs: number, signal?: AbortSignal): Promise<OwnerAnswer>;
   ownerTranscript(limit: number): Promise<OwnerItem[]>;
   ownerBusy(): boolean;
   /** Informational note appended to the owner conversation (never starts a run). See TransferDeps.ownerNote. */

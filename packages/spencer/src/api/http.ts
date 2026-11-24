@@ -382,7 +382,11 @@ export class ApiServer {
     if ((m = /^\/api\/owner\/answers\/(\d{1,20})$/.exec(p)) && method === "GET") {
       const agent = b.agent();
       if (!agent.ownerAnswer) throw new HttpError(404, "not supported");
-      const a = await agent.ownerAnswer(m[1]!, intParam(q.get("wait"), 0, 30) * 1000);
+      const left = new AbortController();
+      const onClose = () => left.abort();
+      // The socket, not req: a GET's req "close" fires as soon as its (empty) body is read.
+      req.socket.once("close", onClose);
+      const a = await agent.ownerAnswer(m[1]!, intParam(q.get("wait"), 0, 30) * 1000, left.signal).finally(() => req.socket.off("close", onClose));
       return a.status === "done" ? { ...a, text: a.text.slice(0, 20_000) } : a;
     }
 

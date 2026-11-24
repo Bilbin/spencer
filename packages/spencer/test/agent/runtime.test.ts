@@ -118,6 +118,45 @@ test("runtime: a tool runs with its conversation key and is refused elsewhere", 
   }
 });
 
+test("runtime: an aborted waitAnswer releases its waiter, so repeated pending polls do not pile up", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spencer-rt-"));
+  const db = new DatabaseSync(join(dir, "core.db"));
+  const rt = await openRuntime(dir, db, []);
+  try {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const slow: ToolSpec = {
+      name: "list_peers",
+      description: "test",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        await gate;
+        return "peers: none";
+      },
+    };
+    await rt.configure(OWNER_KEY, { tools: [slow], instructions: "owner" });
+    const sid = await rt.submitInput(OWNER_KEY, { content: "/peers", requestId: "slow-1" });
+    const waits = () => (rt as unknown as { waits: Set<unknown> }).waits.size;
+    for (let i = 0; i < 5; i++) {
+      const ac = new AbortController();
+      const p = rt.waitAnswer(sid, ac.signal);
+      setTimeout(() => ac.abort(new Error("poll over")), 20);
+      await assert.rejects(p, /poll over/);
+      assert.equal(waits(), 0, `poll ${i + 1}: no waiter left behind`);
+    }
+    const done = new AbortController();
+    done.abort(new Error("already over"));
+    await assert.rejects(rt.waitAnswer(sid, done.signal), /already over/);
+    release();
+    assert.deepEqual(await rt.waitAnswer(sid), { status: "done", text: "done: peers: none" });
+    assert.equal(waits(), 0);
+  } finally {
+    await rt.close();
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runtime: pi.sqlite and its -wal/-shm are owner-only (0600), even under a permissive umask", async () => {
   const dir = mkdtempSync(join(tmpdir(), "spencer-rt-perm-"));
   const db = new DatabaseSync(join(dir, "core.db"));

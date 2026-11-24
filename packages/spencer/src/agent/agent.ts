@@ -1661,13 +1661,20 @@ export class SpencerAgent implements AgentService {
     return { submissionId };
   }
 
-  async ownerAnswer(submissionId: string, waitMs: number): Promise<OwnerAnswer> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const pending = new Promise<OwnerAnswer>((r) => (timer = setTimeout(() => r({ status: "pending" }), waitMs)));
+  /** Each poll owns one waiter and releases it when the poll ends (timeout or `signal`, e.g. the client left). */
+  async ownerAnswer(submissionId: string, waitMs: number, signal?: AbortSignal): Promise<OwnerAnswer> {
+    const ac = new AbortController();
+    const stop = () => ac.abort(new Error("poll over"));
+    const timer = setTimeout(stop, waitMs);
+    signal?.addEventListener("abort", stop, { once: true });
     try {
-      return await Promise.race([this.rt().waitAnswer(submissionId), pending]);
+      return await this.rt().waitAnswer(submissionId, ac.signal);
+    } catch (e) {
+      if (ac.signal.aborted) return { status: "pending" };
+      throw e;
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", stop);
     }
   }
 
