@@ -103,8 +103,9 @@ export function inviteModal() {
   });
 }
 
-export function joinModal() {
+export function joinModal(invite = "") {
   const link = h("textarea.input.mono", { rows: "3", placeholder: "https://<hub>/i/…#…", spellcheck: "false", "data-autofocus": true, required: true });
+  link.value = invite;
   const submit = h("button.btn.primary", { type: "submit", form: "join-form" }, "Join");
   const form = h("form", { id: "join-form" }, field("Invite link", link, "Paste the full link from any Spencer hub, including the part after #. That part is the secret and never reaches the relay."));
   const modal = openModal({
