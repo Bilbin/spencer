@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findT3, t3Tools } from "../../src/bridges/t3.ts";
@@ -34,7 +34,7 @@ test("spencer mcp t3: tools run the t3 CLI (message on stdin) and report its err
   const dir = tmp();
   const bin = join(dir, "t3");
   // A fake t3: prints its arguments and stdin; `thread show bad` fails like the real one.
-  writeFileSync(bin, '#!/bin/sh\nif [ "$3" = bad ]; then echo "thread bad not found" >&2; exit 1; fi\necho "args: $*"\necho "stdin: $(cat)"\n');
+  writeFileSync(bin, '#!/bin/sh\nif [ "$3" = bad ]; then echo "thread bad not found" >&2; exit 1; fi\necho "$*" >> "$0.calls"\necho "args: $*"\necho "stdin: $(cat)"\n');
   chmodSync(bin, 0o755);
   const mgr = new McpManager({ t3code: { command: process.execPath, args: [MAIN, "mcp", "t3"], env: { T3_BIN: bin, T3_PROJECT: "/work/proj" } } });
   try {
@@ -53,6 +53,10 @@ test("spencer mcp t3: tools run the t3 CLI (message on stdin) and report its err
     assert.match((await mgr.call("t3code", "thread_send", { thread: "t1", message: "go" })).text, /^Sent to thread t1\./);
     assert.deepEqual(await mgr.call("t3code", "thread_show", { thread: "bad" }), { text: "thread bad not found", isError: true });
     assert.deepEqual(await mgr.call("t3code", "thread_send", { thread: "t1" }), { text: "message is required", isError: true });
+    const calls = () => readFileSync(`${bin}.calls`, "utf8").split("\n").length;
+    const n = calls();
+    assert.equal((await mgr.call("t3code", "thread_start", { message: "x", wait_seconds: "30s" })).isError, true);
+    assert.equal(calls(), n, "a bad argument is caught before a thread is started");
   } finally {
     await mgr.stop();
     rmSync(dir, { recursive: true, force: true });

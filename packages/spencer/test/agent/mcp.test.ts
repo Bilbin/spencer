@@ -107,6 +107,12 @@ test("McpManager: single tools turn off and on without restarting the server", a
   assert.equal(Number((await mgr.call("echo", "pid", {})).text), pid, "same connection");
   await mgr.set("echo", ECHO);
   assert.ok(mgr.tools().some((t) => t.name === "mcp__echo__echo"));
+  // Hand-written config: other key order, empty lists; a tool switch still keeps the connection.
+  await mgr.set("echo", { env: {}, args: [...ECHO.args], command: ECHO.command, disabled: false });
+  await mgr.settled();
+  const pid2 = Number((await mgr.call("echo", "pid", {})).text);
+  await mgr.set("echo", { ...ECHO, disabledTools: ["echo"] });
+  assert.equal(Number((await mgr.call("echo", "pid", {})).text), pid2);
   await mgr.stop();
 });
 

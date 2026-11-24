@@ -45,8 +45,21 @@ const on = (s: ServerState, remote: string) => !s.config.disabledTools?.includes
 
 /** True when two configs differ only in `disabledTools`. */
 function sameConnection(a: McpServerConfig, b: McpServerConfig): boolean {
-  const strip = ({ disabledTools: _, ...rest }: McpServerConfig) => rest;
+  const strip = ({ disabledTools: _, ...rest }: McpServerConfig) => canonical(rest);
   return JSON.stringify(strip(a)) === JSON.stringify(strip(b));
+}
+
+/** Sorted keys; empty lists/maps and `disabled: false` dropped (hand-written config.json may have them). */
+function canonical(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(canonical);
+  if (!v || typeof v !== "object") return v;
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(v).sort()) {
+    const x = (v as Record<string, unknown>)[k];
+    if (x === undefined || x === false || (Array.isArray(x) && !x.length) || (x && typeof x === "object" && !Object.keys(x).length)) continue;
+    out[k] = canonical(x);
+  }
+  return out;
 }
 
 /** `mcp__<server>__<tool>`, characters outside [A-Za-z0-9_] replaced by `_`, at most 64 chars. */

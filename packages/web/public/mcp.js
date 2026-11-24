@@ -141,7 +141,7 @@ export function mcpView(main) {
     const cfg = { ...config[name] };
     if (on) delete cfg.disabled;
     else cfg.disabled = true;
-    apply(await attempt(() => api.saveMcpServer(name, cfg)));
+    await saveNow(name, cfg);
   };
 
   const toggleTool = async (name, remote, on) => {
@@ -151,7 +151,14 @@ export function mcpView(main) {
     else off.add(remote);
     if (off.size) cfg.disabledTools = [...off];
     else delete cfg.disabledTools;
-    apply(await attempt(() => api.saveMcpServer(name, cfg)));
+    await saveNow(name, cfg);
+  };
+
+  // The local copy changes at once, so a second click before the reply builds on this one instead of undoing it.
+  const saveNow = async (name, cfg) => {
+    config[name] = cfg;
+    const r = await attempt(() => api.saveMcpServer(name, cfg));
+    apply(r ?? (await attempt(() => api.mcp())));
   };
 
   const removeBtn = (name) => {

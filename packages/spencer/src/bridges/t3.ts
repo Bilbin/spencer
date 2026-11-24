@@ -145,7 +145,10 @@ export function t3Tools(defaultProject: string): BridgeTool[] {
         }
         args.push(str(a, "project") ?? defaultProject, "-");
         const deadline = Date.now() + CALL_BUDGET_MS;
-        const out = await t3(args, str(a, "message", true));
+        // Check every argument before the thread exists, so a bad one can't lose its id.
+        const message = str(a, "message", true);
+        const wait = int(a, "wait_seconds", 0, 0, MAX_WAIT_S);
+        const out = await t3(args, message);
         let id = out;
         let link = "";
         try {
@@ -155,7 +158,7 @@ export function t3Tools(defaultProject: string): BridgeTool[] {
         } catch {
           /* plain id */
         }
-        return await afterWait(id, int(a, "wait_seconds", 0, 0, MAX_WAIT_S), `Started thread ${id}${link ? ` (${link})` : ""}.`, deadline);
+        return await afterWait(id, wait, `Started thread ${id}${link ? ` (${link})` : ""}.`, deadline);
       },
     },
     {
@@ -169,8 +172,10 @@ export function t3Tools(defaultProject: string): BridgeTool[] {
       run: async (a) => {
         const thread = str(a, "thread", true);
         const deadline = Date.now() + CALL_BUDGET_MS;
-        await t3(["thread", "send", thread, "-"], str(a, "message", true));
-        return await afterWait(thread, int(a, "wait_seconds", 0, 0, MAX_WAIT_S), `Sent to thread ${thread}.`, deadline);
+        const message = str(a, "message", true);
+        const wait = int(a, "wait_seconds", 0, 0, MAX_WAIT_S);
+        await t3(["thread", "send", thread, "-"], message);
+        return await afterWait(thread, wait, `Sent to thread ${thread}.`, deadline);
       },
     },
     {
