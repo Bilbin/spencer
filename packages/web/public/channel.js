@@ -840,11 +840,11 @@ export function channelView(main, chId) {
     if (!c) return;
     const tools = c.allowedMcpTools ?? [];
     const full = c.trust === "full";
-    members.replaceChildren(
+    members.replaceChildren(...[
       h("div.members-head", null, h("h2", null, c.kind === "group" ? "In this group" : "In this channel"), iconButton("close", "Close members", () => setMembersOpen(false), "members-close")),
       h("ul.member-list", null, c.members.map((m) => memberRow(c, m))),
       isConversation(c) ? conversationSection(c) : null,
-      ...[followupList(c.id, { title: "Your Spencer will follow up" })].filter(Boolean),
+      followupList(c.id, { title: "Your Spencer will follow up" }),
       h(
         "section.access",
         { "aria-label": "Access" },
@@ -871,7 +871,7 @@ export function channelView(main, chId) {
         h("div.access-row", null, icon("reply", 15), h("div", null, h("strong", null, c.autoReply ? "Auto-reply on" : "Auto-reply off"), h("p", null, c.autoReply ? (isConversation(c) ? "Your Spencer talks on its own, and answers anyone who writes here." : c.kind === "group" ? "Your Spencer answers when mentioned." : "Your Spencer answers on its own.") : "Your Spencer only listens."))),
         h("button.btn.sm", { type: "button", on: { click: () => settingsModal(c) } }, icon("gear", 14), "Channel settings"),
       ),
-    );
+    ].filter(Boolean));
   };
 
   const renderHeader = () => {
