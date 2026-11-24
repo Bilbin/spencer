@@ -103,7 +103,8 @@ export interface AgentRuntime {
   configure(key: string, setup: ConversationSetup): Promise<void>;
   submitInput(key: string, input: InputSubmission): Promise<string>;
   appendNote(key: string, note: NoteInput): Promise<void>;
-  waitAnswer(submissionId: string): Promise<Answer>;
+  /** Rejects with the signal's reason once `signal` aborts; the wait is released then. */
+  waitAnswer(submissionId: string, signal?: AbortSignal): Promise<Answer>;
   transcript(key: string, limit: number): Promise<OwnerItem[]>;
   watch(key: string, handlers: WatchHandlers): Promise<() => Promise<void>>;
   isBusy(key: string): boolean;
@@ -375,12 +376,16 @@ export class PiRuntime implements AgentRuntime {
     );
   }
 
-  async waitAnswer(submissionId: string): Promise<Answer> {
+  async waitAnswer(submissionId: string, signal?: AbortSignal): Promise<Answer> {
     const h = this.h();
+    signal?.throwIfAborted();
     const s = await h.submission(Number(submissionId) as SubmissionId, BACKGROUND_CONTEXT);
     if (!s) return { status: "unanswered", reason: "unknown submission" };
+    signal?.throwIfAborted();
     const { context, cancel } = withCancel(BACKGROUND_CONTEXT);
     this.waits.add(cancel);
+    const onAbort = () => cancel(signal!.reason);
+    signal?.addEventListener("abort", onAbort, { once: true });
     try {
       const settled = await s.wait(context);
       if (settled.status !== "done" || settled.type === "write") {
@@ -396,6 +401,7 @@ export class PiRuntime implements AgentRuntime {
       const msg = AssistantEntry.is(entry) ? entry.model?.[0] : undefined;
       return { status: "done", text: msg && msg.role === "assistant" ? assistantText(msg) : "" };
     } finally {
+      signal?.removeEventListener("abort", onAbort);
       this.waits.delete(cancel);
     }
   }

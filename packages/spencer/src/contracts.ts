@@ -11,7 +11,7 @@
  */
 import type { DatabaseSync } from "node:sqlite";
 import type { ChatBody, ConvoRef, CrocInfo, FileBody, Identity, StatusState } from "@spencer/protocol";
-import type { ModelConfig, SpencerConfig, Policy } from "./config.ts";
+import type { McpServerConfig, ModelConfig, SpencerConfig, Policy } from "./config.ts";
 
 // ---------------------------------------------------------------- API shapes
 
@@ -145,6 +145,8 @@ export interface Transfer {
   expiresAt: number;
 }
 
+export type OwnerAnswer = { status: "pending" } | { status: "done"; text: string } | { status: "unanswered"; reason: string };
+
 export interface OwnerItem {
   id: string;
   role: "user" | "assistant" | "tool" | "note";
@@ -208,7 +210,8 @@ export interface McpServerStatus {
   transport: "stdio" | "http";
   status: "connected" | "error" | "disabled" | "connecting";
   error?: string;
-  tools: { name: string; description?: string }[];
+  /** Every tool the server offers; `name` is the exposed name, `remote` the server's own (used by `disabledTools`). */
+  tools: { name: string; remote: string; description?: string; enabled: boolean }[];
 }
 
 // ---------------------------------------------------------------- events
@@ -417,6 +420,8 @@ export interface AgentService {
   /** We sent a chat in a channel (owner typed it, or the owner agent sent it): record as channel context. */
   onOutgoingChat(msg: OutgoingChat): Promise<void>;
   ownerSend(text: string): Promise<{ submissionId: string }>;
+  /** The answer to one owner submission, waiting at most `waitMs`; "pending" when it is not ready yet. */
+  ownerAnswer?(submissionId: string, waitMs: number, signal?: AbortSignal): Promise<OwnerAnswer>;
   ownerTranscript(limit: number): Promise<OwnerItem[]>;
   ownerBusy(): boolean;
   /** Informational note appended to the owner conversation (never starts a run). See TransferDeps.ownerNote. */
@@ -424,6 +429,8 @@ export interface AgentService {
   /** A channel was created/joined/updated (settings, members): reconfigure its conversation. */
   channelChanged(ch: string): Promise<void>;
   mcpStatus(): McpServerStatus[];
+  /** Add, replace or (`undefined`) remove an MCP server while running. */
+  setMcpServer?(name: string, config: McpServerConfig | undefined): Promise<void>;
   /** Owner requests (`ask_owner`), newest first. */
   listRequests?(): OwnerRequest[];
   /** Approve (the owner conversation carries it out) or deny a pending request. */

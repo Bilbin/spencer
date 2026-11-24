@@ -96,6 +96,11 @@ export class StubAgent implements AgentService {
     this.ownerSends.push(text);
     return { submissionId: `sub-${this.ownerSends.length}` };
   }
+  ownerAnswers = new Map<string, string>();
+  async ownerAnswer(submissionId: string, _waitMs: number) {
+    const text = this.ownerAnswers.get(submissionId);
+    return text === undefined ? { status: "pending" as const } : { status: "done" as const, text };
+  }
   async ownerTranscript(_limit: number): Promise<OwnerItem[]> {
     return this.ownerSends.map((t, i) => ({ id: `u${i}`, role: "user" as const, text: t, ts: 0 }));
   }
@@ -108,8 +113,12 @@ export class StubAgent implements AgentService {
   async channelChanged(ch: string) {
     this.changed.push(ch);
   }
+  mcpSets: [string, unknown][] = [];
   mcpStatus() {
     return [];
+  }
+  async setMcpServer(name: string, config: unknown) {
+    this.mcpSets.push([name, config]);
   }
   humanConversationRef(_ch: string) {
     return this.convoRef;

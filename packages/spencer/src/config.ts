@@ -25,8 +25,8 @@ export type ModelConfig =
     };
 
 export type McpServerConfig =
-  | { command: string; args?: string[]; env?: Record<string, string>; cwd?: string; disabled?: boolean }
-  | { url: string; headers?: Record<string, string>; disabled?: boolean };
+  | { command: string; args?: string[]; env?: Record<string, string>; cwd?: string; disabled?: boolean; disabledTools?: string[] }
+  | { url: string; headers?: Record<string, string>; disabled?: boolean; disabledTools?: string[] };
 
 export interface Policy {
   /**
@@ -204,6 +204,47 @@ export function resolveConfig(raw: Partial<SpencerConfig> & Record<string, unkno
     if (!("command" in s) && !("url" in s)) throw new Error(`MCP server ${name} needs command or url`);
   }
   return cfg;
+}
+
+const isStrMap = (v: unknown): v is Record<string, string> =>
+  !!v && typeof v === "object" && !Array.isArray(v) && Object.values(v).every((x) => typeof x === "string");
+
+/** Strict check of one MCP server entry from the UI; returns a clean copy (unknown keys dropped). */
+export function validateMcpServer(name: string, raw: unknown): McpServerConfig {
+  if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) throw new Error("name: 1-32 letters, digits, - or _");
+  if (/[_-]{2}/.test(name) || ["__proto__", "constructor", "prototype"].includes(name))
+    throw new Error(`name: ${name} is not allowed`);
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("server config must be an object");
+  const r = raw as Record<string, unknown>;
+  if (r.disabled !== undefined && typeof r.disabled !== "boolean") throw new Error("disabled must be a boolean");
+  if (r.disabledTools !== undefined && !(Array.isArray(r.disabledTools) && r.disabledTools.every((t) => typeof t === "string")))
+    throw new Error("disabledTools must be a list of tool names");
+  const off = [...new Set((r.disabledTools as string[] | undefined) ?? [])];
+  const disabled = { ...(r.disabled === true ? { disabled: true } : {}), ...(off.length ? { disabledTools: off } : {}) };
+  if ("url" in r && "command" in r) throw new Error("give either command or url, not both");
+  if ("url" in r) {
+    if (typeof r.url !== "string" || !/^https?:\/\/./.test(r.url)) throw new Error("url must start with http:// or https://");
+    try {
+      new URL(r.url);
+    } catch {
+      throw new Error("url is not valid");
+    }
+    if (r.headers !== undefined && !isStrMap(r.headers)) throw new Error("headers must map names to strings");
+    return { url: r.url, ...(r.headers && Object.keys(r.headers).length ? { headers: r.headers as Record<string, string> } : {}), ...disabled };
+  }
+  if (typeof r.command !== "string" || !r.command.trim()) throw new Error("command (or url) is required");
+  if (r.args !== undefined && !(Array.isArray(r.args) && r.args.every((a) => typeof a === "string"))) throw new Error("args must be a list of strings");
+  if (r.env !== undefined && !isStrMap(r.env)) throw new Error("env must map names to strings");
+  if (r.cwd !== undefined && (typeof r.cwd !== "string" || !r.cwd.trim())) throw new Error("cwd must be a path");
+  const args = r.args as string[] | undefined;
+  const env = r.env as Record<string, string> | undefined;
+  return {
+    command: r.command.trim(),
+    ...(args?.length ? { args } : {}),
+    ...(env && Object.keys(env).length ? { env } : {}),
+    ...(r.cwd ? { cwd: (r.cwd as string).trim() } : {}),
+    ...disabled,
+  };
 }
 
 export function loadConfig(dataDir: string): SpencerConfig {

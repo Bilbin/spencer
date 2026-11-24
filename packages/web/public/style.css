@@ -2148,6 +2148,60 @@ details[open] > summary > .icon:last-child,
 .mcp-tools code {
   font-weight: 500;
 }
+.mcp-tools li.off code {
+  color: var(--ink-3);
+  text-decoration: line-through;
+}
+.mcp-cmdline {
+  margin: 6px 0 0 18px;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 0 18px;
+}
+.mcp-actions .check {
+  align-items: center;
+  margin-right: auto;
+  font-size: 13px;
+}
+.mcp-actions .check input {
+  margin: 0;
+}
+.mcp-preset {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-ctl);
+}
+.mcp-preset > div {
+  flex: 1;
+  min-width: 0;
+}
+.mcp-preset .hint {
+  margin-top: 2px;
+}
+.mcp-bridge .mcp-preset {
+  margin-top: 20px;
+}
+.mcp-cmd {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  font-size: 12px;
+  background: var(--sunken);
+  border-radius: var(--r-ctl);
+}
 .check-desc {
   color: var(--ink-3);
   font-size: 13px;

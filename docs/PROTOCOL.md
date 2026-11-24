@@ -521,6 +521,7 @@ Turning them on or off reconfigures every conversation right away; no restart is
 | GET | `/api/state` | → `{version: string, me:{id, name, fingerprint}, relay:{url, connected}, relays: RelayStatus[], channels: Channel[], transfers: Transfer[], mcp: McpServer[], policy, p2p: {mode, available, error?}, ownerBusy: boolean, requests: OwnerRequest[], followups: Followup[]}`. `relay` is the default relay from config; `connected` is true when every relay in use is connected. `relays` lists each relay in use (one per distinct channel relay, plus the default). |
 | GET | `/api/owner/messages?limit=` | → `{items: OwnerItem[]}` (owner conversation transcript, oldest first; default 200, max 2000) |
 | POST | `/api/owner/messages` | `{text}` → `{submissionId}` |
+| GET | `/api/owner/answers/:submissionId?wait=` | The answer to that one owner message, waiting up to `wait` seconds (0-30): `{status: "pending"}`, `{status: "done", text}` (capped at 20,000 chars) or `{status: "unanswered", reason}` |
 | GET | `/api/channels` | → `{items: Channel[]}` |
 | GET | `/api/channels/:ch` | → `Channel` |
 | GET | `/api/channels/:ch/messages?limit=&before=` | → `{items: ChannelMessage[]}`: chat and hello messages, oldest first, default 100, max 1000. `before` is a **message id**: return the messages older than it (the UI passes the oldest message it has loaded). An unknown id → 404. Without `before`, the channel is marked read. |
@@ -539,7 +540,9 @@ Turning them on or off reconfigures every conversation right away; no restart is
 | GET | `/api/transfers/:tid` | → `Transfer` |
 | POST | `/api/transfers` | `{ch, path, to?}` → `Transfer` (owner-initiated; `to` is required in groups) |
 | POST | `/api/transfers/:tid/approve` · `/deny` · `/accept` · `/decline` · `/cancel` | → `Transfer` |
-| GET | `/api/mcp` | → `{servers: McpServer[]}` |
+| GET | `/api/mcp` | → `{servers: McpServer[], config: Record<name, McpServerConfig>, presets: {name, title, description, config, problem?}[], spencerBridge: {command, args}}` (`config`: the `mcpServers` of config.json; `presets`: ready-made entries such as T3 Code; `spencerBridge`: how other agents run `spencer mcp spencer`) |
+| PUT | `/api/mcp/servers/:name` | `{command, args?, env?, cwd?, disabled?, disabledTools?}` or `{url, headers?, disabled?, disabledTools?}` → same as `GET /api/mcp`. Adds or replaces the server, saved in config.json and (re)connected right away (400 on a bad name or config). A change to `disabledTools` only (the server's own tool names to hide and refuse) keeps the connection |
+| DELETE | `/api/mcp/servers/:name` | → same as `GET /api/mcp` (404 if unknown). Stops and removes it |
 | PUT | `/api/experimental` | `{enabled: boolean}` → `{enabled}`: turn experimental features (§7.6) on or off, saved as `experimental` in config.json |
 | GET | `/api/soul` | → `{text, maxBytes}`: the owner's `<dataDir>/SOUL.md` (trimmed; `""` when there is none) |
 | PUT | `/api/soul` | `{text}` → `{text, maxBytes}`: save SOUL.md (mode 0600; empty text deletes it) and reconfigure every conversation with it (§7.1). 400 above `maxBytes` (16 KiB, UTF-8) |
@@ -630,7 +633,7 @@ interface Followup { id: string;
   createdAt: number; firedAt?: number; firedBy?: "time"|"reply";
   error?: string }                                // why it failed or was cancelled
 interface McpServer { name: string; transport: "stdio"|"http"; status: "connecting"|"connected"|"error"|"disabled"; error?: string;
-  tools: { name: string; description?: string }[] }   // tool name as exposed: mcp__<server>__<tool>
+  tools: { name: string; remote: string; description?: string; enabled: boolean }[] }   // name as exposed (mcp__<server>__<tool>); remote: the server's own; enabled: not in disabledTools
 ```
 
 ## 9. Daemon config (`<dataDir>/config.json`)

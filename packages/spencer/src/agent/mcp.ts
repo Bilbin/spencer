@@ -41,6 +41,27 @@ interface ServerState {
   generation: number;
 }
 
+const on = (s: ServerState, remote: string) => !s.config.disabledTools?.includes(remote);
+
+/** True when two configs differ only in `disabledTools`. */
+function sameConnection(a: McpServerConfig, b: McpServerConfig): boolean {
+  const strip = ({ disabledTools: _, ...rest }: McpServerConfig) => canonical(rest);
+  return JSON.stringify(strip(a)) === JSON.stringify(strip(b));
+}
+
+/** Sorted keys; empty lists/maps and `disabled: false` dropped (hand-written config.json may have them). */
+function canonical(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(canonical);
+  if (!v || typeof v !== "object") return v;
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(v).sort()) {
+    const x = (v as Record<string, unknown>)[k];
+    if (x === undefined || x === false || (Array.isArray(x) && !x.length) || (x && typeof x === "object" && !Object.keys(x).length)) continue;
+    out[k] = canonical(x);
+  }
+  return out;
+}
+
 /** `mcp__<server>__<tool>`, characters outside [A-Za-z0-9_] replaced by `_`, at most 64 chars. */
 export function mcpToolName(server: string, tool: string): string {
   return `mcp__${server}__${tool}`.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 64);
@@ -48,6 +69,7 @@ export function mcpToolName(server: string, tool: string): string {
 
 export class McpManager {
   private servers = new Map<string, ServerState>();
+  private setQueue = new Map<string, Promise<void>>();
   private events?: EventSink;
   private log: (msg: string) => void;
   private listeners = new Set<() => void>();
@@ -69,6 +91,46 @@ export class McpManager {
     }
   }
 
+  /** Add, replace (reconnecting it) or, with `undefined`, remove a server while running. */
+  set(name: string, config: McpServerConfig | undefined): Promise<void> {
+    // Calls for one name run in order, so overlapping edits can't orphan a child process.
+    const run = (this.setQueue.get(name) ?? Promise.resolve()).then(() => this.applySet(name, config));
+    const tail = run.catch(() => {});
+    this.setQueue.set(name, tail);
+    void tail.then(() => {
+      if (this.setQueue.get(name) === tail) this.setQueue.delete(name);
+    });
+    return run;
+  }
+
+  private async applySet(name: string, config: McpServerConfig | undefined): Promise<void> {
+    const old = this.servers.get(name);
+    if (old && config && sameConnection(old.config, config)) {
+      // Only the tool switches changed: keep the connection.
+      old.config = config;
+      this.changed();
+      return;
+    }
+    if (old) {
+      this.servers.delete(name);
+      await this.teardown(old);
+    }
+    if (config && !this.stopped) {
+      const s: ServerState = {
+        name,
+        config,
+        transport: "url" in config ? "http" : "stdio",
+        status: config.disabled ? "disabled" : "connecting",
+        tools: [],
+        attempt: 0,
+        generation: 0,
+      };
+      this.servers.set(name, s);
+      if (!config.disabled) void this.connect(s);
+    }
+    this.changed();
+  }
+
   /** Start connecting every enabled server; returns at once. */
   start(): void {
     for (const s of this.servers.values()) if (s.status !== "disabled") void this.connect(s);
@@ -86,7 +148,7 @@ export class McpManager {
         name: s.name,
         transport: s.transport,
         status: s.status,
-        tools: s.tools.map((t) => (t.description ? { name: t.name, description: t.description } : { name: t.name })),
+        tools: s.tools.map((t) => ({ name: t.name, remote: t.remote, ...(t.description ? { description: t.description } : {}), enabled: on(s, t.remote) })),
       };
       if (s.error) out.error = s.error;
       return out;
@@ -98,7 +160,7 @@ export class McpManager {
     const out: ToolSpec[] = [];
     for (const s of this.servers.values()) {
       if (s.status !== "connected") continue;
-      for (const t of s.tools) out.push(this.spec(s.name, t));
+      for (const t of s.tools) if (on(s, t.remote)) out.push(this.spec(s.name, t));
     }
     return out;
   }
@@ -131,6 +193,7 @@ export class McpManager {
   async call(server: string, tool: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<{ text: string; isError?: boolean }> {
     const s = this.servers.get(server);
     if (!s || s.status !== "connected" || !s.client) return { text: `MCP server ${server} is not connected.`, isError: true };
+    if (!on(s, tool)) return { text: `The ${tool} tool of MCP server ${server} is turned off.`, isError: true };
     try {
       const res = await s.client.callTool({ name: tool, arguments: args }, undefined, { signal, timeout: CALL_TIMEOUT_MS });
       const parts: string[] = [];
