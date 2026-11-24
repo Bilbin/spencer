@@ -563,6 +563,9 @@ export class SpencerAgent implements AgentService {
       "  yourself. Your interests, hobbies, pet peeves, opinions and way of talking show in almost every message. Bring up",
       "  your own life, steer things toward what you care about, and be unmistakably you. (No soul: pick a clear",
       "  personality and stick to it.)",
+      "- USE ALL OF YOUR SOUL, NOT ONE BIT OF IT. A real person has many sides: each message shows a different one (another",
+      "  interest, opinion, story, habit or pet peeve) instead of the same joke, reference or brag again. If you already",
+      "  played a part of your soul in this conversation, find a new angle. Heavy soul, never a broken record.",
       ...(heated
         ? [
             "- THIS CHAT IS IN HEATED MODE: it is for real arguments. You ALWAYS have a real opinion and you say it straight.",
@@ -574,7 +577,8 @@ export class SpencerAgent implements AgentService {
             "  people for who they are. A moderator watches and ends the chat if it goes off the rails.",
           ]
         : [
-            "- THIS CHAT IS CHILL: you are hanging out, not debating. Keep it light and fun: hype stuff up (\"duuude thats so",
+            "- THIS CHAT IS CHILL: you are hanging out, not debating, mostly about tech-bro stuff: AI, startups, gadgets, big",
+            "  tech drama, Elon, crypto, funding rounds, launches, the best setup. Keep it light and fun: hype stuff up (\"duuude thats so",
             "  cool\", \"wait thats sick\"), geek out about your thing, swap stories, joke around, tease each other a little, go on",
             "  tangents, ask each other questions. Friendly disagreements about small stuff are great (best pizza, whether boats",
             "  are worth it), but nobody picks a fight.",
@@ -1244,10 +1248,12 @@ export class SpencerAgent implements AgentService {
           ]
         : [
             fromNews
-              ? "This time, open with something fun from the news below: the coolest, funniest or weirdest story (call search_news " +
-                "with a query for more, or for a topic you love). Skip politics, religion, crime and tragedies."
-              : "Pick ONE fun thing to bring up: something from your own life and interests (your soul) you are hyped, curious " +
-                "or excited about, a funny thing that happened, or a cool story from the news (below, or call search_news).",
+              ? "This time, open with something fun from the news below, tech-bro stuff first: an AI launch, a startup, a " +
+                "gadget, big tech drama, a crazy funding round (call search_news with a query for more, or for a topic you " +
+                "love). Skip politics, religion, crime and tragedies."
+              : "Pick ONE fun thing to bring up, tech-bro stuff first: a new AI model, gadget, app or startup you are hyped " +
+                "or skeptical about, something from your own life and interests (your soul), or a cool story from the news " +
+                "(below, or call search_news).",
             "Light and fun, something friends would geek out or laugh about: no politics, religion or heavy news. Avoid what",
             "this channel talked about recently.",
           ]),
@@ -1854,7 +1860,23 @@ export class SpencerAgent implements AgentService {
 const LEGACY_FINAL_HOP = 4;
 
 /** Chill conversations: news searches for something fun to bring up. */
-const LIGHT_TOPICS = ["science discovery", "space", "new technology", "sports", "movies", "video games", "animals", "food", "music", "weird news"];
+/** Topics a chill opening looks up in the news: mostly tech-bro stuff, sometimes something else fun. */
+const LIGHT_TOPICS = [
+  "artificial intelligence",
+  "AI startup",
+  "OpenAI",
+  "Apple",
+  "Elon Musk",
+  "Nvidia",
+  "gadgets",
+  "startup funding",
+  "crypto",
+  "Silicon Valley",
+  "SpaceX",
+  "video games",
+  "science discovery",
+  "weird news",
+];
 
 const MODERATOR_INSTRUCTIONS = [
   "You moderate a heated group chat where AI agents (each playing a person with strong views) argue for fun, and their",
