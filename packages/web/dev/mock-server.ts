@@ -18,7 +18,7 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { join, normalize, extname, basename, sep } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { Channel as BaseChannel, ChannelMember, ChannelMessage, Transfer as BaseTransfer, OwnerItem, OwnerRequest, McpServerStatus, DaemonEvent, Followup, ModelStatus } from "../../spencer/src/contracts.ts";
+import type { Channel as BaseChannel, ChannelMember, ChannelMessage, Transfer as BaseTransfer, OwnerItem, OwnerRequest, McpServerStatus, DaemonEvent, Followup, ModelStatus, ConversationStatus } from "../../spencer/src/contracts.ts";
 
 type Channel = BaseChannel & { directLink?: "auto" | "off"; allowLocalAddresses?: boolean };
 type Transfer = BaseTransfer & { via?: "link" | "croc" };
@@ -139,6 +139,11 @@ const presence = new Map<string, Presence>([
   [carol.id, { online: false, lastSeenAt: now() - 47 * 60_000 }],
   [dave.id, { online: true, lastSeenAt: now() }],
 ]);
+let experimental = true;
+/** Like the daemon: experimental endpoints answer 403 while the features are off. */
+function needExperimental(): void {
+  if (!experimental) throw new HttpError(403, "experimental features are off (Model & settings → Experimental)");
+}
 const policy = {
   maxHops: 4,
   repliesPerMinute: 6,
@@ -164,6 +169,7 @@ const working = new Map<string, Extract<DaemonEvent, { type: "status" }>>();
 let ownerBusy = false;
 const people = new Map<string, Person>([me, bob, carol, dave].map((p) => [p.id, p]));
 
+let soul = "# Soul\n\n## Vibe\n- Warm, direct and concise. A little dry humor is welcome.";
 const mcp: McpServerStatus[] = [
   {
     name: "t3code",
@@ -214,6 +220,7 @@ function addChannel(kind: "direct" | "group", name: string, ps: Person[], extra:
     name,
     relayUrl: relay.url,
     members: [me, ...ps].map(member),
+    mode: "chat",
     autoReply: true,
     directLink: "auto",
     allowLocalAddresses: false,
@@ -276,6 +283,9 @@ const t0 = now() - 50 * MIN;
 const bobCh = addChannel("direct", "Bob", [bob], { allowedMcpTools: ["mcp__github__list_issues"], unread: 1 });
 const group = addChannel("group", "Networking Group", [carol, dave], { unread: 2, createdAt: now() - 2 * 24 * HOUR });
 addChannel("direct", "Erin", [], { createdAt: now() - 2 * HOUR });
+const debate = addChannel("group", "Hot Takes", [bob, carol], { mode: "conversation", createdAt: now() - 6 * HOUR });
+const HOURS = { start: 8, end: 18, timeZone: "America/Los_Angeles" };
+const convos = new Map<string, ConversationStatus>([[debate.id, { ch: debate.id, nextAt: now() + 42 * MIN, opening: false, hours: HOURS }]]);
 
 addMsg(bobCh.id, bob, { type: "hello", text: "Bob's home-server agent", by: undefined, hop: undefined }, t0);
 const ask = addMsg(bobCh.id, me, { text: "Hi Bob's Spencer — Alice wants to know whether last night's backup finished.", hop: 0, by: "agent", origin: "owner-agent" }, t0 + 2 * MIN);
@@ -656,7 +666,7 @@ function transferAction(t: Transfer, action: string): Transfer {
 async function api(req: IncomingMessage, url: URL): Promise<unknown> {
   const method = req.method ?? "GET";
   const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent); // ["api", ...]
-  const [, a, b, c] = parts;
+  const [, a, b, c, d] = parts;
 
   if (method === "GET" && a === "state" && !b) {
     return {
@@ -667,11 +677,13 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       transfers: [...transfers.values()],
       mcp,
       policy,
+      experimental,
       ownerBusy,
       requests: [...requests.values()].reverse(),
       followups: [...followups.values()],
       model,
       p2p: { mode: "files", available: true },
+      version: "0.1.5-dev",
     };
   }
   if (a === "owner" && b === "messages" && !c) {
@@ -691,6 +703,22 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
   }
   if (a === "channels" && b) {
     const ch = getChannel(b);
+    if (c === "conversation") {
+      needExperimental();
+      if (ch.mode !== "conversation") throw new HttpError(400, "not a Conversations channel");
+      const st = convos.get(ch.id) ?? { ch: ch.id, nextAt: now() + 45 * MIN, opening: false, hours: HOURS };
+      convos.set(ch.id, st);
+      if (!d && method === "GET") return st;
+      if (d === "start" && method === "POST") {
+        if (st.active) throw new HttpError(409, "a conversation is already going on");
+        const id = b64u(16);
+        const opener = addMsg(ch.id, me, { text: "Hot take: four-day work weeks would make everyone lazier, not happier. Fight me.", hop: 0, by: "agent", origin: "agent-conversation", convo: { id, start: true } });
+        emitMsg(opener);
+        Object.assign(st, { nextAt: now() + 50 * MIN, opening: false, active: { id, startedAt: now(), lastAt: now(), used: 1, max: 10 } });
+        emit({ type: "conversation", conversation: st });
+        return st;
+      }
+    }
     if (c === "messages") {
       if (method === "GET") {
         const limit = Math.max(1, Math.min(500, Number(url.searchParams.get("limit") ?? 100)));
@@ -717,6 +745,12 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     }
     if (!c && method === "PATCH") {
       const body = await readJson(req);
+      if (body.heated !== undefined) {
+        needExperimental();
+        if (typeof body.heated !== "boolean") throw new HttpError(400, "heated must be a boolean");
+        if (ch.mode !== "conversation") throw new HttpError(400, "heated is only for Conversations channels");
+        ch.heated = body.heated;
+      }
       if (typeof body.name === "string" && body.name.trim()) ch.name = body.name.trim();
       if (body.directLink === "auto" || body.directLink === "off") ch.directLink = body.directLink;
       if (typeof body.allowLocalAddresses === "boolean") ch.allowLocalAddresses = body.allowLocalAddresses;
@@ -736,9 +770,10 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
   if (a === "invites" && method === "POST") {
     const body = await readJson(req);
     if (!b) {
-      const kind = body.kind === "group" ? "group" : body.kind === "direct" ? "direct" : null;
+      const kind = body.kind === "group" || body.kind === "conversation" ? "group" : body.kind === "direct" ? "direct" : null;
       const name = typeof body.name === "string" ? body.name.trim() : "";
-      if (!kind) throw new HttpError(400, "kind must be direct or group");
+      if (!kind) throw new HttpError(400, "kind must be direct, group or conversation");
+      if (body.kind === "conversation") needExperimental();
       if (!name) throw new HttpError(400, "name is required");
       let hub = relay.url;
       if (body.relay !== undefined) {
@@ -753,7 +788,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
           hub = url.toString();
         } catch { throw new HttpError(400, "invalid hub URL"); }
       }
-      const chn = addChannel(kind, name, [], { createdAt: now(), relayUrl: hub });
+      const chn = addChannel(kind, name, [], { createdAt: now(), relayUrl: hub, ...(body.kind === "conversation" ? { mode: "conversation" as const } : {}) });
       emitChannel(chn);
       // Simulate the friend joining a little later.
       later(12_000, () => {
@@ -802,6 +837,37 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     if (b && !c && method === "GET") return getTransfer(b);
   }
   if (a === "mcp" && method === "GET" && !b) return { servers: mcp };
+  if (a === "experimental" && !b && method === "PUT") {
+    const body = await readJson(req);
+    if (typeof body.enabled !== "boolean") throw new HttpError(400, "enabled must be a boolean");
+    experimental = body.enabled;
+    emit({ type: "experimental", enabled: experimental });
+    return { enabled: experimental };
+  }
+  if (a === "soul" && !b) {
+    needExperimental();
+    if (method === "GET") return { text: soul, maxBytes: 16 * 1024 };
+    if (method === "PUT") {
+      const body = await readJson(req);
+      if (typeof body.text !== "string") throw new HttpError(400, "text must be a string");
+      if (Buffer.byteLength(body.text.trim(), "utf8") > 16 * 1024) throw new HttpError(400, "SOUL.md is limited to 16 KiB");
+      soul = body.text.trim();
+      return { text: soul, maxBytes: 16 * 1024 };
+    }
+  }
+  if (a === "model" && b === "conversation" && method === "PUT") {
+    needExperimental();
+    const body = await readJson(req);
+    if (body.provider === null) delete model.conversation;
+    else {
+      const provId = typeof body.provider === "string" ? body.provider : "";
+      const modelId = typeof body.modelId === "string" ? body.modelId.trim() : "";
+      if (!MOCK_PROVIDERS().some((p) => p.id === provId) || !modelId) throw new HttpError(400, "unknown provider or model");
+      model.conversation = { provider: provId, modelId, ready: true, ...(typeof body.thinking === "string" && body.thinking !== "off" ? { thinking: body.thinking as NonNullable<ModelStatus["thinking"]> } : {}) };
+    }
+    emit({ type: "model", model });
+    return model;
+  }
   if (a === "model" && !b) {
     if (method === "GET") return model;
     if (method === "PUT") {

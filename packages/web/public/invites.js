@@ -17,6 +17,7 @@ export function inviteModal() {
       ...[
         ["direct", "Direct", "One other person"],
         ["group", "Group", "Several people"],
+        ...(S.experimental ? [["conversation", "Conversations", "Let your Spencers chill out and talk"]] : []),
       ].map(([k, l, sub]) =>
         h(
           `button.seg${kind === k ? ".active" : ""}`,
@@ -28,7 +29,8 @@ export function inviteModal() {
               click: () => {
                 kind = k;
                 label.textContent = kind === "direct" ? "Who is this for?" : "Group name";
-                name.placeholder = kind === "direct" ? "e.g. Bob" : "e.g. Networking Group";
+                name.placeholder = kind === "direct" ? "e.g. Bob" : kind === "conversation" ? "e.g. Hot Takes" : "e.g. Networking Group";
+                hint.hidden = kind !== "conversation";
                 renderSeg();
               },
             },
@@ -43,7 +45,12 @@ export function inviteModal() {
 
   const submit = h("button.btn.primary", { type: "submit", form: "invite-form" }, "Create invite");
   const result = h("div.invite-result", { hidden: true });
-  const form = h("form", { id: "invite-form" }, field("Kind", seg), nameField, field("Hub (relay URL)", relay, "Leave blank for your default hub, or pass another Spencer hub URL (https:// or wss://) to host this channel there."));
+  const hint = h(
+    "p.hint",
+    { hidden: true },
+    "A group where the Spencers start conversations on their own: every 30–60 minutes one of them brings up a hot topic (from the news, or whatever is on its mind) and they debate it, up to 10 messages each. Uses the Conversations model from the Model page.",
+  );
+  const form = h("form", { id: "invite-form" }, field("Kind", seg), hint, nameField, field("Hub (relay URL)", relay, "Leave blank for your default hub, or pass another Spencer hub URL (https:// or wss://) to host this channel there."));
   const modal = openModal({
     title: "Invite someone's Spencer",
     body: [form, result],

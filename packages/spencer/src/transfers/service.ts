@@ -14,6 +14,7 @@ import type { CrocExit, CrocJob, CrocRunner } from "./croc.ts";
 import { dirBytes, dirsFor, ensureDir, ensureDirAsync, findReceived, rmrf, sha256File, stageCopy } from "./files.ts";
 import { TransferStore } from "./store.ts";
 import type { TransferRow } from "./store.ts";
+import { writeAll } from "./write-all.ts";
 
 export interface TransferServiceOptions {
   /** croc implementation; defaults to realCrocRunner(deps.crocPath) with a pid file in the data dir. */
@@ -28,7 +29,7 @@ export interface TransferServiceOptions {
   watchdogMs?: number;
 }
 
-export type TransferErrorCode = "not_found" | "bad_state" | "bad_request" | "stopped";
+export type TransferErrorCode = "not_found" | "bad_state" | "bad_request" | "conflict" | "stopped";
 
 export class TransferError extends Error {
   code: TransferErrorCode;
@@ -736,6 +737,18 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
         throw new TransferError("bad_request", `cannot read ${req.path}`);
       }
       if (!st.isFile()) throw new TransferError("bad_request", `${req.path} is not a regular file`);
+      const name = sanitizeFileName(basename(req.path));
+      if (req.uploadId !== undefined) {
+        if (!/^[A-Za-z0-9_-]{16,64}$/.test(req.uploadId)) throw new TransferError("bad_request", "invalid upload retry id");
+        const previous = store.byUploadId(req.uploadId);
+        if (previous) {
+          const sha256 = await sha256File(req.path);
+          if (previous.ch !== ch || (req.to !== undefined && previous.peer !== req.to) || previous.name !== name || previous.size !== st.size || previous.sha256 !== sha256) {
+            throw new TransferError("conflict", "upload retry id was already used for different content or recipient");
+          }
+          return toApi(previous);
+        }
+      }
       const peers = deps.peers(ch);
       let to = req.to;
       if (to !== undefined) {
@@ -746,18 +759,6 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
         throw new TransferError("bad_request", "channel has no other member yet");
       } else {
         throw new TransferError("bad_request", "`to` is required in group channels");
-      }
-      const name = sanitizeFileName(basename(req.path));
-      if (req.uploadId !== undefined) {
-        if (!/^[A-Za-z0-9_-]{16,64}$/.test(req.uploadId)) throw new TransferError("bad_request", "invalid upload retry id");
-        const previous = store.byUploadId(req.uploadId);
-        if (previous) {
-          const sha256 = await sha256File(req.path);
-          if (previous.ch !== ch || previous.peer !== to || previous.name !== name || previous.size !== st.size || previous.sha256 !== sha256) {
-            throw new TransferError("bad_request", "upload retry id was already used for different content or recipient");
-          }
-          return toApi(previous);
-        }
       }
       const tid = randomId();
       const dir = outDir(tid);
@@ -814,8 +815,11 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
         rmrf(dir);
         if (req.uploadId) {
           const previous = store.byUploadId(req.uploadId);
-          if (previous && previous.ch === ch && previous.peer === to && previous.name === name && previous.size === size && previous.sha256 === sha256) {
-            return toApi(previous);
+          if (previous) {
+            if (previous.ch === ch && previous.peer === to && previous.name === name && previous.size === size && previous.sha256 === sha256) {
+              return toApi(previous);
+            }
+            throw new TransferError("conflict", "upload retry id was already used for different content or recipient");
           }
         }
         throw e;
@@ -852,7 +856,11 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
           if (!(chunk instanceof Uint8Array)) throw new TransferError("bad_request", "upload contains invalid data");
           size += chunk.byteLength;
           if (size > maxUploadBytes) throw new TransferError("bad_request", "file exceeds the 25 MiB upload limit");
-          await handle.write(chunk);
+          try {
+            await writeAll(handle, chunk);
+          } catch (e) {
+            throw new TransferError("bad_request", `cannot stage uploaded file: ${e instanceof Error ? e.message : String(e)}`);
+          }
         }
         await handle.close();
         handle = undefined;

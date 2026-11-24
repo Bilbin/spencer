@@ -13,9 +13,11 @@ import {
   inferCopilotApi,
   isCopilotCredential,
   parseCopilotModels,
+  parseDbusUnixAddress,
   pickCopilotModel,
   pollDeviceFlow,
   type CopilotCredential,
+  type CopilotKeyring,
 } from "../../src/agent/copilot.ts";
 import { ModelManager } from "../../src/agent/model-manager.ts";
 import { setupModels } from "../../src/agent/models.ts";
@@ -112,7 +114,11 @@ test("model picked after sign-in", () => {
   assert.equal(pickCopilotModel([]), undefined);
 });
 
-function makeModelManager(dir: string, initialModel: ModelConfig, extra: { copilotCliConfig?: string } = {}) {
+function makeModelManager(
+  dir: string,
+  initialModel: ModelConfig,
+  extra: { copilotCliConfig?: string; copilotKeyring?: CopilotKeyring } = {},
+) {
   let cfg = resolveConfig({ model: initialModel } as never);
   const saved: ModelConfig[] = [];
   const events: DaemonEvent[] = [];
@@ -370,6 +376,70 @@ test("ModelManager reuses the GitHub Copilot CLI sign-in (GitHub's own client, f
     assert.equal(st.provider, COPILOT_PROVIDER);
     assert.equal(st.modelId, "claude-sonnet-5.5");
     assert.ok(auths.length > 0 && auths.every((a) => a === `Bearer ${cliToken}`));
+    const saved = await new FileCredentialStore(dir).read(COPILOT_PROVIDER);
+    assert.ok(isCopilotCredential(saved) && saved.source === "copilot-cli" && saved.access === cliToken);
+  } finally {
+    mm.stop();
+  }
+});
+
+test("parseDbusUnixAddress handles path, percent-encoding, multiple addresses, and abstract sockets", () => {
+  assert.equal(parseDbusUnixAddress("unix:path=/run/user/1000/bus"), "/run/user/1000/bus");
+  assert.equal(parseDbusUnixAddress("tcp:host=127.0.0.1;unix:path=/tmp/my%20bus,guid=abc"), "/tmp/my bus");
+  assert.equal(parseDbusUnixAddress("unix:abstract=/tmp/dbus-xyz"), "\0/tmp/dbus-xyz");
+  assert.equal(parseDbusUnixAddress("tcp:host=127.0.0.1"), undefined);
+  assert.equal(parseDbusUnixAddress(undefined), undefined);
+});
+
+test("ModelManager reuses Copilot CLI sign-in stored in OS keyring (loggedInUsers without plaintext authTokens)", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "spencer-mm-keyring-"));
+  const cliConfig = join(dir, "copilot-config.json");
+  const cliToken = "gho_" + "k".repeat(36);
+  writeFileSync(
+    cliConfig,
+    `// User settings belong in settings.json.\n${JSON.stringify({
+      loggedInUsers: [
+        { host: "https://github.com", login: "first-user" },
+        { host: "https://github.com", login: "biz-user" },
+        { host: "https://ghe.example.com", login: "other-host" },
+      ],
+      lastLoggedInUser: { host: "https://github.com", login: "biz-user" },
+    })}`,
+  );
+  const keyring: CopilotKeyring = {
+    available: () => true,
+    read: async (login) => {
+      if (login === "biz-user") return { status: "ok", token: cliToken };
+      if (login === "first-user") return { status: "locked" };
+      return { status: "not_found" };
+    },
+  };
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    const body = String(url).endsWith("/copilot_internal/user")
+      ? { login: "biz-user", copilot_plan: "business", chat_enabled: true, endpoints: { api: "https://api.business.githubcopilot.com" } }
+      : {
+          data: [
+            { id: "gpt-6-luna", name: "GPT-6 Luna", model_picker_enabled: true, supported_endpoints: ["/responses"], capabilities: { type: "chat", supports: { tool_calls: true } } },
+          ],
+        };
+    return new Response(JSON.stringify(body), { status: 200 });
+  });
+  const { mm } = makeModelManager(
+    dir,
+    { provider: "anthropic", modelId: "claude-sonnet-5-5", apiKeyEnv: "ANTHROPIC_API_KEY" },
+    { copilotCliConfig: cliConfig, copilotKeyring: keyring },
+  );
+  try {
+    await mm.init();
+    // lastLoggedInUser is listed first; non-github.com hosts are excluded.
+    assert.deepEqual(mm.status().copilot.cliAccounts, ["biz-user", "first-user"]);
+    await assert.rejects(mm.useCopilotCliLogin("first-user"), /keyring is locked/);
+
+    const st = await mm.useCopilotCliLogin("biz-user");
+    assert.equal(st.copilot.connected, true);
+    assert.equal(st.copilot.via, "copilot-cli");
+    assert.equal(st.copilot.login, "biz-user");
+    assert.equal(st.modelId, "gpt-6-luna");
     const saved = await new FileCredentialStore(dir).read(COPILOT_PROVIDER);
     assert.ok(isCopilotCredential(saved) && saved.source === "copilot-cli" && saved.access === cliToken);
   } finally {

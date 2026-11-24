@@ -19,8 +19,10 @@ import {
   type CrocInfo,
   type Identity,
   type ServerFrame,
+  convoRef,
 } from "@spencer/protocol";
 import { loadConfig, resolveConfig, type ModelConfig, type SpencerConfig } from "./config.ts";
+import { spencerVersion } from "./version.ts";
 import type {
   AgentService,
   Channel,
@@ -192,7 +194,7 @@ export class Daemon {
 
   // ------------------------------------------------------------- convenience (tests, CLI)
 
-  createInvite(kind: "direct" | "group", name: string, relay?: string): Promise<{ link: string; channel: Channel }> {
+  createInvite(kind: "direct" | "group" | "conversation", name: string, relay?: string): Promise<{ link: string; channel: Channel }> {
     return this.channels.createInvite(kind, name, relay);
   }
   acceptInvite(link: string): Promise<Channel> {
@@ -351,6 +353,7 @@ export class Daemon {
       },
       leaveChannel: (ch) => this.leave(ch),
       acceptInvite: (link) => channels.acceptInvite(link),
+      setExperimental: (enabled) => this.saveExperimental(enabled),
       ...(webRoot ? { webRoot } : {}),
     });
     await s.api.listen(cfg.http.port);
@@ -541,6 +544,7 @@ export class Daemon {
       dataDir: this.dataDir,
       config: () => this.need("cfg"),
       saveModel: (model) => this.saveModel(model),
+      saveConversationModel: (model) => this.saveConversationModel(model),
       me: () => this.identity,
       listChannels: () => channels.list(),
       getChannel: (ch) => channels.get(ch),
@@ -559,6 +563,14 @@ export class Daemon {
         if (msg.replyTo !== undefined) body.replyTo = msg.replyTo;
         if (msg.mentions !== undefined && msg.mentions.length > 0) body.mentions = [...new Set(msg.mentions)];
         if (msg.final === true) body.final = true;
+        if (msg.convo !== undefined) {
+          if (!isB64uId(msg.convo.id)) throw new UserError(400, "invalid convo id");
+          body.convo = convoRef(msg.convo);
+        } else if (msg.origin === "human" && channels.row(ch)?.mode === "conversation") {
+          // §7.5: a person writing in a Conversations channel starts a new conversation everyone can answer.
+          const ref = daemon.s.agent?.humanConversationRef?.(ch);
+          if (ref) body.convo = ref;
+        }
         const res = outbox.enqueue(ch, body, {
           origin: msg.origin,
           ...(msg.idempotencyKey !== undefined ? { idempotencyKey: msg.idempotencyKey } : {}),
@@ -569,7 +581,7 @@ export class Daemon {
             const ts = Date.now();
             queueMicrotask(() => {
               agent
-                .onOutgoingChat({ id: res.id, ch, text: msg.text, origin: msg.origin, ts })
+                .onOutgoingChat({ id: res.id, ch, text: msg.text, origin: msg.origin, ts, ...(body.convo ? { convo: body.convo } : {}) })
                 .catch((e: Error) => log(`agent.onOutgoingChat: ${e.message}`));
             });
           }
@@ -644,13 +656,36 @@ export class Daemon {
 
   /** Writes `model` into config.json (keeping everything else in the file) and the running config. */
   saveModel(model: ModelConfig): void {
+    this.writeConfigKey("model", model);
+    this.s.cfg = { ...this.need("cfg"), model };
+  }
+
+  saveConversationModel(model: ModelConfig | undefined): void {
+    this.writeConfigKey("conversationModel", model);
+    const { conversationModel: _old, ...rest } = this.need("cfg");
+    this.s.cfg = { ...rest, ...(model ? { conversationModel: model } : {}) };
+  }
+
+  /** Turn experimental features on or off, saved in config.json, and re-apply them right away. */
+  async saveExperimental(enabled: boolean): Promise<{ enabled: boolean }> {
+    if (this.need("cfg").experimental !== enabled) {
+      this.writeConfigKey("experimental", enabled);
+      this.s.cfg = { ...this.need("cfg"), experimental: enabled };
+      await this.s.agent?.experimentalChanged?.();
+      this.events.emit({ type: "experimental", enabled });
+    }
+    return { enabled };
+  }
+
+  /** Set (or with `undefined`, remove) one top-level key of config.json, atomically. */
+  private writeConfigKey(key: string, value: unknown): void {
     const file = join(this.dataDir, "config.json");
     const raw = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>) : {};
-    raw.model = model;
+    if (value === undefined) delete raw[key];
+    else raw[key] = value;
     const tmp = `${file}.tmp-${process.pid}`;
     writeFileSync(tmp, JSON.stringify(raw, null, 2) + "\n", { mode: 0o600 });
     renameSync(tmp, file);
-    this.s.cfg = { ...this.need("cfg"), model };
   }
 
   apiState(): unknown {
@@ -664,6 +699,7 @@ export class Daemon {
     );
     const agent = this.s.agent;
     return {
+      version: spencerVersion(),
       me: this.identity,
       p2p: { mode: cfg.p2p.mode, ...(this.s.links?.status() ?? getP2pAddonStatus()) },
       relay: { url: cfg.relay, connected: relays.length > 0 && relays.every((r) => r.connected) },
@@ -672,6 +708,7 @@ export class Daemon {
       transfers: this.s.transfers?.list() ?? [],
       mcp: agent?.mcpStatus() ?? [],
       policy: cfg.policy,
+      experimental: cfg.experimental,
       ownerBusy: agent?.ownerBusy() ?? false,
       requests: agent?.listRequests?.() ?? [],
       followups: agent?.listFollowups?.() ?? [],

@@ -3,17 +3,20 @@
 export const TERMINAL = new Set(["completed", "denied", "declined", "failed", "expired", "cancelled"]);
 
 export const S = {
+  version: "",
   me: null, // {id, name, fingerprint}
   relay: { url: "", connected: false },
   relays: [], // {url, connected}[] when the daemon reports each relay in use
   p2p: null,
   policy: {},
+  experimental: false, // experimental features on (SOUL.md, Conversations channels)
   channels: new Map(), // id -> Channel
   transfers: new Map(), // tid -> Transfer
   mcp: [], // McpServerStatus[]
   model: null, // ModelStatus: the model Spencer thinks with and the Copilot sign-in
   requests: new Map(), // id -> OwnerRequest (ask_owner approvals and "continue?" cards)
   followups: new Map(), // id -> Followup (reminders the agents scheduled on themselves)
+  conversations: new Map(), // ch -> ConversationStatus (Conversations channels: my timer and the debate going on)
   working: new Map(), // ch -> Map(memberId -> {replyTo, activity, steps, since, ts}): a Spencer is working on a reply
   messages: new Map(), // ch -> ChannelMessage[] (only for channels that were opened)
   owner: null, // OwnerItem[] once loaded
@@ -92,12 +95,16 @@ export function isViewing(ch) {
 // ---------------------------------------------------------------- mutations
 
 export function setState(st) {
+  if (typeof st.version === "string") S.version = st.version;
   S.me = st.me ?? S.me;
   S.relay = st.relay ?? S.relay;
   S.relays = Array.isArray(st.relays) ? st.relays : [];
   if (typeof st.ownerBusy === "boolean") setOwnerBusy(st.ownerBusy);
   S.p2p = st.p2p ?? null;
   S.policy = st.policy ?? {};
+  const experimental = st.experimental === true;
+  const experimentalChanged = S.experimental !== experimental;
+  S.experimental = experimental;
   S.channels = new Map((st.channels ?? []).map((c) => [c.id, c]));
   S.transfers = new Map((st.transfers ?? []).map((t) => [t.tid, t]));
   S.mcp = st.mcp ?? [];
@@ -121,6 +128,19 @@ export function setState(st) {
   emit("owner");
   emit("requests");
   emit("followups");
+  if (experimentalChanged) emit("experimental");
+}
+
+export function setExperimental(enabled) {
+  if (S.experimental === !!enabled) return;
+  S.experimental = !!enabled;
+  emit("experimental");
+  emit("channels");
+}
+
+/** A Conversations channel, shown as one only while experimental features are on. */
+export function isConversation(c) {
+  return S.experimental && c?.mode === "conversation";
 }
 
 export function setModel(m) {
@@ -132,6 +152,11 @@ export function setOwnerBusy(busy) {
   if (busy && !S.ownerBusy) S.ownerBusySince = Date.now();
   S.ownerBusy = !!busy;
   emit("busy");
+}
+
+export function setConversation(st) {
+  S.conversations.set(st.ch, st);
+  emit(`conversation:${st.ch}`);
 }
 
 export function upsertFollowup(f) {

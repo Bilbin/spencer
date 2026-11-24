@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hasDraftFile, uploadDraftBatch } from "../public/draft-batch.js";
-import { discardEmptyChannelDraftState, getChannelDraftState } from "../public/draft-state.js";
+import { draftFileError, hasDraftFile, uploadDraftBatch } from "../public/draft-batch.js";
+import { clearSentDraftsWhenNoWork, discardEmptyChannelDraftState, getChannelDraftState, isUploadOutcomeUnknown, markUploadFailure, releaseRecipientAfterDefiniteFailure, resolveUploadSuccess, selectDraftRecipient } from "../public/draft-state.js";
 
 const draft = (name, file = { name }) => ({ file, status: "draft" });
 
@@ -24,6 +24,90 @@ test("channel state survives navigation while text or a send is pending", () => 
   original.messageText = ""; // Message send succeeded.
   discardEmptyChannelDraftState(states, "channel-a", original);
   assert.equal(states.has("channel-a"), false);
+});
+
+test("upload failures distinguish definite client rejection from ambiguous outcomes", () => {
+  assert.equal(isUploadOutcomeUnknown({ status: 400 }), false);
+  assert.equal(isUploadOutcomeUnknown({ status: 499 }), false);
+  assert.equal(isUploadOutcomeUnknown({ status: 409 }), true, "an upload-id conflict can indicate an earlier accepted send");
+  assert.equal(isUploadOutcomeUnknown({ status: 0 }), true);
+  assert.equal(isUploadOutcomeUnknown({ status: 503 }), true);
+  assert.equal(isUploadOutcomeUnknown(new Error("unknown transport failure")), true);
+});
+
+test("removing the last unsent file clears completed drafts and recipient state", () => {
+  const state = getChannelDraftState(new Map(), "channel-a");
+  state.recipient = "member-a";
+  state.recipientLocked = true;
+  state.drafts.push({ ...draft("sent.txt"), status: "sent" });
+  assert.equal(clearSentDraftsWhenNoWork(state), true);
+  assert.deepEqual(state.drafts, []);
+  assert.equal(state.recipient, null);
+  assert.equal(state.recipientLocked, false);
+  assert.equal(clearSentDraftsWhenNoWork(state), true, "empty drafts also remain cleared");
+});
+
+test("a definite first-upload failure allows a recipient change with a fresh retry id", () => {
+  const state = getChannelDraftState(new Map(), "channel-a");
+  const item = { ...draft("file.txt"), uploadId: "initial-id", outcomeUnknown: false };
+  state.drafts.push(item);
+  state.recipient = "member-a";
+  state.recipientLocked = true;
+  assert.equal(releaseRecipientAfterDefiniteFailure(state), true);
+  assert.equal(selectDraftRecipient(state, "member-b", () => "new-id"), true);
+  assert.equal(item.uploadId, "new-id");
+  assert.equal(state.recipient, "member-b");
+});
+
+test("a later rejected retry cannot erase an earlier ambiguous outcome", () => {
+  const state = getChannelDraftState(new Map(), "channel-a");
+  const item = { ...draft("file.txt"), uploadId: "stable-id" };
+  state.drafts.push(item);
+  state.recipient = "member-a";
+  state.recipientLocked = true;
+  markUploadFailure(item, { status: 0 });
+  markUploadFailure(item, { status: 429 });
+  assert.equal(item.outcomeUnknown, true);
+  assert.equal(releaseRecipientAfterDefiniteFailure(state), false);
+  assert.equal(selectDraftRecipient(state, "member-b", () => "must-not-be-used"), false);
+  assert.equal(item.uploadId, "stable-id");
+});
+
+test("a successful idempotent retry resolves the prior ambiguity", () => {
+  const item = { ...draft("file.txt"), outcomeUnknown: true };
+  resolveUploadSuccess(item);
+  assert.equal(item.outcomeUnknown, false);
+});
+
+test("an ambiguous upload outcome keeps recipient and retry id fixed", () => {
+  const state = getChannelDraftState(new Map(), "channel-a");
+  const item = { ...draft("file.txt"), uploadId: "stable-id", outcomeUnknown: true };
+  state.drafts.push(item);
+  state.recipient = "member-a";
+  state.recipientLocked = true;
+  assert.equal(releaseRecipientAfterDefiniteFailure(state), false);
+  assert.equal(selectDraftRecipient(state, "member-b", () => "must-not-be-used"), false);
+  assert.equal(selectDraftRecipient(state, "member-a", () => "must-not-be-used"), false);
+  assert.equal(item.uploadId, "stable-id");
+  assert.equal(state.recipient, "member-a");
+});
+
+test("a matching recipient retry preserves its id, while changing recipient rotates it", () => {
+  const state = getChannelDraftState(new Map(), "channel-a");
+  const item = { ...draft("file.txt"), uploadId: "stable-id" };
+  state.drafts.push(item);
+  state.recipient = "member-a";
+  selectDraftRecipient(state, "member-a", () => "unused-id");
+  assert.equal(item.uploadId, "stable-id");
+  selectDraftRecipient(state, "member-b", () => "fresh-id");
+  assert.equal(item.uploadId, "fresh-id");
+});
+
+test("invalid names and oversize files get distinct validation feedback", () => {
+  assert.equal(draftFileError({ name: "", size: 1 }, 100), "File name must not be empty");
+  assert.equal(draftFileError({ name: "   ", size: 1 }, 100), "File name must not be empty");
+  assert.equal(draftFileError({ name: "large.bin", size: 101 }, 100), "large.bin exceeds the upload size limit");
+  assert.equal(draftFileError({ name: "notes.txt", size: 1 }, 100), null);
 });
 
 test("distinct same-metadata files are not silently collapsed", () => {

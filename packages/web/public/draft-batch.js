@@ -1,3 +1,10 @@
+export function draftFileError(file, maxBytes, maxNameBytes = 255) {
+  if (!file.name?.trim()) return "File name must not be empty";
+  if (file.size > maxBytes) return `${file.name} exceeds the upload size limit`;
+  if (new TextEncoder().encode(file.name).length > maxNameBytes) return "File names must be 255 bytes or shorter";
+  return null;
+}
+
 export function hasDraftFile(drafts, file) {
   return drafts.some((draft) => draft.file === file);
 }

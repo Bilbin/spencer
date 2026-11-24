@@ -12,6 +12,7 @@ import {
   upsertOwner,
   upsertRequest,
   upsertFollowup,
+  setConversation,
   setWorking,
   clearWorkingFor,
   setOwner,
@@ -28,6 +29,7 @@ import {
   channelStatus,
   relaysDown,
   emit,
+  setExperimental,
 } from "./state.js";
 import { parseHash, hashFor, navigate } from "./router.js";
 import { setSidebarOpen, syncAttention, presenceInfo, mark, activityLine, skeleton } from "./common.js";
@@ -35,6 +37,7 @@ import { ownerView } from "./owner.js";
 import { channelView } from "./channel.js";
 import { transfersView } from "./transfers.js";
 import { mcpView } from "./mcp.js";
+import { soulView } from "./soul.js";
 import { modelView, modelName } from "./model.js";
 import { inboxView } from "./inbox.js";
 import { inviteModal, joinModal } from "./invites.js";
@@ -175,6 +178,7 @@ function renderSidebar() {
       null,
       navItem({ name: "transfers" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("transfer", 16)), h("span.nav-name", null, "Transfers"), badge(pending, "need action", "attn")], { cls: "foot" }),
       navItem({ name: "mcp" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("plug", 16)), h("span.nav-name", null, "MCP servers"), mcpBad ? h("span.pdot.inline.bad", { role: "img", "aria-label": "a server has an error" }) : null], { cls: "foot" }),
+      S.experimental ? navItem({ name: "soul" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("heart", 16)), h("span.nav-name", null, "Soul")], { cls: "foot" }) : null,
       navItem(
         { name: "model" },
         [
@@ -228,6 +232,18 @@ function mount() {
     clear(main).append(skeleton(5));
     return;
   }
+  // The soul page needs experimental features; until the state arrives we do not know yet.
+  if (view.name === "soul" && !S.experimental) {
+    if (S.loaded) {
+      navigate({ name: "owner" });
+      return;
+    }
+    current?.destroy?.();
+    current = null;
+    mountedKey = "";
+    clear(main).append(skeleton(5));
+    return;
+  }
   if (key === mountedKey && current) return;
   current?.destroy?.();
   clear(main);
@@ -236,6 +252,7 @@ function mount() {
   if (view.name === "channel") current = channelView(main, view.ch);
   else if (view.name === "transfers") current = transfersView(main);
   else if (view.name === "mcp") current = mcpView(main);
+  else if (view.name === "soul") current = soulView(main);
   else if (view.name === "model") current = modelView(main);
   else if (view.name === "inbox") current = inboxView(main);
   else current = ownerView(main);
@@ -249,7 +266,7 @@ function onRoute() {
   syncTitle();
 }
 
-const PAGE_TITLES = { model: "Model", mcp: "MCP servers", transfers: "Transfers", inbox: "Needs you" };
+const PAGE_TITLES = { model: "Model", mcp: "MCP servers", soul: "Soul", transfers: "Transfers", inbox: "Needs you" };
 
 function syncTitle() {
   const c = S.view.name === "channel" ? S.channels.get(S.view.ch) : null;
@@ -315,6 +332,9 @@ function handleEvent(ev) {
     case "followup":
       if (ev.followup?.id) upsertFollowup(ev.followup);
       break;
+    case "conversation":
+      if (ev.conversation?.ch) setConversation(ev.conversation);
+      break;
     case "relay": {
       // {type:"relay", ...RelayStatus}: one relay's connection changed; "connected" overall means all are.
       const { type: _t, ...rs } = ev;
@@ -331,6 +351,9 @@ function handleEvent(ev) {
       break;
     case "model":
       if (ev.model?.copilot) setModel(ev.model);
+      break;
+    case "experimental":
+      setExperimental(ev.enabled);
       break;
     default:
       break;
@@ -426,6 +449,15 @@ setTimeout(() => {
     renderSidebar();
   }
 }, 2500);
+
+// Experimental features turned on or off: the soul page and Conversations channels appear or go away.
+on("experimental", () => {
+  if (S.view.name === "soul" && !S.experimental) navigate({ name: "owner" });
+  else if (S.view.name === "channel" || S.view.name === "soul") {
+    mountedKey = "";
+    mount();
+  }
+});
 
 let directNoticeSeen = false;
 on("direct_transfer", () => {

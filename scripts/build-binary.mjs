@@ -109,6 +109,7 @@ await build({
     ].join("\n"),
   },
   legalComments: "none",
+  minify: true,
   logLevel: "warning",
 });
 log(`bundled ${relative(root, bundle)} (${(statSync(bundle).size / 1048576).toFixed(1)} MiB)`);
@@ -171,5 +172,12 @@ for (const target of targets) {
   }
   const digest = sha256(readFileSync(exe));
   writeFileSync(`${exe}.sha256`, `${digest}  spencer-${target}\n`);
-  log(`${relative(root, exe)}: ${(statSync(exe).size / 1048576).toFixed(0)} MiB, sha256 ${digest.slice(0, 16)}…`);
+  const tgz = `${exe}.tar.gz`;
+  rmSync(tgz, { force: true });
+  execFileSync("tar", ["-czf", tgz, "-C", out, `spencer-${target}`]);
+  const tgzDigest = sha256(readFileSync(tgz));
+  writeFileSync(`${tgz}.sha256`, `${tgzDigest}  spencer-${target}.tar.gz\n`);
+  log(
+    `${relative(root, exe)}: ${(statSync(exe).size / 1048576).toFixed(0)} MiB (${(statSync(tgz).size / 1048576).toFixed(0)} MiB .tar.gz), sha256 ${tgzDigest.slice(0, 16)}…`,
+  );
 }

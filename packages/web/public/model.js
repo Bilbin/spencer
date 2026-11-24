@@ -1,7 +1,7 @@
 // Model & settings view: pick any provider/model/thinking effort live, and sign in to GitHub Copilot.
 import { h, icon, copyText } from "./dom.js";
 import { api, attempt, toast } from "./api.js";
-import { S, on, setModel } from "./state.js";
+import { S, on, setModel, setExperimental } from "./state.js";
 import { viewHeader } from "./common.js";
 
 const PLAN = { individual: "Copilot Pro", individual_pro: "Copilot Pro+", business: "Copilot Business", enterprise: "Copilot Enterprise", free: "Copilot Free" };
@@ -44,6 +44,36 @@ export function modelView(main) {
   const now = h("section.model-now", { "aria-live": "polite" });
   const picker = h("section.model-card", { "aria-labelledby": "picker-title" });
   const copilot = h("section.model-card", { "aria-labelledby": "copilot-title" });
+  const about = h("section.model-card", { "aria-labelledby": "about-title" });
+  const convo = h("section.model-card", { "aria-labelledby": "convo-title" });
+  const convoTitle = h("h2.section-title", { id: "convo-title" }, "Conversations model");
+  const expBox = h("input", { type: "checkbox", role: "switch" });
+  const experimental = h(
+    "section.model-card",
+    { "aria-labelledby": "exp-title" },
+    h(
+      "label.switch-row",
+      null,
+      expBox,
+      h(
+        "span",
+        null,
+        h("strong", null, "Experimental features"),
+        h("span.hint.block", null, "Soul (your Spencer's personality, SOUL.md) and Conversations channels (your Spencers chill out and talk on their own). Still being worked on; they may change or use a lot of tokens."),
+      ),
+    ),
+  );
+  const renderExperimental = () => {
+    expBox.checked = S.experimental;
+    convoTitle.hidden = convo.hidden = !S.experimental;
+  };
+  expBox.addEventListener("change", async () => {
+    expBox.disabled = true;
+    const r = await attempt(() => api.setExperimental(expBox.checked));
+    expBox.disabled = false;
+    if (r && typeof r.enabled === "boolean") setExperimental(r.enabled);
+    renderExperimental();
+  });
   main.append(
     viewHeader([
       h("span.title-icon", { "aria-hidden": "true" }, icon("spark", 18)),
@@ -58,8 +88,14 @@ export function modelView(main) {
         now,
         h("h2.section-title", { id: "picker-title" }, "Model picker"),
         picker,
+        convoTitle,
+        convo,
         h("h2.section-title", { id: "copilot-title" }, "GitHub Copilot"),
         copilot,
+        h("h2.section-title", { id: "exp-title" }, "Experimental"),
+        experimental,
+        h("h2.section-title", { id: "about-title" }, "About Spencer"),
+        about,
         h("p.model-foot", null, "Changes take effect immediately without restarting Spencer. Saved API keys live in ", h("code", null, "secrets/credentials.json"), " (mode 0600), never in config.json."),
       ),
     ),
@@ -110,6 +146,7 @@ export function modelView(main) {
     busy = false;
     if (r && typeof r === "object" && "copilot" in r) {
       syncDraftFromModel(r, true);
+      syncConvoDraft(r, true);
       setModel(r);
       if (successMsg) toast(typeof successMsg === "function" ? successMsg(r) : successMsg, "info");
     } else render();
@@ -364,6 +401,148 @@ export function modelView(main) {
     picker.replaceChildren(form);
   };
 
+  // Conversations channels run constantly: they can use their own (cheaper) model. API keys are shared with the picker above.
+  const cdraft = { same: true, provider: "", modelId: "", thinking: "off", baseUrl: "", filter: "", lastKey: null };
+  const syncConvoDraft = (m, force = false) => {
+    const c = m.conversation;
+    const key = JSON.stringify(c ?? null);
+    if (!force && cdraft.lastKey === key) return;
+    cdraft.lastKey = key;
+    cdraft.same = !c;
+    cdraft.provider = c?.provider ?? m.provider ?? "";
+    cdraft.modelId = c?.modelId ?? m.modelId ?? "";
+    cdraft.thinking = c?.thinking ?? "off";
+    cdraft.baseUrl = c?.baseUrl ?? m.baseUrl ?? "";
+  };
+
+  const renderConvo = (m) => {
+    const providers = (m.providers ?? []).filter((p) => p.id !== "github-copilot" || m.copilot?.connected);
+    const c = m.conversation;
+    const status = c
+      ? h(
+          "p.model-convo-status",
+          null,
+          h(`span.dot.${c.ready ? "connected" : "error"}`, { "aria-hidden": "true" }),
+          ` ${providers.find((p) => p.id === c.provider)?.name ?? PROVIDER[c.provider] ?? c.provider} · ${c.modelId ?? "default"}`,
+          c.thinking && c.thinking !== "off" ? h("span.pill.muted", null, `thinking: ${c.thinking}`) : null,
+          c.ready ? null : h("span.pill.bad", null, "Not ready: using the main model"),
+          !c.ready && c.error ? h("span.model-error", null, ` ${c.error}`) : null,
+        )
+      : h("p.model-convo-status.muted", null, "Using the main model.");
+    const sameBox = h("input", {
+      type: "checkbox",
+      role: "switch",
+      checked: cdraft.same,
+      disabled: busy,
+      on: {
+        change: (e) => {
+          cdraft.same = e.target.checked;
+          renderConvo(m);
+        },
+      },
+    });
+    const fields = [];
+    if (!cdraft.same) {
+      if (!providers.some((p) => p.id === cdraft.provider)) cdraft.provider = providers[0]?.id ?? "";
+      const prov = providers.find((p) => p.id === cdraft.provider);
+      const allModels = prov?.models ?? [];
+      const q = cdraft.filter.trim().toLowerCase();
+      const models = q ? allModels.filter((x) => x.id.toLowerCase().includes(q) || x.name.toLowerCase().includes(q)) : allModels;
+      if (prov && !prov.custom && models.length && !models.some((x) => x.id === cdraft.modelId)) cdraft.modelId = models[0].id;
+      // Copilot's Claude models refuse requests with thinking off (see the main picker).
+      const copilotClaude = cdraft.provider === "github-copilot" && /^claude-/i.test(cdraft.modelId);
+      if (copilotClaude && cdraft.thinking === "off") cdraft.thinking = "medium";
+      const filterInput =
+        !prov?.custom && allModels.length > 15
+          ? h("input.input.model-filter", {
+              type: "search",
+              placeholder: `Filter ${allModels.length} models…`,
+              value: cdraft.filter,
+              disabled: busy,
+              on: {
+                input: (e) => {
+                  cdraft.filter = e.target.value;
+                  const pos = e.target.selectionStart;
+                  renderConvo(m);
+                  const again = convo.querySelector(".model-filter");
+                  if (again) {
+                    again.focus();
+                    if (pos !== null) again.setSelectionRange(pos, pos);
+                  }
+                },
+              },
+            })
+          : null;
+      fields.push(
+        h(
+          "div.model-row",
+          null,
+          h(
+            "label.model-pick-label",
+            null,
+            "Provider",
+            h(
+              "select.input.model-select",
+              { disabled: busy, on: { change: (e) => ((cdraft.provider = e.target.value), (cdraft.modelId = ""), (cdraft.filter = ""), renderConvo(m)) } },
+              providers.map((p) => h("option", { value: p.id, selected: p.id === cdraft.provider }, p.name)),
+            ),
+          ),
+          h(
+            "label.model-pick-label.sm",
+            null,
+            "Thinking",
+            h(
+              "select.input.model-select",
+              { disabled: busy, on: { change: (e) => (cdraft.thinking = e.target.value) } },
+              THINKING_OPTIONS.filter(([v]) => !copilotClaude || v !== "off").map(([v, label]) => h("option", { value: v, selected: cdraft.thinking === v }, label)),
+            ),
+          ),
+        ),
+        prov?.custom
+          ? [
+              h("label.model-pick-label", null, "Model ID", h("input.input.mono", { type: "text", value: cdraft.modelId, disabled: busy, on: { input: (e) => (cdraft.modelId = e.target.value) } })),
+              h("label.model-pick-label", null, "Base URL", h("input.input.mono", { type: "url", placeholder: "http://localhost:11434/v1", value: cdraft.baseUrl, disabled: busy, on: { input: (e) => (cdraft.baseUrl = e.target.value) } })),
+            ]
+          : h(
+              "label.model-pick-label",
+              null,
+              "Model",
+              filterInput,
+              h(
+                "select.input.model-select",
+                { disabled: busy || !models.length, on: { change: (e) => ((cdraft.modelId = e.target.value), renderConvo(m)) } },
+                models.length ? models.map((x) => h("option", { value: x.id, selected: x.id === cdraft.modelId }, x.name === x.id ? x.id : `${x.name} (${x.id})`)) : h("option", { value: "" }, "No models available"),
+              ),
+            ),
+      );
+    }
+    const save = h("button.btn.primary", { type: "submit", disabled: busy || (cdraft.same && !c) }, "Save");
+    const form = h(
+      "form.model-form",
+      {
+        on: {
+          submit: (e) => {
+            e.preventDefault();
+            if (cdraft.same) return void act(() => api.setConversationModel(null), "Conversations use the main model");
+            const mid = cdraft.modelId.trim();
+            if (!mid) return toast("Pick or enter a model ID");
+            const prov = providers.find((p) => p.id === cdraft.provider);
+            if (prov?.custom && !cdraft.baseUrl.trim()) return toast("Base URL is required for OpenAI-compatible servers");
+            const claude = cdraft.provider === "github-copilot" && /^claude-/i.test(mid);
+            const opts = { thinking: claude && cdraft.thinking === "off" ? "medium" : cdraft.thinking, ...(prov?.custom ? { baseUrl: cdraft.baseUrl.trim() } : {}) };
+            void act(() => api.setConversationModel(cdraft.provider, mid, opts), `Conversations now use ${mid}`);
+          },
+        },
+      },
+      h("p.hint", null, "Conversations channels chat all day, so they can use a different (cheaper) model. API keys come from the picker above."),
+      status,
+      h("label.switch-row", null, sameBox, h("span", null, "Same as the main model")),
+      ...fields,
+      h("div.model-actions", null, save),
+    );
+    convo.replaceChildren(form);
+  };
+
   const signInBox = (c) => {
     const si = c.signIn;
     if (si?.state === "waiting") {
@@ -482,9 +661,45 @@ export function modelView(main) {
     );
   };
 
+  const renderAbout = () => {
+    const raw = S.version?.trim() || "";
+    const verLabel = raw ? (/^\d/.test(raw) ? `v${raw}` : raw) : "Unknown";
+    const rows = [
+      h(
+        "div.about-row",
+        null,
+        h("span.about-label", null, "Version"),
+        h(
+          "div.about-val",
+          null,
+          h("code.mono", null, verLabel),
+          raw
+            ? h(
+                "button.btn.sm.ghost",
+                {
+                  type: "button",
+                  on: { click: async () => toast((await copyText(verLabel)) ? "Version copied" : "Couldn't copy version", "info") },
+                },
+                icon("copy", 13),
+                "Copy",
+              )
+            : null,
+        ),
+      ),
+    ];
+    if (S.relay?.url) {
+      rows.push(h("div.about-row", null, h("span.about-label", null, "Default hub"), h("div.about-val", null, h("code.mono", null, S.relay.url))));
+    }
+    if (S.me?.fingerprint) {
+      rows.push(h("div.about-row", null, h("span.about-label", null, "Fingerprint"), h("div.about-val", null, h("code.mono", null, S.me.fingerprint))));
+    }
+    about.replaceChildren(h("div.about-list", null, ...rows));
+  };
+
   const render = () => {
     const m = S.model;
     renderNow(m);
+    renderAbout();
     if (!m) {
       picker.replaceChildren();
       copilot.replaceChildren();
@@ -492,16 +707,21 @@ export function modelView(main) {
     }
     syncDraftFromModel(m);
     renderPicker(m);
+    syncConvoDraft(m);
+    renderConvo(m);
     copilot.replaceChildren(m.copilot.connected ? connectedBox(m) : signInBox(m.copilot));
   };
 
   render();
+  renderExperimental();
   attempt(() => api.model()).then((r) => r && setModel(r));
   const off = on("model", render);
+  const offExp = on("experimental", renderExperimental);
   return {
     destroy: () => {
       clearInterval(tick);
       off();
+      offExp();
     },
   };
 }

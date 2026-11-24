@@ -179,7 +179,7 @@ export function composer({ placeholder, label, hint, left, popup, drafts, canSen
   };
   const submit = async () => {
     const text = input.value.trim();
-    if (busy || (!text && !canSend?.())) return;
+    if (busy || isBusy?.() || (!text && !canSend?.())) return;
     busy = true;
     input.value = "";
     sync();

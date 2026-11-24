@@ -8,6 +8,7 @@ import { TransferStore } from "../../src/transfers/store.ts";
 import { generateIdentity, pairKey, randomId } from "@spencer/protocol";
 import type { FileBody } from "@spencer/protocol";
 import { createTransferService, fakeCrocRunner, TransferError } from "../../src/transfers/index.ts";
+import { writeAll } from "../../src/transfers/write-all.ts";
 import type { FakeCrocRunner } from "../../src/transfers/index.ts";
 import { pair, sleep, waitFor } from "./harness.ts";
 import type { TransferP2pAdapter } from "../../src/contracts.ts";
@@ -47,6 +48,47 @@ afterEach(async () => {
 const noApproval = { policy: { requireApprovalForOutgoingFiles: false } };
 
 describe("transfers (fake croc)", () => {
+  it("writes every byte when a writer reports partial progress", async () => {
+    const output: number[] = [];
+    const writer = {
+      async write(buffer: Uint8Array, offset: number, length: number) {
+        const bytesWritten = Math.min(2, length);
+        output.push(...buffer.subarray(offset, offset + bytesWritten));
+        return { bytesWritten };
+      },
+    };
+    await writeAll(writer, Buffer.from("partial writes are complete"));
+    assert.equal(Buffer.from(output).toString(), "partial writes are complete");
+  });
+
+  it("rejects conflicting concurrent uploadId requests with a typed error while matching retries share a transfer", async () => {
+    const { A, ch } = await setup({ a: noApproval });
+    const peerTwo = generateIdentity().id;
+    A.peersOf.set(ch, [...A.peersOf.get(ch)!, peerTwo]);
+    const upload = (bytes: string, uploadId: string, to = A.peersOf.get(ch)![0]) => A.s.requestUpload(ch, {
+      name: "same.txt",
+      uploadId,
+      to,
+      bytes: (async function* () { yield Buffer.from(bytes); })(),
+    });
+
+    const matching = await Promise.all([upload("same bytes", "upload-race-match-0001"), upload("same bytes", "upload-race-match-0001")]);
+    assert.equal(matching[0].tid, matching[1].tid);
+    assert.equal(A.s.list(ch).length, 1);
+
+    const contentRace = await Promise.allSettled([upload("content one", "upload-race-content-01"), upload("content two", "upload-race-content-01")]);
+    const rejectedContent = contentRace.find((result) => result.status === "rejected");
+    assert.ok(rejectedContent && rejectedContent.status === "rejected");
+    assert.ok(rejectedContent.reason instanceof TransferError);
+    assert.equal(rejectedContent.reason.code, "conflict");
+
+    const recipientRace = await Promise.allSettled([upload("recipient race", "upload-race-recipient-1", A.peersOf.get(ch)![0]), upload("recipient race", "upload-race-recipient-1", peerTwo)]);
+    const rejectedRecipient = recipientRace.find((result) => result.status === "rejected");
+    assert.ok(rejectedRecipient && rejectedRecipient.status === "rejected");
+    assert.ok(rejectedRecipient.reason instanceof TransferError);
+    assert.equal(rejectedRecipient.reason.code, "conflict");
+  });
+
   it("happy path: owner send, auto-accept, file lands in quarantine", async () => {
     const { A, B, ch, bus } = await setup({ a: noApproval });
     const { path, data } = makeFile(A, "report final.pdf");
@@ -103,6 +145,10 @@ describe("transfers (fake croc)", () => {
     A.peersOf.set(ch, [...A.peersOf.get(ch)!, secondPeer]);
     const groupUpload = await A.s.requestUpload(ch, { name: "group.bin", uploadId: "upload-key-group-0001", to: secondPeer, bytes: (async function* () { yield Buffer.from("group"); })() });
     assert.equal(groupUpload.peer, secondPeer, "group upload keeps the explicit single recipient");
+    A.peersOf.set(ch, A.peersOf.get(ch)!.filter((peer) => peer !== secondPeer));
+    const retryAfterLeave = await A.s.requestUpload(ch, { name: "group.bin", uploadId: "upload-key-group-0001", to: secondPeer, bytes: (async function* () { yield Buffer.from("group"); })() });
+    assert.equal(retryAfterLeave.tid, groupUpload.tid, "a retry still resolves an accepted transfer after the recipient leaves");
+    await assert.rejects(A.s.requestUpload(ch, { name: "group.bin", uploadId: "upload-key-group-0001", to: A.peersOf.get(ch)![0], bytes: (async function* () { yield Buffer.from("group"); })() }), (error: unknown) => error instanceof TransferError && error.code === "conflict");
 
     await assert.rejects(A.s.requestUpload(ch, {
       name: "broken.txt",

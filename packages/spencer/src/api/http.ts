@@ -22,6 +22,8 @@ export interface ApiBackend {
   updateChannel(ch: string, patch: Record<string, unknown>): Channel;
   leaveChannel(ch: string): Promise<void>;
   acceptInvite(link: string): Promise<Channel>;
+  /** Turn experimental features (SOUL.md, Conversations channels) on or off. */
+  setExperimental(enabled: boolean): Promise<{ enabled: boolean }>;
   /** Absolute path of the static UI, or undefined for the placeholder page. */
   webRoot?: string;
 }
@@ -67,6 +69,7 @@ class HttpError extends Error {
 function errorStatus(e: unknown): number {
   if (e instanceof HttpError || e instanceof UserError) return e.status;
   const err = e as { status?: unknown; statusCode?: unknown; code?: unknown; message?: unknown };
+  if (err?.code === "conflict") return 409;
   for (const s of [err?.status, err?.statusCode]) {
     if (typeof s === "number" && s >= 400 && s < 600) return s;
   }
@@ -157,6 +160,32 @@ function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
       }
     });
   });
+}
+
+/** The options of a model choice (PUT /api/model and /api/model/conversation). */
+function modelOptions(body: Record<string, unknown>): import("../contracts.ts").SetModelOptions {
+  const opts: import("../contracts.ts").SetModelOptions = {};
+  if (body.thinking !== undefined) {
+    if (typeof body.thinking !== "string") throw new HttpError(400, "thinking must be a string");
+    opts.thinking = body.thinking as import("../contracts.ts").SetModelOptions["thinking"];
+  }
+  if (body.apiKey !== undefined) {
+    if (typeof body.apiKey !== "string") throw new HttpError(400, "apiKey must be a string");
+    opts.apiKey = body.apiKey;
+  }
+  if (body.clearApiKey !== undefined) {
+    if (typeof body.clearApiKey !== "boolean") throw new HttpError(400, "clearApiKey must be a boolean");
+    opts.clearApiKey = body.clearApiKey;
+  }
+  if (body.apiKeyEnv !== undefined) {
+    if (typeof body.apiKeyEnv !== "string") throw new HttpError(400, "apiKeyEnv must be a string");
+    opts.apiKeyEnv = body.apiKeyEnv;
+  }
+  if (body.baseUrl !== undefined) {
+    if (typeof body.baseUrl !== "string") throw new HttpError(400, "baseUrl must be a string");
+    opts.baseUrl = body.baseUrl;
+  }
+  return opts;
 }
 
 function intParam(v: string | null, def: number, max: number): number {
@@ -312,6 +341,15 @@ export class ApiServer {
 
     if (p === "/api/state" && method === "GET") return b.state();
 
+    if (p === "/api/experimental" && method === "PUT") {
+      const body = await readJson(req);
+      if (typeof body.enabled !== "boolean") throw new HttpError(400, "enabled must be a boolean");
+      return await b.setExperimental(body.enabled);
+    }
+    const experimental = () => {
+      if (!b.core.config().experimental) throw new HttpError(403, "experimental features are off (Model & settings → Experimental)");
+    };
+
     if (p === "/api/owner/messages") {
       if (method === "GET") return { items: await b.agent().ownerTranscript(intParam(q.get("limit"), 200, 2000)) };
       if (method === "POST") {
@@ -366,17 +404,30 @@ export class ApiServer {
         if (!c) throw new HttpError(404, "unknown channel");
         return c;
       }
-      if (method === "PATCH") return b.updateChannel(ch, await readJson(req));
+      if (method === "PATCH") {
+        const body = await readJson(req);
+        if (body.heated !== undefined) experimental();
+        return b.updateChannel(ch, body);
+      }
       if (method === "DELETE") {
         await b.leaveChannel(ch);
         return {};
       }
     }
 
+    if ((m = /^\/api\/channels\/([A-Za-z0-9_-]{1,64})\/conversation(\/start)?$/.exec(p))) {
+      experimental();
+      const agent = b.agent();
+      if (!agent.conversationStatus || !agent.startConversation) throw new HttpError(404, "conversations are not supported");
+      if (!m[2] && method === "GET") return agent.conversationStatus(m[1]!);
+      if (m[2] && method === "POST") return await agent.startConversation(m[1]!);
+    }
+
     if (p === "/api/invites" && method === "POST") {
       const body = await readJson(req);
       if (body.relay !== undefined && typeof body.relay !== "string") throw new UserError(400, "relay must be a string");
-      return await b.core.createInvite(body.kind as "direct" | "group", body.name as string, body.relay as string | undefined);
+      if (body.kind === "conversation") experimental();
+      return await b.core.createInvite(body.kind as "direct" | "group" | "conversation", body.name as string, body.relay as string | undefined);
     }
     if (p === "/api/invites/accept" && method === "POST") {
       const body = await readJson(req);
@@ -448,6 +499,18 @@ export class ApiServer {
 
     if (p === "/api/mcp" && method === "GET") return { servers: b.agent().mcpStatus() };
 
+    if (p === "/api/soul") {
+      experimental();
+      const agent = b.agent();
+      if (!agent.soul || !agent.setSoul) throw new HttpError(404, "SOUL.md is not supported");
+      if (method === "GET") return agent.soul();
+      if (method === "PUT") {
+        const body = await readJson(req);
+        if (typeof body.text !== "string") throw new HttpError(400, "text must be a string");
+        return await agent.setSoul(body.text);
+      }
+    }
+
     if (p === "/api/model") {
       const agent = b.agent();
       if (!agent.refreshModelStatus || !agent.setModel) throw new HttpError(404, "model settings are not supported");
@@ -455,29 +518,18 @@ export class ApiServer {
       if (method === "PUT") {
         const body = await readJson(req);
         if (typeof body.provider !== "string" || typeof body.modelId !== "string") throw new HttpError(400, "provider and modelId are required");
-        const opts: import("../contracts.ts").SetModelOptions = {};
-        if (body.thinking !== undefined) {
-          if (typeof body.thinking !== "string") throw new HttpError(400, "thinking must be a string");
-          opts.thinking = body.thinking as import("../contracts.ts").SetModelOptions["thinking"];
-        }
-        if (body.apiKey !== undefined) {
-          if (typeof body.apiKey !== "string") throw new HttpError(400, "apiKey must be a string");
-          opts.apiKey = body.apiKey;
-        }
-        if (body.clearApiKey !== undefined) {
-          if (typeof body.clearApiKey !== "boolean") throw new HttpError(400, "clearApiKey must be a boolean");
-          opts.clearApiKey = body.clearApiKey;
-        }
-        if (body.apiKeyEnv !== undefined) {
-          if (typeof body.apiKeyEnv !== "string") throw new HttpError(400, "apiKeyEnv must be a string");
-          opts.apiKeyEnv = body.apiKeyEnv;
-        }
-        if (body.baseUrl !== undefined) {
-          if (typeof body.baseUrl !== "string") throw new HttpError(400, "baseUrl must be a string");
-          opts.baseUrl = body.baseUrl;
-        }
-        return await agent.setModel(body.provider, body.modelId, opts);
+        return await agent.setModel(body.provider, body.modelId, modelOptions(body));
       }
+    }
+    if (p === "/api/model/conversation" && method === "PUT") {
+      experimental();
+      const agent = b.agent();
+      if (!agent.setConversationModel) throw new HttpError(404, "model settings are not supported");
+      const body = await readJson(req);
+      // provider null: Conversations channels use the main model again.
+      if (body.provider === null) return await agent.setConversationModel(null, "");
+      if (typeof body.provider !== "string" || typeof body.modelId !== "string") throw new HttpError(400, "provider and modelId are required");
+      return await agent.setConversationModel(body.provider, body.modelId, modelOptions(body));
     }
     if ((m = /^\/api\/auth\/github-copilot\/(login|cancel|refresh|logout|cli)$/.exec(p)) && method === "POST") {
       const agent = b.agent();

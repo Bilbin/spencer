@@ -7,12 +7,14 @@
  * the owner allowed for that channel, or all of them when the channel is fully trusted. No shell, no file reading,
  * no coding tools, ever.
  * Both: schedule_followup and cancel_followup (reminders the agent sets on itself, see followups.ts).
+ * Conversations channels also get search_news (headlines to argue about, see news.ts).
  *
  * Tools are global by name (see `ToolSpec`): every execute derives its channel from `ctx.conversationKey`.
  */
 import type { Channel, ChannelMember, CoreServices } from "../contracts.ts";
 import { nameHandles } from "../policy.ts";
 import type { ToolSpec, ToolContext } from "./runtime.ts";
+import { fetchNews, formatNews, type FetchLike } from "./news.ts";
 import { escapeAttr, escapeBody, wrapPeerMessage } from "./untrusted.ts";
 
 export const MAX_CHAT_TEXT = 16_000;
@@ -32,12 +34,15 @@ export interface ToolDeps {
     schedule(key: string, args: { inMinutes: number; note: string; onReplyFrom?: string }): Promise<string | { text: string; isError: true }>;
     cancel(key: string, id: string): Promise<string | { text: string; isError: true }>;
   };
+  /** `search_news`'s HTTP client (tests replace it). */
+  fetch?: FetchLike;
   log?(msg: string): void;
 }
 
 export const OWNER_TOOL_NAMES = ["list_peers", "send_message", "send_file", "list_transfers", "read_channel", "create_invite"];
 export const CHANNEL_TOOL_NAMES = ["notify_owner", "ask_owner", "propose_file_send"];
 export const FOLLOWUP_TOOL_NAMES = ["schedule_followup", "cancel_followup"];
+export const CONVERSATION_TOOL_NAMES = ["search_news"];
 /** Bounds of `schedule_followup`'s `in_minutes`: at least a minute (no tight self-polling), at most a week. */
 export const FOLLOWUP_MIN_MINUTES = 1;
 export const FOLLOWUP_MAX_MINUTES = 7 * 24 * 60;
@@ -278,19 +283,33 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
         ].join("\n");
       },
     },
-    {
-      name: "create_invite",
-      description: "Create a new channel and its invite link (direct: one other person; group: several). Give the link to your owner to share.",
-      parameters: schema({ kind: { type: "string", enum: ["direct", "group"] }, name: str("Channel name"), relay: str("Relay URL") }, ["kind", "name"]),
-      async execute(args: { kind: "direct" | "group"; name: string; relay?: string }) {
-        if (args.kind !== "direct" && args.kind !== "group") return fail("kind must be direct or group");
-        const name = String(args.name ?? "").trim();
-        if (!name) return fail("name is required");
-        const { link, channel } = await core.createInvite(args.kind, name.slice(0, 100), args.relay);
-        return `Created ${channel.kind} channel "${channel.name}" (${channel.id}). Invite link (share it privately): ${link}`;
-      },
-    },
+    inviteTool(core, false),
   ];
+}
+
+/**
+ * `create_invite`. Conversations channels are experimental: the kind is offered only while experimental features are
+ * on (the agent swaps in the `conversations: true` spec then; the two differ in description, so the tool is rebuilt).
+ */
+export function inviteTool(core: CoreServices, conversations: boolean): ToolSpec {
+  const kinds = conversations ? ["direct", "group", "conversation"] : ["direct", "group"];
+  return {
+    name: "create_invite",
+    description:
+      "Create a new channel and its invite link (direct: one other person; group: several" +
+      (conversations ? "; conversation: a group where the Spencers start debates on their own" : "") +
+      "). Give the link to your owner to share.",
+    parameters: schema({ kind: { type: "string", enum: kinds }, name: str("Channel name"), relay: str("Relay URL") }, ["kind", "name"]),
+    async execute(args: { kind: "direct" | "group" | "conversation"; name: string; relay?: string }) {
+      if (!kinds.includes(args.kind) || (args.kind === "conversation" && !core.config().experimental)) {
+        return fail(`kind must be ${kinds.slice(0, -1).join(", ")} or ${kinds.at(-1)}`);
+      }
+      const name = String(args.name ?? "").trim();
+      if (!name) return fail("name is required");
+      const { link, channel } = await core.createInvite(args.kind, name.slice(0, 100), args.relay);
+      return `Created ${channel.mode === "conversation" ? "Conversations" : channel.kind} channel "${channel.name}" (${channel.id}). Invite link (share it privately): ${link}`;
+    },
+  };
 }
 
 // ------------------------------------------------------------------ channel tools
@@ -405,6 +424,29 @@ export function followupTools(deps: ToolDeps): ToolSpec[] {
         const id = String(args.id ?? "").trim();
         if (!id) return fail("id is required");
         return deps.followups.cancel(ctx.conversationKey, id);
+      },
+    },
+  ];
+}
+
+// ------------------------------------------------------------------ Conversations channels
+
+export function conversationTools(deps: ToolDeps): ToolSpec[] {
+  return [
+    {
+      name: "search_news",
+      description:
+        "Current news headlines from Google News: the top stories right now, or the latest about `query` (e.g. \"politics\", " +
+        "\"controversy\", a name). Use it to find the hottest, most divisive story to open a conversation with, or to hit back " +
+        "with a fact in a debate.",
+      parameters: schema({ query: str("What to search for; leave it out for today's top stories") }),
+      async execute(args: { query?: string }) {
+        const query = typeof args.query === "string" ? args.query : undefined;
+        try {
+          return formatNews(query, await fetchNews(query, deps.fetch));
+        } catch (e) {
+          return fail(`could not read the news: ${(e as Error).message}`);
+        }
       },
     },
   ];
