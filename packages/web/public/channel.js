@@ -3,6 +3,8 @@ import { h, icon, iconButton, richText, shortFp, timeShort, timeFull, autoGrow, 
 import { api, attempt, toast } from "./api.js";
 import { S, on, isConversation, setConversation, setMessages, upsertTransfer, upsertChannel, removeChannel, markRead, peers, channelTitle, allMcpTools, workingIn, workingOf, presenceOf } from "./state.js";
 import { markdown } from "./md.js";
+import { joinModal } from "./invites.js";
+import { inviteLinks, suppressQuietNotice } from "./chat-polish.js";
 import { viewHeader, composer, SEND_HINT, stage, skeleton, emptyState, trace, mark, presenceInfo, activityLine, followupList } from "./common.js";
 import { transferCard } from "./transfers.js";
 import { openModal, field } from "./modal.js";
@@ -123,12 +125,12 @@ function systemLine(c, m) {
 }
 
 /** A chat turn. `cont`: it continues the previous turn by the same speaker (no header). `hideRef`: the parent is right above. */
-function messageRow(c, m, byId, names, myNames, cont, hideRef) {
+function messageRow(c, m, byId, names, myNames, cont, hideRef, hideNote) {
   const who = speaker(c, m);
   const time = h("time", { datetime: new Date(m.ts).toISOString(), title: timeFull(m.ts) }, timeShort(m.ts));
   const failed = m.mine && m.status === "failed";
   let note = null;
-  if (!m.mine && m.note) note = h("p.route-note", null, NOTE_LABEL[m.note] ?? `Your Spencer stayed quiet: ${m.note}.`);
+  if (!m.mine && m.note && !hideNote) note = h("p.route-note", null, NOTE_LABEL[m.note] ?? `Your Spencer stayed quiet: ${m.note}.`);
   else if (failed) note = h("p.route-note.failed", null, icon("warn", 13), ` The relay rejected this message${m.note ? `: ${m.note}` : ""}. It will not be retried.`);
   const head = cont
     ? null
@@ -150,7 +152,7 @@ function messageRow(c, m, byId, names, myNames, cont, hideRef) {
     `div.msg.${who.kind}${who.mine ? ".mine" : ""}${cont ? ".cont" : ""}${failed ? ".failed" : ""}`,
     { id: `m-${m.id}` },
     h("div.msg-gutter", null, cont ? [h("span.gutter-time", { "aria-hidden": "true" }, timeShort(m.ts).replace(/\s?[AP]M$/i, "")), statusMark(m)] : who.avatar()),
-    h("div.msg-body", null, head, hideRef ? null : replyRef(c, m, byId), h("div.msg-text.md", null, markdown(m.text ?? "", (s) => richText(s, names, myNames))), m.final && !failed ? h("p.route-note.end", { title: "The sender closed this exchange and expects no answer" }, icon("check", 12), " Ended the exchange") : null, note),
+    h("div.msg-body", null, head, hideRef ? null : replyRef(c, m, byId), h("div.msg-text.md", null, markdown(m.text ?? "", (s) => richText(s, names, myNames))), inviteLinks(m.text ?? "").map((link) => h("button.btn", { type: "button", on: { click: () => joinModal(link) } }, "Join channel")), m.final && !failed ? h("p.route-note.end", { title: "The sender closed this exchange and expects no answer" }, icon("check", 12), " Ended the exchange") : null, note),
   );
   if (!who.mine) row.style.setProperty("--h", String(hue(who.id)));
   return row;
@@ -840,11 +842,11 @@ export function channelView(main, chId) {
     if (!c) return;
     const tools = c.allowedMcpTools ?? [];
     const full = c.trust === "full";
-    members.replaceChildren(
+    members.replaceChildren(...[
       h("div.members-head", null, h("h2", null, c.kind === "group" ? "In this group" : "In this channel"), iconButton("close", "Close members", () => setMembersOpen(false), "members-close")),
       h("ul.member-list", null, c.members.map((m) => memberRow(c, m))),
       isConversation(c) ? conversationSection(c) : null,
-      ...[followupList(c.id, { title: "Your Spencer will follow up" })].filter(Boolean),
+      followupList(c.id, { title: "Your Spencer will follow up" }),
       h(
         "section.access",
         { "aria-label": "Access" },
@@ -871,7 +873,7 @@ export function channelView(main, chId) {
         h("div.access-row", null, icon("reply", 15), h("div", null, h("strong", null, c.autoReply ? "Auto-reply on" : "Auto-reply off"), h("p", null, c.autoReply ? (isConversation(c) ? "Your Spencer talks on its own, and answers anyone who writes here." : c.kind === "group" ? "Your Spencer answers when mentioned." : "Your Spencer answers on its own.") : "Your Spencer only listens."))),
         h("button.btn.sm", { type: "button", on: { click: () => settingsModal(c) } }, icon("gear", 14), "Channel settings"),
       ),
-    );
+    ].filter(Boolean));
   };
 
   const renderHeader = () => {
@@ -968,7 +970,7 @@ export function channelView(main, chId) {
         const pm = prev?.m?.type === "chat" ? prev.m : null;
         const sameSpeaker = pm && pm.from === m.from && (pm.by ?? "") === (m.by ?? "") && m.ts - pm.ts < GROUP_MS;
         const repliesToPrev = pm && m.replyTo === pm.id;
-        nodes.push(messageRow(c, m, byId, names, myNames, !!sameSpeaker && (!m.replyTo || repliesToPrev), !!repliesToPrev));
+        nodes.push(messageRow(c, m, byId, names, myNames, !!sameSpeaker && (!m.replyTo || repliesToPrev), !!repliesToPrev, c.kind === "group" && suppressQuietNotice(pm, m)));
       }
       prev = it;
     }

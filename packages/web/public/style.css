@@ -412,9 +412,6 @@ time {
 .act-server {
   font-weight: 600;
 }
-.act-server::after {
-  content: " ";
-}
 .act-verb {
   margin-right: 0.5em;
   color: var(--ink-3);
