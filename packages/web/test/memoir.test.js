@@ -194,3 +194,52 @@ test("inactive directory, unseen badge counts and debounced memoir refresh", asy
   assert.equal(calls, 2);
   view.destroy();
 });
+
+test("Peer Card preserves in-flight rule edits, refreshes notes while rules are dirty, and preserves note drafts across WS reloads", async () => {
+  mount();
+  reset();
+  let releaseSave;
+  const origSetRules = api.setRules;
+  api.setRules = async (kind, id, text) => {
+    await new Promise((r) => (releaseSave = r));
+    profile.rules = text.trim();
+    return structuredClone(profile);
+  };
+  try {
+    memoirModal("peer", "bob");
+    await flush();
+    const dialog = document.querySelector('[role="dialog"]');
+    const rules = dialog.querySelector("textarea");
+    const addInput = dialog.querySelector('input[aria-label="Add note"]');
+
+    // Finding 2: edit rules during in-flight save is preserved
+    rules.value = "submitted";
+    rules.dispatchEvent(new browser.Event("input"));
+    button(dialog, "Save").click();
+    rules.value = "new unsaved edit";
+    rules.dispatchEvent(new browser.Event("input"));
+    releaseSave();
+    await flush();
+    await flush();
+    assert.equal(dialog.querySelector("textarea").value, "new unsaved edit");
+
+    // Finding 4: dirty rules do NOT freeze Add / Pin / Delete note updates, and Add clears input
+    addInput.value = "While rules dirty";
+    dialog.querySelector("form").dispatchEvent(new browser.Event("submit", { cancelable: true }));
+    await flush();
+    await flush();
+    assert.match(dialog.textContent, /While rules dirty/);
+    assert.equal(addInput.value, "");
+    assert.equal(dialog.querySelector("textarea").value, "new unsaved edit");
+
+    // Finding 5: WS memoir reload preserves unsaved Add note draft
+    addInput.value = "unsaved note draft";
+    emit("memoir", { scopeKind: "peer", scopeId: "bob" });
+    await new Promise((r) => setTimeout(r, 180));
+    await flush();
+    assert.equal(dialog.querySelector('input[aria-label="Add note"]').value, "unsaved note draft");
+    closeModal();
+  } finally {
+    api.setRules = origSetRules;
+  }
+});

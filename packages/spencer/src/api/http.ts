@@ -462,12 +462,13 @@ export class ApiServer {
       if (method === "GET") return b.core.bio();
       if (method === "PUT") return b.core.setBio((await readJson(req)).text);
     }
-    if (
-      (m =
-        /^\/api\/(peers|channels)\/([^/]+)\/(memoir|rules|notes)(\/seen)?$/.exec(
-          p,
-        ))
-    ) {
+    if ((m = /^\/api\/peers\/([^/]+)\/memoir\/seen$/.exec(p)) && method === "POST") {
+      const scope = { kind: "peer" as const, id: m[1]! };
+      b.core.memoir.profile(scope);
+      b.core.memoir.markSeen(scope);
+      return {};
+    }
+    if ((m = /^\/api\/(peers|channels)\/([^/]+)\/(memoir|rules|notes)$/.exec(p))) {
       const scope = {
         kind: m[1] === "peers" ? ("peer" as const) : ("channel" as const),
         id: m[2]!,
@@ -477,10 +478,6 @@ export class ApiServer {
       if (m[3] === "memoir" && method === "GET") {
         if (q.get("markSeen") === "1") store.markSeen(scope);
         return store.profile(scope);
-      }
-      if (m[3] === "memoir" && m[4] && method === "POST") {
-        store.markSeen(scope);
-        return {};
       }
       if (m[3] === "rules" && method === "PUT") {
         store.writeRules(scope, (await readJson(req)).text);

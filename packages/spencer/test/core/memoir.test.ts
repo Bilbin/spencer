@@ -208,6 +208,14 @@ test("authenticated memoir HTTP, events, group boundaries, leave cleanup and ina
     await waitFor(() =>
       frames.some((f) => f.includes('"type":"memoir"') && f.includes(id)),
     );
+    assert.equal(
+      (await request("PUT", `/api/peers/${id}/rules/seen`, { text: "bad" })).status,
+      404,
+    );
+    assert.equal(
+      (await request("POST", `/api/peers/${id}/notes/seen`, { text: "bad" })).status,
+      404,
+    );
     await a.daemon.channels.leave(ch);
     assert.equal(
       existsSync(join(a.daemon.dataDir, "channels", ch, "RULES.md")),
@@ -339,6 +347,49 @@ test("agent refresh is scope-local, leading/trailing throttled, owner writes imm
     store.stop();
     t.mock.timers.tick(120_000);
     assert.equal(changes.length, count);
+  } finally {
+    store.stop();
+    db.close();
+    tmp.cleanup();
+  }
+});
+
+test("recordAgentNote rolls back rate slot and insert atomically when eviction fails", () => {
+  const tmp = tempDir();
+  const db = openDb(tmp.dir);
+  const peer = generateIdentity();
+  const ch = randomId();
+  const events: unknown[] = [];
+  const store = new Memoir({
+    db,
+    dataDir: tmp.dir,
+    peers: () => [
+      {
+        id: peer.id,
+        name: "Bob",
+        about: null,
+        aboutAt: null,
+        fingerprint: peer.id,
+        channels: [],
+        active: true,
+        hasRules: false,
+        noteCount: 0,
+        unseenNotes: 0,
+      },
+    ],
+    channels: () => [],
+    events: { emit: (e) => events.push(e) },
+    refresh() {},
+  });
+  const scope = { kind: "peer", id: peer.id } as const;
+  try {
+    for (let i = 0; i < 20; i++) store.addOwnerNote(scope, `seed ${i}`);
+    events.length = 0;
+    db.exec("CREATE TRIGGER fail_evict BEFORE DELETE ON memoir_notes BEGIN SELECT RAISE(ABORT, 'evict failed'); END;");
+    assert.throws(() => store.recordAgentNote(scope, "overflow", ch, "standard", peer.id), /evict failed/);
+    assert.equal(store.notes(scope).length, 20);
+    assert.equal(Number(db.prepare("SELECT count(*) AS n FROM memoir_rate").get()!.n), 0);
+    assert.equal(events.length, 0);
   } finally {
     store.stop();
     db.close();

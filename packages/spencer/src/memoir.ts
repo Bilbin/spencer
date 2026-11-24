@@ -160,6 +160,21 @@ export class Memoir {
       2000,
     );
   }
+  private tx<T>(fn: () => T): T {
+    this.d.db.exec("BEGIN IMMEDIATE");
+    try {
+      const out = fn();
+      this.d.db.exec("COMMIT");
+      return out;
+    } catch (e) {
+      try {
+        this.d.db.exec("ROLLBACK");
+      } catch {
+        /* ignore rollback failure */
+      }
+      throw e;
+    }
+  }
   addOwnerNote(
     s: MemoirScope,
     text: unknown,
@@ -168,7 +183,12 @@ export class Memoir {
     this.require(s);
     if (typeof pinned !== "boolean")
       throw new UserError(400, "pinned must be boolean");
-    return this.insert(s, noteText(text), "owner", null, "owner", null, pinned);
+    const clean = noteText(text);
+    const note = this.tx(() =>
+      this.insertRow(s, clean, "owner", null, "owner", null, pinned),
+    );
+    this.changed(s, false);
+    return note;
   }
   recordAgentNote(
     s: MemoirScope,
@@ -181,37 +201,47 @@ export class Memoir {
     if (!isB64uId(sourceCh) || (asker !== undefined && !isB64uId(asker, 32)))
       throw new UserError(400, "invalid provenance");
     const clean = noteText(text);
-    const duplicate = this.notes(s).find(
-      (n) =>
-        n.text.normalize("NFKC").toLowerCase() ===
-        clean.normalize("NFKC").toLowerCase(),
-    );
-    if (duplicate) return duplicate;
-    const now = Date.now();
-    this.d.db
-      .prepare("DELETE FROM memoir_rate WHERE at <= ?")
-      .run(now - 600_000);
-    const count = this.d.db
-      .prepare(
-        "SELECT count(*) AS n FROM memoir_rate WHERE scope_kind=? AND scope_id=?",
-      )
-      .get(s.kind, s.id)!;
-    if (Number(count.n) >= 5)
-      throw new UserError(429, "memoir note rate limit: 5 per 10 minutes");
-    this.d.db
-      .prepare("INSERT INTO memoir_rate VALUES (?,?,?)")
-      .run(s.kind, s.id, now);
-    return this.insert(
-      s,
-      clean,
-      "agent",
-      sourceCh,
-      trust,
-      asker ?? null,
-      false,
-    );
+    const { note, mutated } = this.tx(() => {
+      const duplicate = this.notes(s).find(
+        (n) =>
+          n.text.normalize("NFKC").toLowerCase() ===
+          clean.normalize("NFKC").toLowerCase(),
+      );
+      if (duplicate) {
+        const evicted = this.evict(s);
+        return { note: duplicate, mutated: evicted > 0 };
+      }
+      const now = Date.now();
+      this.d.db
+        .prepare("DELETE FROM memoir_rate WHERE at <= ?")
+        .run(now - 600_000);
+      const count = this.d.db
+        .prepare(
+          "SELECT count(*) AS n FROM memoir_rate WHERE scope_kind=? AND scope_id=?",
+        )
+        .get(s.kind, s.id)!;
+      if (Number(count.n) >= 5)
+        throw new UserError(429, "memoir note rate limit: 5 per 10 minutes");
+      this.d.db
+        .prepare("INSERT INTO memoir_rate VALUES (?,?,?)")
+        .run(s.kind, s.id, now);
+      return {
+        note: this.insertRow(
+          s,
+          clean,
+          "agent",
+          sourceCh,
+          trust,
+          asker ?? null,
+          false,
+        ),
+        mutated: true,
+      };
+    });
+    if (mutated) this.changed(s, true);
+    return note;
   }
-  private insert(
+  private insertRow(
     s: MemoirScope,
     text: string,
     author: "owner" | "agent",
@@ -237,43 +267,48 @@ export class Memoir {
         Date.now(),
       );
     this.evict(s);
-    this.changed(s, author === "agent");
     return this.notes(s).find((n) => n.id === id)!;
   }
-  private evict(s: MemoirScope): void {
+  private evict(s: MemoirScope): number {
     const unpinned = this.notes(s).filter((n) => !n.pinned);
     let chars = unpinned.reduce((sum, n) => sum + n.text.length, 0);
+    let removed = 0;
     while (unpinned.length > 20 || chars > 4000) {
       const oldest = unpinned.pop()!;
       chars -= oldest.text.length;
       this.d.db.prepare("DELETE FROM memoir_notes WHERE id=?").run(oldest.id);
+      removed++;
     }
+    return removed;
   }
   update(
     id: string,
     patch: { text?: unknown; pinned?: unknown; seen?: unknown },
   ): MemoirNote {
-    const n = this.find(id);
-    const text = patch.text === undefined ? n.text : noteText(patch.text);
-    for (const k of ["pinned", "seen"] as const)
-      if (patch[k] !== undefined && typeof patch[k] !== "boolean")
-        throw new UserError(400, `${k} must be boolean`);
-    this.d.db
-      .prepare("UPDATE memoir_notes SET text=?,pinned=?,seen=? WHERE id=?")
-      .run(
+    const updated = this.tx(() => {
+      const n = this.find(id);
+      const text = patch.text === undefined ? n.text : noteText(patch.text);
+      for (const k of ["pinned", "seen"] as const)
+        if (patch[k] !== undefined && typeof patch[k] !== "boolean")
+          throw new UserError(400, `${k} must be boolean`);
+      this.d.db
+        .prepare("UPDATE memoir_notes SET text=?,pinned=?,seen=? WHERE id=?")
+        .run(
+          text,
+          Number(patch.pinned ?? n.pinned),
+          Number(patch.seen ?? n.seen),
+          id,
+        );
+      this.evict({ kind: n.scopeKind, id: n.scopeId });
+      return {
+        ...n,
         text,
-        Number(patch.pinned ?? n.pinned),
-        Number(patch.seen ?? n.seen),
-        id,
-      );
-    this.evict({ kind: n.scopeKind, id: n.scopeId });
-    this.changed({ kind: n.scopeKind, id: n.scopeId });
-    return {
-      ...n,
-      text,
-      pinned: Boolean(patch.pinned ?? n.pinned),
-      seen: Boolean(patch.seen ?? n.seen),
-    };
+        pinned: Boolean(patch.pinned ?? n.pinned),
+        seen: Boolean(patch.seen ?? n.seen),
+      };
+    });
+    this.changed({ kind: updated.scopeKind, id: updated.scopeId });
+    return updated;
   }
   private find(id: string): MemoirNote {
     const r = this.d.db
@@ -287,8 +322,11 @@ export class Memoir {
     } as unknown as MemoirNote;
   }
   delete(id: string): void {
-    const n = this.find(id);
-    this.d.db.prepare("DELETE FROM memoir_notes WHERE id=?").run(id);
+    const n = this.tx(() => {
+      const found = this.find(id);
+      this.d.db.prepare("DELETE FROM memoir_notes WHERE id=?").run(id);
+      return found;
+    });
     this.changed({ kind: n.scopeKind, id: n.scopeId });
   }
   markSeen(s: MemoirScope): void {

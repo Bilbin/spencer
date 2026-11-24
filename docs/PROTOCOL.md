@@ -702,11 +702,12 @@ The owner's BIO narrows channel trust rules, including Full Trust. Conversations
 
 ### Owner rules and structured memoir
 
-Memoir is always available. The authenticated Owner HTTP API is the only application
-writer of `RULES.md`. Peer rules apply only to that peer's direct channels; group
-rules apply only to that group chat. Conversations channels omit rules, history,
-and the `record_memoir_note` tool. Rules narrow the channel policy; they remain
-advisory when Full Trust exposes filesystem or T3 MCP tools.
+Memoir is always available. Spencer exposes no agent tool that writes `RULES.md`;
+only authenticated Owner HTTP/UI calls and direct local filesystem edits write it.
+Peer rules apply only to that peer's direct channels; group rules apply only to that
+group chat. Conversations channels omit rules, history, and the `record_memoir_note`
+tool. Like `SOUL.md`, rules narrow the channel policy and remain advisory when Owner
+coding tools or Full Trust filesystem/T3 MCP servers can access `<dataDir>`.
 
 Rules live at `peers/<peerId>/RULES.md` or `channels/<chId>/RULES.md` under the data
 directory. Writes validate identity and membership, cap trimmed UTF-8 text at
