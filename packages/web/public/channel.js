@@ -354,7 +354,7 @@ function settingsModal(c) {
     const names = new Set(tools.map((t) => t.name));
     const missing = [...selected].filter((t) => !names.has(t));
     if (!tools.length && !missing.length) {
-      toolsBox.replaceChildren(h("p.hint", null, "No MCP tools available. Add servers on the ", h("a", { href: "#/mcp" }, "MCP servers page"), "."));
+      toolsBox.replaceChildren(h("p.hint", null, "No MCP tools available. Add servers on the ", h("a", { href: "#/mcp", on: { click: () => modal.close() } }, "MCP servers page"), "."));
       return;
     }
     const byServer = new Map();

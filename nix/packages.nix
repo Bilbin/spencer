@@ -47,7 +47,7 @@ let
       ''
         makeWrapper ${lib.getExe nodejs} $out/bin/spencer \
           --set-default SPENCER_BUILD "${version}" \
-          --set-default SPENCER_BIN spencer \
+          --run 'export SPENCER_BIN="${SPENCER_BIN:-$0}"' \
           --add-flags "--disable-warning=ExperimentalWarning" \
           --add-flags "${workspace}/lib/spencer/packages/spencer/src/main.ts" \
           --prefix PATH : ${lib.makeBinPath [ croc ]}

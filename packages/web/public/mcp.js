@@ -101,7 +101,7 @@ export function mcpView(main) {
               return toast(err.message);
             }
             if (!enabled.checked) cfg.disabled = true;
-            const base = editing ? config[name] : preset?.config;
+            const base = preset?.config ?? (editing ? config[name] : undefined);
             if (base?.disabledTools?.length) cfg.disabledTools = base.disabledTools;
             save.disabled = true;
             let r = await attempt(() => api.saveMcpServer(newName, cfg));
