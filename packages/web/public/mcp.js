@@ -101,7 +101,7 @@ export function mcpView(main) {
               return toast(err.message);
             }
             if (!enabled.checked) cfg.disabled = true;
-            const base = editing ? config[name] : preset?.config;
+            const base = preset?.config ?? (editing ? config[name] : undefined);
             if (base?.disabledTools?.length) cfg.disabledTools = base.disabledTools;
             save.disabled = true;
             let r = await attempt(() => api.saveMcpServer(newName, cfg));
@@ -194,14 +194,14 @@ export function mcpView(main) {
   const describe = (c) => (c ? ("url" in c ? c.url : [c.command, ...(c.args ?? [])].map(quote).join(" ")) : "");
 
   const render = () => {
-    const missing = presets.filter((p) => config[p.name] === undefined);
+    const missing = presets.filter((p) => config[p.name] === undefined || (p.name === "t3code" && (config[p.name].url || config[p.name].command !== p.config.command || JSON.stringify(config[p.name].args ?? []) !== JSON.stringify(p.config.args ?? []))));
     presetsBox.replaceChildren(
       ...missing.map((p) =>
         h(
           "section.mcp-preset",
           { "aria-label": p.title },
           h("div", null, h("strong", null, p.title), h("p.hint", null, p.description), p.problem ? h("p.hint", null, icon("warn", 12), " ", p.problem) : null),
-          h("button.btn.sm", { type: "button", on: { click: () => editServer(undefined, p) } }, icon("plus", 14), "Add"),
+          h("button.btn.sm", { type: "button", on: { click: () => editServer(config[p.name] ? p.name : undefined, p) } }, icon("plus", 14), config[p.name] ? "Switch to local T3 Code bridge" : "Add"),
         ),
       ),
     );

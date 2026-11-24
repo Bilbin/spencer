@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
-import { readdir, rename, rm, writeFile } from "node:fs/promises";
+import { open, readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { OwnerAttachment } from "../contracts.ts";
@@ -184,29 +184,39 @@ export class OwnerAttachmentStore {
 
   async upload(name: string, uploadId: string, bytes: AsyncIterable<Uint8Array>): Promise<StoredAttachment> {
     await this.cleanupExpired();
-    const chunks: Buffer[] = [];
-    let size = 0;
-    for await (const chunk of bytes) {
-      size += chunk.byteLength;
-      if (size > OWNER_ATTACHMENT_MAX_FILE_BYTES) throw new Error("file exceeds the 25 MiB upload limit");
-      chunks.push(Buffer.from(chunk));
-    }
-    const content = Buffer.concat(chunks, size);
-    const sha256 = createHash("sha256").update(content).digest("hex");
-    const existing = this.db.prepare("SELECT * FROM owner_attachments WHERE upload_id = ?").get(uploadId) as Record<string, unknown> | undefined;
-    if (existing) {
-      if (existing.name !== name || existing.sha256 !== sha256 || Number(existing.size) !== size) throw new Error("upload id was already used for different content");
-      return this.fromRow(existing);
-    }
-
-    const stored = Number((this.db.prepare("SELECT COALESCE(SUM(size), 0) AS total FROM owner_attachments").get() as { total: number }).total);
-    if (stored + this.pendingBytes + size > OWNER_ATTACHMENT_MAX_STORED_BYTES) throw new Error("private attachment storage is full; remove older attachments first");
-    this.pendingBytes += size;
     const id = randomUUID();
     const path = join(this.dir, id);
     const temp = `${path}.tmp-${randomUUID()}`;
+    let reserved = 0;
     try {
-      await writeFile(temp, content, { flag: "wx", mode: 0o600 });
+      const file = await open(temp, "wx", 0o600);
+      let size = 0;
+      const hash = createHash("sha256");
+      try {
+        for await (const chunk of bytes) {
+          size += chunk.byteLength;
+          if (size > OWNER_ATTACHMENT_MAX_FILE_BYTES) throw new Error("file exceeds the 25 MiB upload limit");
+          hash.update(chunk);
+          let offset = 0;
+          while (offset < chunk.byteLength) {
+            const result = await file.write(chunk, offset, chunk.byteLength - offset);
+            if (result.bytesWritten === 0) throw new Error("could not write attachment");
+            offset += result.bytesWritten;
+          }
+        }
+      } finally {
+        await file.close();
+      }
+      const sha256 = hash.digest("hex");
+      const existing = this.db.prepare("SELECT * FROM owner_attachments WHERE upload_id = ?").get(uploadId) as Record<string, unknown> | undefined;
+      if (existing) {
+        if (existing.name !== name || existing.sha256 !== sha256 || Number(existing.size) !== size) throw new Error("upload id was already used for different content");
+        return this.fromRow(existing);
+      }
+      const stored = Number((this.db.prepare("SELECT COALESCE(SUM(size), 0) AS total FROM owner_attachments").get() as { total: number }).total);
+      if (stored + this.pendingBytes + size > OWNER_ATTACHMENT_MAX_STORED_BYTES) throw new Error("private attachment storage is full; remove older attachments first");
+      this.pendingBytes += size;
+      reserved = size;
       await rename(temp, path);
       const createdAt = Date.now();
       const expiresAt = createdAt + OWNER_ATTACHMENT_TTL_MS;
@@ -219,7 +229,7 @@ export class OwnerAttachmentStore {
       }
       return { id, uploadId, name, size, sha256, path, createdAt };
     } finally {
-      this.pendingBytes -= size;
+      this.pendingBytes -= reserved;
       await rm(temp, { force: true });
     }
   }

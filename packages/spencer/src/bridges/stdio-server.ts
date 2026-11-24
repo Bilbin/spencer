@@ -8,9 +8,10 @@ import { spencerVersion } from "../version.ts";
 
 /** How to run `spencer <sub…>` from this install: the binary itself, or node with main.ts from a checkout. */
 export function selfCommand(sub: string[]): { command: string; args: string[] } {
+  if (process.env.SPENCER_BIN) return { command: process.env.SPENCER_BIN, args: sub };
   return isBinary()
     ? { command: process.execPath, args: sub }
-    : { command: process.execPath, args: [fileURLToPath(new URL("../main.ts", import.meta.url)), ...sub] };
+    : { command: process.execPath, args: ["--disable-warning=ExperimentalWarning", fileURLToPath(new URL("../main.ts", import.meta.url)), ...sub] };
 }
 
 export interface BridgeTool {

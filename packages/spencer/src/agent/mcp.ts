@@ -67,6 +67,37 @@ export function mcpToolName(server: string, tool: string): string {
   return `mcp__${server}__${tool}`.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 64);
 }
 
+/** Format transport errors without exposing configured credentials or URL query strings. */
+export function formatMcpError(error: unknown, config: McpServerConfig): string {
+  const secrets = "url" in config ? Object.values(config.headers ?? {}).filter(Boolean) : [];
+  if ("url" in config) {
+    try { secrets.push(...new URL(config.url).searchParams.values()); } catch { /* Invalid URL is reported by the transport. */ }
+  }
+  const parts: string[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current && !seen.has(current) && parts.length < 4) {
+    seen.add(current);
+    if (current instanceof Error) {
+      const code = "code" in current && (typeof current.code === "string" || typeof current.code === "number") ? ` (${current.code})` : "";
+      parts.push(`${current.message}${code}`);
+      current = current.cause;
+    } else {
+      parts.push(String(current));
+      break;
+    }
+  }
+  let message = parts.join(": ");
+  for (const secret of secrets) {
+    message = message.split(secret).join("[redacted]");
+    for (const token of secret.split(/\s+/).filter((v) => v.length >= 6)) message = message.split(token).join("[redacted]");
+  }
+  return message.replace(/https?:\/\/[^\s"'<>]+/gi, (url) => url.replace(/\?[^#\s]*/, "?[redacted]").replace(/\/\/[^/@\s]+@/, "//[redacted]@"))
+    .replace(/(bearer\s+)[^\s,;"']+/gi, "$1[redacted]")
+    .replace(/(["']?(?:token|password|secret|authorization|api[_-]?key)["']?\s*[:=]\s*["']?)[^\s,;"'}&]+/gi, "$1[redacted]")
+    .replace(/[\x00-\x1f\x7f]+/g, " ").slice(0, 1000);
+}
+
 export class McpManager {
   private servers = new Map<string, ServerState>();
   private setQueue = new Map<string, Promise<void>>();
@@ -206,7 +237,7 @@ export class McpManager {
       if (parts.length === 0 && res.structuredContent !== undefined) parts.push(JSON.stringify(res.structuredContent));
       return { text: cap(parts.join("\n")), isError: res.isError === true };
     } catch (e) {
-      return { text: `MCP call failed: ${e instanceof Error ? e.message : String(e)}`, isError: true };
+      return { text: `MCP call failed: ${formatMcpError(e, s.config)}`, isError: true };
     }
   }
 
@@ -258,7 +289,7 @@ export class McpManager {
         this.changed();
         this.schedule(s);
       };
-      client.onerror = (e) => this.log(`mcp ${s.name}: ${e.message}`);
+      client.onerror = (e) => this.log(`mcp ${s.name}: ${formatMcpError(e, s.config)}`);
       await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS });
       if (this.stopped || s.generation !== generation) {
         await client.close().catch(() => {});
@@ -271,7 +302,7 @@ export class McpManager {
             s.tools = await this.listTools(s.name, client);
             this.changed();
           } catch (e) {
-            this.log(`mcp ${s.name}: relisting tools failed: ${(e as Error).message}`);
+            this.log(`mcp ${s.name}: relisting tools failed: ${formatMcpError(e, s.config)}`);
           }
         });
       }
@@ -281,7 +312,7 @@ export class McpManager {
       this.changed();
     } catch (e) {
       if (this.stopped || s.generation !== generation) return;
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = formatMcpError(e, s.config);
       s.status = "error";
       s.error = msg + (stderrTail ? ` (${stderrTail.trim().split("\n").pop()})` : "");
       s.tools = [];

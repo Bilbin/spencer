@@ -93,7 +93,7 @@ export function parseActivity(activity) {
 export function activityNode(activity, cls = "") {
   const p = parseActivity(activity);
   if (p.text) return h(`span.act${cls ? "." + cls : ""}`, null, p.text);
-  return h(`span.act${cls ? "." + cls : ""}`, null, p.server ? h("span.act-server", null, p.server) : null, h("span.act-tool", null, p.tool));
+  return h(`span.act${cls ? "." + cls : ""}`, null, p.server ? h("span.act-server", null, p.server, " · ") : null, h("span.act-tool", null, p.tool));
 }
 
 /** One line for tight places (sidebar rows, the members panel). */
@@ -106,7 +106,7 @@ export function activityLine(activity) {
 function doneStep(activity) {
   const p = parseActivity(activity);
   if (p.text) return h("span.act", null, /^thinking/i.test(p.text) ? "Thought" : p.text);
-  return h("span.act", null, h("span.act-verb", null, "Used"), p.server ? h("span.act-server", null, p.server) : null, h("span.act-tool", null, p.tool));
+  return h("span.act", null, h("span.act-verb", null, "Used"), p.server ? h("span.act-server", null, p.server, " · ") : null, h("span.act-tool", null, p.tool));
 }
 
 /** Which traces have their step log open (the trace is rebuilt on every status event). */
