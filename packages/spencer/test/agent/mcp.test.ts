@@ -220,3 +220,23 @@ test("agent: working status while answering a peer (Thinking… → Using <tool>
     core.cleanup();
   }
 });
+
+test("HTTP connection errors report status and redact credentials", async () => {
+  const { createServer } = await import("node:http");
+  const server = createServer((_req, res) => { res.writeHead(403); res.end('denied token=verysecret'); });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const mgr = new McpManager({ remote: { url: `http://127.0.0.1:${address.port}/mcp?key=verysecret`, headers: { Authorization: "Bearer verysecret" } } });
+  try {
+    mgr.start();
+    await mgr.settled();
+    const error = mgr.status()[0].error ?? "";
+    assert.match(error, /403/);
+    assert.match(error, /denied/);
+    assert.doesNotMatch(error, /verysecret/);
+  } finally {
+    await mgr.stop();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
