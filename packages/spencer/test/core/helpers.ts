@@ -65,6 +65,7 @@ export class StubAgent implements AgentService {
   peerChats: IncomingChat[] = [];
   outgoing: OutgoingChat[] = [];
   ownerSends: string[] = [];
+  ownerSendOptions: ({ requestId?: string; attachments?: { id: string; name: string; size: number; path: string }[] } | undefined)[] = [];
   notes: string[] = [];
   changed: string[] = [];
   /** What `humanConversationRef` hands the daemon for a person's message in a Conversations channel. */
@@ -92,8 +93,9 @@ export class StubAgent implements AgentService {
   async onOutgoingChat(msg: OutgoingChat) {
     this.outgoing.push(msg);
   }
-  async ownerSend(text: string) {
+  async ownerSend(text: string, opts?: { requestId?: string; attachments?: { id: string; name: string; size: number; path: string }[] }) {
     this.ownerSends.push(text);
+    this.ownerSendOptions.push(opts);
     return { submissionId: `sub-${this.ownerSends.length}` };
   }
   ownerAnswers = new Map<string, string>();
@@ -102,7 +104,10 @@ export class StubAgent implements AgentService {
     return text === undefined ? { status: "pending" as const } : { status: "done" as const, text };
   }
   async ownerTranscript(_limit: number): Promise<OwnerItem[]> {
-    return this.ownerSends.map((t, i) => ({ id: `u${i}`, role: "user" as const, text: t, ts: 0 }));
+    return this.ownerSends.map((t, i) => ({
+      id: `u${i}`, role: "user" as const, text: t, ts: 0,
+      ...(this.ownerSendOptions[i]?.attachments?.length ? { attachments: this.ownerSendOptions[i]!.attachments!.map(({ id, name, size }) => ({ id, name, size })) } : {}),
+    }));
   }
   ownerBusy() {
     return false;

@@ -145,6 +145,12 @@ export interface Transfer {
   expiresAt: number;
 }
 
+export interface OwnerAttachment {
+  id: string;
+  name: string;
+  size: number;
+}
+
 export type OwnerAnswer = { status: "pending" } | { status: "done"; text: string } | { status: "unanswered"; reason: string };
 
 export interface OwnerItem {
@@ -158,6 +164,7 @@ export interface OwnerItem {
   untrusted?: boolean;
   /** The note is an owner request (`ask_owner`) the owner can approve or deny: its id. */
   request?: string;
+  attachments?: OwnerAttachment[];
 }
 
 /**
@@ -419,7 +426,7 @@ export interface AgentService {
   onPeerChat(msg: IncomingChat): Promise<{ note?: string }>;
   /** We sent a chat in a channel (owner typed it, or the owner agent sent it): record as channel context. */
   onOutgoingChat(msg: OutgoingChat): Promise<void>;
-  ownerSend(text: string): Promise<{ submissionId: string }>;
+  ownerSend(text: string, opts?: { requestId?: string; attachments?: (OwnerAttachment & { path: string })[] }): Promise<{ submissionId: string }>;
   /** The answer to one owner submission, waiting at most `waitMs`; "pending" when it is not ready yet. */
   ownerAnswer?(submissionId: string, waitMs: number, signal?: AbortSignal): Promise<OwnerAnswer>;
   ownerTranscript(limit: number): Promise<OwnerItem[]>;

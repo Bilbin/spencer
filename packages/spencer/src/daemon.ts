@@ -41,6 +41,7 @@ import { Outbox } from "./net/outbox.ts";
 import { Inbox, type StoredMessage } from "./net/inbox.ts";
 import { ChannelManager, UserError } from "./channels.ts";
 import { ApiServer } from "./api/http.ts";
+import { OwnerAttachmentStore } from "./api/owner-attachments.ts";
 import { embedded } from "./sea.ts";
 import { t3Preset } from "./bridges/t3.ts";
 import { selfCommand } from "./bridges/stdio-server.ts";
@@ -342,6 +343,7 @@ export class Daemon {
       core: s.core,
       agent: () => this.need("agent"),
       transfers: () => this.need("transfers"),
+      ownerAttachments: new OwnerAttachmentStore(this.need("db"), this.dataDir),
       state: () => this.apiState(),
       channelMessages: (ch, limit, before) => {
         const items = channels.messages(ch, limit, before, ["chat", "hello"]);
