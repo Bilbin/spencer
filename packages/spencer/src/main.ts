@@ -14,6 +14,8 @@ import { spencerVersion } from "./version.ts";
 const SELF = isBinary() ? "spencer" : "node packages/spencer/src/main.ts";
 const USAGE = `usage: ${SELF} [--data-dir DIR] [--port N] [--name NAME] [--relay URL] [--no-open]
        ${SELF} service install|uninstall|status   (optional: start Spencer at login)
+       ${SELF} mcp t3        stdio MCP server: T3 Code threads, for Spencer (env T3_PROJECT, T3_BIN)
+       ${SELF} mcp spencer   stdio MCP server: talk to this Spencer, for other agents (--data-dir, --port)
 
   --data-dir DIR  data directory (env SPENCER_DATA_DIR; default ~/.local/share/spencer)
   --port N        local UI/API port on 127.0.0.1 (env SPENCER_PORT; 0 = random)
@@ -71,6 +73,13 @@ async function main(): Promise<void> {
   const dataDir = resolve(opts["data-dir"] ?? defaultDataDir());
   if (positionals[0] === "service") {
     process.exit(serviceCommand(positionals[1], dataDir, (m) => process.stdout.write(m)));
+  }
+  if (positionals[0] === "mcp") {
+    if (opts.port !== undefined) process.env.SPENCER_PORT = opts.port;
+    if (positionals[1] === "t3" && positionals.length === 2) return await (await import("./bridges/t3.ts")).runT3Bridge();
+    if (positionals[1] === "spencer" && positionals.length === 2) return await (await import("./bridges/spencer.ts")).runSpencerBridge(dataDir);
+    process.stderr.write(`usage: ${SELF} mcp t3|spencer\n`);
+    process.exit(2);
   }
   if (positionals.length) {
     process.stderr.write(`unknown command ${positionals[0]}\n${USAGE}`);

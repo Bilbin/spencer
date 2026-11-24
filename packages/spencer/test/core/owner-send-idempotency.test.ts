@@ -336,6 +336,17 @@ test("accepted retry survives restart after attachment cleanup and a lost respon
     assert.equal(status, 200);
     const originalSubmission = await submission;
     expireAttachment(tmp.dir, attachmentId);
+    const renewed = await send(node.daemon, requestId, "original text", [attachmentId]);
+    assert.equal(renewed.status, 200, renewed.text);
+    assert.equal(renewed.json().submissionId, originalSubmission);
+    const core = new DatabaseSync(join(tmp.dir, "spencer.sqlite"));
+    try {
+      const row = core.prepare("SELECT expires_at FROM owner_attachments WHERE id = ?").get(attachmentId) as { expires_at: number };
+      assert.ok(row.expires_at > Date.now(), "an accepted retry renews attachment retention");
+    } finally {
+      core.close();
+    }
+    expireAttachment(tmp.dir, attachmentId);
     await node.daemon.stop();
 
     node = await startAgent(tmp.dir, relay.url);

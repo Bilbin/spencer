@@ -99,7 +99,10 @@ export const api = {
     xhr.send(file);
   }),
   transferAction: (tid, action) => request("POST", `/api/transfers/${enc(tid)}/${action}`),
+  transferPreview: (tid) => request("GET", `/api/transfers/${enc(tid)}/preview`),
   mcp: () => request("GET", "/api/mcp"),
+  saveMcpServer: (name, config) => request("PUT", `/api/mcp/servers/${encodeURIComponent(name)}`, config),
+  removeMcpServer: (name) => request("DELETE", `/api/mcp/servers/${encodeURIComponent(name)}`),
   setExperimental: (enabled) => request("PUT", "/api/experimental", { enabled }),
   soul: () => request("GET", "/api/soul"),
   setSoul: (text) => request("PUT", "/api/soul", { text }),

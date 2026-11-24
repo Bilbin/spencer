@@ -179,9 +179,9 @@ const mcp: McpServerStatus[] = [
     transport: "stdio",
     status: "connected",
     tools: [
-      { name: "mcp__t3code__thread_read", description: "Read a T3 Code thread" },
-      { name: "mcp__t3code__thread_launch", description: "Start a new agent thread in a project" },
-      { name: "mcp__t3code__project_list", description: "List projects" },
+      { name: "mcp__t3code__thread_read", remote: "thread_read", enabled: true, description: "Read a T3 Code thread" },
+      { name: "mcp__t3code__thread_launch", remote: "thread_launch", enabled: true, description: "Start a new agent thread in a project" },
+      { name: "mcp__t3code__project_list", remote: "project_list", enabled: true, description: "List projects" },
     ],
   },
   {
@@ -189,9 +189,9 @@ const mcp: McpServerStatus[] = [
     transport: "http",
     status: "connected",
     tools: [
-      { name: "mcp__github__list_issues", description: "List issues in a repository" },
-      { name: "mcp__github__create_issue", description: "Open a new issue" },
-      { name: "mcp__github__get_file", description: "Read a file from a repository" },
+      { name: "mcp__github__list_issues", remote: "list_issues", enabled: true, description: "List issues in a repository" },
+      { name: "mcp__github__create_issue", remote: "create_issue", enabled: true, description: "Open a new issue" },
+      { name: "mcp__github__get_file", remote: "get_file", enabled: true, description: "Read a file from a repository" },
     ],
   },
   {
@@ -202,6 +202,21 @@ const mcp: McpServerStatus[] = [
     tools: [],
   },
 ];
+
+const mcpConfig: Record<string, Record<string, unknown>> = {
+  t3code: { command: "node", args: ["packages/spencer/src/main.ts", "mcp", "t3"], env: { T3_PROJECT: "/home/alice/code" } },
+  github: { url: "https://api.githubcopilot.com/mcp/", headers: { Authorization: "Bearer ghp_example" } },
+  "home-assistant": { command: "hass-mcp" },
+};
+const mcpPresets = [
+  { name: "t3code", title: "T3 Code", description: "List, start, message and read T3 Code threads.", config: { command: "node", args: ["packages/spencer/src/main.ts", "mcp", "t3"], disabledTools: ["thread_list", "thread_start", "thread_send", "thread_show"] } },
+];
+const mcpView = () => ({
+  servers: mcp,
+  config: mcpConfig,
+  presets: mcpPresets,
+  spencerBridge: { command: "node", args: ["/home/alice/spencer/packages/spencer/src/main.ts", "mcp", "spencer", "--data-dir", "/home/alice/.local/share/spencer"] },
+});
 
 function member(p: Person): MockMember {
   const pr = presence.get(p.id);
@@ -868,7 +883,36 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     if (b && c && method === "POST") return transferAction(getTransfer(b), c);
     if (b && !c && method === "GET") return getTransfer(b);
   }
-  if (a === "mcp" && method === "GET" && !b) return { servers: mcp };
+  if (a === "mcp" && method === "GET" && !b) return mcpView();
+  if (a === "mcp" && b === "servers" && c && (method === "PUT" || method === "DELETE")) {
+    const name = decodeURIComponent(c);
+    const i = mcp.findIndex((x) => x.name === name);
+    if (method === "DELETE") {
+      if (i < 0) throw new HttpError(404, `no MCP server ${name}`);
+      mcp.splice(i, 1);
+      delete mcpConfig[name];
+    } else {
+      const body = await readJson(req);
+      if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) throw new HttpError(400, "name: 1-32 letters, digits, - or _");
+      if (typeof body.command !== "string" && typeof body.url !== "string") throw new HttpError(400, "command (or url) is required");
+      mcpConfig[name] = body;
+      const status: McpServerStatus = {
+        name,
+        transport: typeof body.url === "string" ? "http" : "stdio",
+        status: body.disabled ? "disabled" : "connected",
+        tools: body.disabled
+          ? []
+          : (mcp[i]?.tools ?? [{ name: `mcp__${name}__hello`, remote: "hello", enabled: true, description: "A mock tool" }]).map((t) => ({
+              ...t,
+              enabled: !(body.disabledTools as string[] | undefined)?.includes(t.remote),
+            })),
+      };
+      if (i < 0) mcp.push(status);
+      else mcp[i] = status;
+    }
+    emit({ type: "mcp", servers: mcp });
+    return mcpView();
+  }
   if (a === "experimental" && !b && method === "PUT") {
     const body = await readJson(req);
     if (typeof body.enabled !== "boolean") throw new HttpError(400, "enabled must be a boolean");

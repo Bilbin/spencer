@@ -297,7 +297,7 @@ export function channelTitle(c) {
 
 export function allMcpTools() {
   const out = [];
-  for (const s of S.mcp) for (const t of s.tools ?? []) out.push({ server: s.name, ...t });
+  for (const s of S.mcp) for (const t of s.tools ?? []) if (t.enabled !== false) out.push({ server: s.name, ...t });
   return out;
 }
 

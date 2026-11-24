@@ -26,6 +26,7 @@ import type {
   IncomingChat,
   McpServerStatus,
   OutgoingChat,
+  OwnerAnswer,
   OwnerAttachment,
   OwnerItem,
   OwnerRequest,
@@ -35,6 +36,7 @@ import { END_MARKER, REPEAT_WINDOW, decideConversationReply, decideReply, isRepe
 import { TurnBudget } from "./budget.ts";
 import { ConversationStore, IDLE_MS, type ConvoRow } from "./conversations.ts";
 import type { FakeBrainHooks } from "./fake-brain.ts";
+import type { McpServerConfig } from "../config.ts";
 import { McpManager } from "./mcp.ts";
 import { ModelManager } from "./model-manager.ts";
 import { OWNER_KEY, PiRuntime, channelKey, type AgentRuntime, type ToolSpec } from "./runtime.ts";
@@ -1670,6 +1672,23 @@ export class SpencerAgent implements AgentService {
     return { submissionId };
   }
 
+  /** Each poll owns one waiter and releases it when the poll ends (timeout or `signal`, e.g. the client left). */
+  async ownerAnswer(submissionId: string, waitMs: number, signal?: AbortSignal): Promise<OwnerAnswer> {
+    const ac = new AbortController();
+    const stop = () => ac.abort(new Error("poll over"));
+    const timer = setTimeout(stop, waitMs);
+    signal?.addEventListener("abort", stop, { once: true });
+    try {
+      return await this.rt().waitAnswer(submissionId, ac.signal);
+    } catch (e) {
+      if (ac.signal.aborted) return { status: "pending" };
+      throw e;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", stop);
+    }
+  }
+
   async ownerTranscript(limit: number): Promise<OwnerItem[]> {
     return this.rt().transcript(OWNER_KEY, limit);
   }
@@ -1885,6 +1904,10 @@ export class SpencerAgent implements AgentService {
       return;
     }
     await this.configureChannel(c);
+  }
+
+  async setMcpServer(name: string, config: McpServerConfig | undefined): Promise<void> {
+    await this.mcp?.set(name, config);
   }
 
   mcpStatus(): McpServerStatus[] {

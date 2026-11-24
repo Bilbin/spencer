@@ -138,11 +138,10 @@ export class OwnerAttachmentStore {
       } else {
         throw new Error("owner send idempotency record is invalid");
       }
-      if (state.state === "reserved") {
-        const touch = this.db.prepare("UPDATE owner_attachments SET expires_at = ? WHERE id = ?");
-        const expiresAt = Date.now() + OWNER_ATTACHMENT_TTL_MS;
-        for (const attachmentId of attachmentIds) touch.run(expiresAt, attachmentId);
-      }
+      // Renew attached bytes for reserved sends and accepted identical retries. Missing rows after cleanup are a no-op.
+      const touch = this.db.prepare("UPDATE owner_attachments SET expires_at = ? WHERE id = ?");
+      const expiresAt = Date.now() + OWNER_ATTACHMENT_TTL_MS;
+      for (const attachmentId of attachmentIds) touch.run(expiresAt, attachmentId);
       this.db.exec("COMMIT");
       return state;
     } catch (error) {

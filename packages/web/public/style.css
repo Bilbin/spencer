@@ -2080,6 +2080,29 @@ details[open] > summary > .icon:last-child,
   font-size: 12.5px;
   color: var(--attn);
 }
+.document-preview.modal {
+  width: min(72rem, calc(100vw - 32px));
+  max-width: 72rem;
+}
+.document-preview .modal-body {
+  min-height: 120px;
+  max-height: min(76vh, 900px);
+  overflow: auto;
+}
+.document-preview-status {
+  padding: 20px 4px;
+  color: var(--ink-2);
+}
+.document-preview-content {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.document-preview-content > :first-child {
+  margin-top: 0;
+}
+.document-preview-content > :last-child {
+  margin-bottom: 0;
+}
 .xfer-actions {
   display: flex;
   flex-wrap: wrap;
@@ -2147,6 +2170,60 @@ details[open] > summary > .icon:last-child,
 }
 .mcp-tools code {
   font-weight: 500;
+}
+.mcp-tools li.off code {
+  color: var(--ink-3);
+  text-decoration: line-through;
+}
+.mcp-cmdline {
+  margin: 6px 0 0 18px;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 0 18px;
+}
+.mcp-actions .check {
+  align-items: center;
+  margin-right: auto;
+  font-size: 13px;
+}
+.mcp-actions .check input {
+  margin: 0;
+}
+.mcp-preset {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-ctl);
+}
+.mcp-preset > div {
+  flex: 1;
+  min-width: 0;
+}
+.mcp-preset .hint {
+  margin-top: 2px;
+}
+.mcp-bridge .mcp-preset {
+  margin-top: 20px;
+}
+.mcp-cmd {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  font-size: 12px;
+  background: var(--sunken);
+  border-radius: var(--r-ctl);
 }
 .check-desc {
   color: var(--ink-3);
@@ -2373,6 +2450,76 @@ details[open] > summary > .icon:last-child,
   width: 100%;
   height: 260px;
   background: #fff;
+  border: 0;
+}
+
+.document-preview-content.md {
+  max-width: 82ch;
+  margin: 0 auto;
+  padding: clamp(18px, 4vw, 40px);
+  font-size: 16px;
+  line-height: 1.7;
+}
+.document-preview-content.md p {
+  margin: 0.8em 0;
+}
+.document-preview-content.md .md-h {
+  margin: 1.5em 0 0.45em;
+  line-height: 1.2;
+}
+.document-preview-content.md .md-h1 {
+  margin-top: 0.2em;
+  font-size: clamp(28px, 4vw, 36px);
+}
+.document-preview-content.md .md-h2 {
+  margin-top: 1.4em;
+  font-size: 24px;
+}
+.document-preview-content.md .md-h3,
+.document-preview-content.md .md-h4,
+.document-preview-content.md .md-h5,
+.document-preview-content.md .md-h6 {
+  font-size: 19px;
+}
+.document-preview-content.md ul,
+.document-preview-content.md ol {
+  margin: 0.8em 0;
+  padding-left: 1.6em;
+}
+.document-preview-content.md li {
+  margin: 0.3em 0;
+  padding-left: 0.15em;
+}
+.document-preview-content.md blockquote {
+  margin: 1em 0;
+  padding: 0.15em 0 0.15em 1em;
+}
+.document-preview-content.md .md-table {
+  margin: 1.2em 0;
+}
+.document-preview-content.md table {
+  width: 100%;
+  min-width: max-content;
+  font-size: 14px;
+}
+.document-preview-content.md th,
+.document-preview-content.md td {
+  padding: 0.65em 1em;
+}
+.document-preview-content.md .md-code {
+  margin: 1.1em 0;
+}
+.document-preview-content.md .md-code pre {
+  padding: 14px 16px;
+  font-size: 13px;
+  line-height: 1.65;
+}
+.html-preview-frame {
+  display: block;
+  width: 100%;
+  height: min(70vh, 760px);
+  min-height: 240px;
+  background: var(--surface);
   border: 0;
 }
 
