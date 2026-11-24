@@ -18,6 +18,8 @@ const NOTE_LABEL = {
   repeated: "Your Spencer stayed quiet: this repeats an earlier message.",
   "budget exhausted": "Your Spencer paused: it used its automatic replies here. Continue or stop it from Needs you.",
   "handled by owner": "Your Spencer picked this up in your own chat.",
+  "out of messages": "Your Spencer stayed quiet: it used all its messages in this conversation.",
+  "not in this conversation": "Your Spencer stayed quiet: this conversation is over or it is not part of it.",
 };
 /** Consecutive turns by the same speaker within this window share one header. */
 const GROUP_MS = 5 * 60_000;
@@ -121,7 +123,7 @@ function messageRow(c, m, byId, names, myNames, cont, hideRef) {
         m.origin === "agent-followup" ? h("span.tag", { title: "Sent on its own, from a follow-up it scheduled" }, "follow-up") : null,
         m.convo?.mod ? h("span.tag", { title: "Heated mode: the moderator ended this conversation" }, "moderator") : null,
         m.convo?.start && m.by === "agent" ? h("span.tag", { title: "Its conversation timer went off: it opened a new conversation" }, "new topic") : null,
-        m.convo?.start && m.convo.heated && m.by === "agent" ? h("span.tag", { title: "Heated mode: a real argument, with a moderator" }, "heated") : null,
+        m.convo?.start && m.convo.heated ? h("span.tag", { title: "Heated mode: a real argument, with a moderator" }, "heated") : null,
         m.hop > 0 ? h("span.tag.hop", { title: `Automatic reply, ${m.hop} ${m.hop === 1 ? "step" : "steps"} from a person's message` }, `hop ${m.hop}`) : null,
         time,
         statusMark(m),
@@ -515,6 +517,9 @@ function conversationSection(c) {
   if (!st) {
     what = "Conversations";
     detail = "Loading…";
+  } else if (!c.autoReply) {
+    what = "Paused";
+    detail = "Auto-reply is off: your Spencer won't start or join conversations.";
   } else if (st.opening) {
     what = "Picking a topic…";
     detail = "Your Spencer is opening a new conversation.";
@@ -522,14 +527,14 @@ function conversationSection(c) {
     const left = Math.max(0, st.active.max - st.active.used);
     what = st.active.heated ? "Heated conversation going on" : "Conversation going on";
     detail = `Your Spencer has ${left} of ${st.active.max} messages left. It ends when they wrap up or go quiet.${st.active.moderating ? " Your Spencer moderates this one and ends it if it goes off the rails." : ""}`;
-  } else if (!c.autoReply) {
-    what = "Paused";
-    detail = "Auto-reply is off: your Spencer won't start or join conversations.";
+  } else if (!peers(c).length) {
+    what = "Waiting for people";
+    detail = "Conversations start once someone else joins: share the invite link.";
   } else {
     what = `Next topic ${relTime(Math.max(st.nextAt, Date.now() + 60_000))}`;
     detail = "Unless another Spencer brings one up first (then every timer starts over).";
   }
-  if (st?.hours && !st.active && !st.opening && c.autoReply) detail += ` Conversations only open between ${hourLabel(st.hours.start)} and ${hourLabel(st.hours.end)} (${zoneLabel(st.hours.timeZone)}).`;
+  if (st?.hours && !st.active && !st.opening && c.autoReply && peers(c).length) detail += ` Conversations only open between ${hourLabel(st.hours.start)} and ${hourLabel(st.hours.end)} (${zoneLabel(st.hours.timeZone)}).`;
   const canStart = st && !st.opening && !st.active && c.autoReply && peers(c).length > 0;
   const start = canStart
     ? h(
@@ -538,9 +543,11 @@ function conversationSection(c) {
           type: "button",
           on: {
             click: async (e) => {
-              e.currentTarget.disabled = true;
+              const btn = e.currentTarget;
+              btn.disabled = true;
               const res = await attempt(() => api.startConversation(c.id));
               if (res?.ch) setConversation(res);
+              else btn.disabled = false;
             },
           },
         },

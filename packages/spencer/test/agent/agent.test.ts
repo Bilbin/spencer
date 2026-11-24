@@ -8,6 +8,7 @@ import { SpencerAgent, type AgentOptions } from "../../src/agent/agent.ts";
 import { ConversationStore, IDLE_MS, inHours, nextWindowStart } from "../../src/agent/conversations.ts";
 import { withExtraModel } from "../../src/agent/models.ts";
 import { formatNews, parseNewsRss, type FetchLike } from "../../src/agent/news.ts";
+import { inviteTool } from "../../src/agent/tools.ts";
 import type { SpencerConfig } from "../../src/config.ts";
 import type { Channel } from "../../src/contracts.ts";
 import type { FakeBrainHooks, FakeRequestInfo } from "../../src/agent/fake-brain.ts";
@@ -1014,11 +1015,12 @@ test("conversations: the timer opens a chill one on the news, alone, with the se
       assert.equal(open.convo?.heated, undefined, "chill is the default");
       assert.ok(!requests.some((r) => r.systemPrompt.includes('channel "Team"') && r.tools.includes("search_news")));
 
-      // While it goes on (Bob keeps it alive), the timer does not open another one.
-      clock += 20 * 60_000;
+      // While it goes on (Bob keeps it alive), the timer does not open another one, even when it goes off.
+      clock += 50_000;
       await agent.onPeerChat(peerChat(core.getChannel("chConvo")!, "Wrong!", { by: "agent", convo: { id: open.convo!.id } }));
       await agent.idle();
       clock += 30_000;
+      core.db.prepare("UPDATE agent_conversations_state SET next_at = ? WHERE ch = ?").run(clock, "chConvo");
       await agent.conversationTick();
       await agent.idle();
       assert.equal(core.sent.length, 2);
@@ -1206,6 +1208,8 @@ test("conversations: heated mode travels with the opening, and the opener's mode
       assert.equal(stop.final, true);
       assert.equal(stop.convo!.id, open.convo!.id);
       assert.equal(agent.conversationStatus("chConvo").active, undefined, "and the conversation is over");
+      const keys = core.db.prepare("SELECT key FROM agent_conversations").all() as { key: string }[];
+      assert.ok(!keys.some((k) => k.key.includes("#mod:")), "its moderator conversation is dropped");
     },
     { core, agent: { random: () => 0, fetch: fakeNews } },
   );
@@ -1256,7 +1260,7 @@ test("conversations: people can write any time; it starts a new conversation the
       assert.equal(ref.start, true);
       assert.equal(agent.humanConversationRef("chGroup"), undefined, "only in Conversations channels");
       const n = core.sent.length;
-      await agent.onOutgoingChat({ id: "out-owner-1", ch: "chConvo", text: "whats up guys", origin: "human", ts: Date.now() });
+      await agent.onOutgoingChat({ id: "out-owner-1", ch: "chConvo", text: "whats up guys", origin: "human", ts: Date.now(), convo: ref });
       await agent.idle();
       assert.equal(core.sent.length, n + 1);
       assert.equal(core.sent.at(-1)!.text, `Echo from ${ME.name}: whats up guys`);
@@ -1328,7 +1332,79 @@ test("conversations store: start races settle on the smaller id, and a late open
   store.begin("c", "n");
   store.end("c", "n");
   assert.equal(store.spend("c", "n"), false, "a reply still being written when it ended is not sent");
+  store.begin("c", "q");
+  clock += IDLE_MS;
+  assert.equal(store.spend("c", "q"), false, "nor one written after it went quiet");
+  assert.equal(store.isOver("c", "q"), true);
   db.close();
+});
+
+test("conversations: one that went quiet stays over; a closing message of one I never saw starts nothing", async () => {
+  let clock = Date.now();
+  const core = convoCore({ conversationMessages: 3 });
+  await withAgent(
+    async ({ core, agent }) => {
+      const ch = core.getChannel("chConvo")!;
+      const id = convoId();
+      await agent.onPeerChat(peerChat(ch, "yo", { by: "agent", convo: { id, start: true } }));
+      await agent.idle();
+      assert.equal(agent.conversationStatus("chConvo").active?.used, 1);
+      clock += IDLE_MS;
+      assert.deepEqual(await agent.onPeerChat(peerChat(ch, "still here", { by: "agent", convo: { id } })), { note: "not in this conversation" });
+      assert.equal(agent.conversationStatus("chConvo").active, undefined, "not revived (which would reset its cap)");
+      assert.deepEqual(await agent.onPeerChat(peerChat(ch, "bye [END]", { by: "agent", final: true, convo: { id: convoId() } })), {
+        note: "conversation ended",
+      });
+      assert.equal(agent.conversationStatus("chConvo").active, undefined);
+      // With auto-reply off my Spencer does not take part: nothing goes on for it.
+      ch.autoReply = false;
+      await agent.onPeerChat(peerChat(ch, "new thing", { by: "agent", convo: { id: convoId(), start: true } }));
+      assert.equal(agent.conversationStatus("chConvo").active, undefined);
+      assert.equal(agent.humanConversationRef("chConvo")?.heated, undefined, "and does not moderate one my owner starts");
+      assert.equal(agent.conversationStatus("chConvo").active, undefined);
+    },
+    { core, agent: { now: () => clock } },
+  );
+  core.cleanup();
+});
+
+test("conversations: an opening is not sent once auto-reply was turned off, and Start now says when the budget blocks it", async () => {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  const core = convoCore({ repliesPerHour: 1 });
+  await withAgent(
+    async ({ core, agent }) => {
+      const ch = core.getChannel("chConvo")!;
+      await agent.startConversation("chConvo");
+      assert.equal(agent.conversationStatus("chConvo").opening, true);
+      ch.autoReply = false;
+      release();
+      await agent.idle();
+      assert.equal(core.sent.length, 0);
+      assert.equal(agent.conversationStatus("chConvo").opening, false, "given up, not stuck opening");
+      ch.autoReply = true;
+      await assert.rejects(agent.startConversation("chConvo"), (e: Error & { status?: number }) => e.status === 429 && /cannot start a conversation now/.test(e.message));
+    },
+    {
+      core,
+      agent: { random: () => 0, fetch: fakeNews },
+      hooks: { gate: (info) => (info.text.startsWith("[Your conversation timer") ? held : Promise.resolve()) },
+    },
+  );
+  core.cleanup();
+});
+
+test("create_invite offers Conversations channels only while experimental features are on", async () => {
+  const off = makeCore({ config: { experimental: false } });
+  try {
+    const plain = inviteTool(off, false);
+    assert.deepEqual((plain.parameters as { properties: { kind: { enum: string[] } } }).properties.kind.enum, ["direct", "group"]);
+    assert.ok(!plain.description.includes("conversation"));
+    const r = (await inviteTool(off, true).execute({ kind: "conversation", name: "x" }, {} as never)) as { isError?: boolean };
+    assert.equal(r.isError, true, "refused while off, even by the full spec");
+  } finally {
+    off.cleanup();
+  }
 });
 
 test("conversation model: requests for it go to its own registry; it can be set back to the main model", async () => {

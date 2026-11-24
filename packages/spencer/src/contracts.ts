@@ -339,6 +339,8 @@ export interface OutgoingChat {
   text: string;
   origin: MessageOrigin;
   ts: number;
+  /** §7.5: the conversation the message belongs to (Conversations channels). */
+  convo?: ConvoRef;
 }
 
 /** What the agent layer needs from the core. */

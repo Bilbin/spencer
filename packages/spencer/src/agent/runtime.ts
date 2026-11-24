@@ -67,7 +67,7 @@ export interface ConversationSetup {
   instructions: string;
   /** Owner only: also enable pi-durable's read/write/edit/bash, running in `cwd` (default: home dir). */
   codingTools?: { cwd?: string };
-  /** Reasoning effort ("off", "minimal", "low", "medium", "high"); absent: the model's default. */
+  /** Reasoning effort ("off", "minimal", "low", "medium", "high"); absent: "off". */
   thinkingLevel?: string;
   /** Run this conversation on another model than the agent's main one (Conversations channels). */
   model?: { provider: string; modelId: string };
@@ -111,6 +111,8 @@ export interface AgentRuntime {
   offeredTools(key: string): Promise<string[]>;
   /** Submission ids of the inputs the conversation's current run is answering ([] when idle). */
   runningInputs(key: string): Promise<string[]>;
+  /** Drop a throwaway conversation (a heated-mode moderator): its key, tools and mapping. pi.sqlite keeps its history. */
+  forget(key: string): void;
 }
 
 export interface PiRuntimeOptions {
@@ -161,6 +163,8 @@ export class PiRuntime implements AgentRuntime {
       conv_id INTEGER NOT NULL,
       created_at INTEGER NOT NULL
     )`);
+    // Moderators live as long as one conversation; the ones a crash left behind are never used again.
+    db.prepare("DELETE FROM agent_conversations WHERE key LIKE '%#mod:%'").run();
     for (const row of db.prepare("SELECT key, conv_id FROM agent_conversations").all() as { key: string; conv_id: number }[]) {
       this.remember(row.key, row.conv_id as ConversationId);
     }
@@ -217,6 +221,17 @@ export class PiRuntime implements AgentRuntime {
     this.convToKey.set(id as number, key);
   }
 
+  forget(key: string): void {
+    if (key === OWNER_KEY) return;
+    const id = this.keyToConv.get(key);
+    this.keyToConv.delete(key);
+    if (id !== undefined) this.convToKey.delete(id as number);
+    this.busy.delete(key);
+    this.allowed.delete(key);
+    if (this.keySpecs.delete(key)) this.reinstall();
+    this.opts.db.prepare("DELETE FROM agent_conversations WHERE key = ?").run(key);
+  }
+
   async ensureConversation(key: string): Promise<string> {
     return String(await this.convId(key));
   }
@@ -270,7 +285,7 @@ export class PiRuntime implements AgentRuntime {
       sameList(current.tools.map((t) => t.name), tools.map((t) => t.name)) &&
       current.model?.provider === model?.provider &&
       current.model?.modelId === model?.modelId &&
-      (setup.thinkingLevel === undefined || current.thinkingLevel === setup.thinkingLevel) &&
+      (current.thinkingLevel ?? "off") === (setup.thinkingLevel ?? "off") &&
       (current.cwd ?? undefined) === (coding ? setup.codingTools?.cwd : undefined);
     if (same) return;
     await conv.configure(
@@ -280,7 +295,8 @@ export class PiRuntime implements AgentRuntime {
         tools,
         instructions: setup.instructions,
         cwd: coding ? (setup.codingTools?.cwd ?? null) : null,
-        ...(setup.thinkingLevel !== undefined ? { thinkingLevel: setup.thinkingLevel as never } : {}),
+        // No level means "off": a level an earlier setup set must not stick.
+        thinkingLevel: (setup.thinkingLevel ?? "off") as never,
       },
       BACKGROUND_CONTEXT,
     );

@@ -84,6 +84,23 @@ test("config: loop-guard numbers must be non-negative integers", () => {
   assert.throws(() => resolveConfig({ policy: { repliesPerHourFullTrust: "lots" } as never }), /repliesPerHourFullTrust/);
 });
 
+test("config: Conversations settings and the experimental switch are validated", () => {
+  const ok = resolveConfig({ experimental: true, policy: { conversationStartHour: 9, conversationEndHour: 17, conversationTimeZone: "Europe/Paris" } } as never);
+  assert.equal(ok.experimental, true);
+  assert.equal(ok.policy.conversationTimeZone, "Europe/Paris");
+  assert.equal(resolveConfig({ experimental: "yes" } as never).experimental, false, "only true turns it on");
+  assert.equal(resolveConfig({}).experimental, false, "off by default");
+  for (const k of ["conversationMinMinutes", "conversationMaxMinutes", "conversationMessages"]) {
+    assert.throws(() => resolveConfig({ policy: { [k]: 0 } } as never), new RegExp(`policy.${k}`));
+  }
+  assert.throws(() => resolveConfig({ policy: { conversationMinMinutes: 60, conversationMaxMinutes: 30 } } as never), /conversationMaxMinutes/);
+  assert.throws(() => resolveConfig({ policy: { conversationStartHour: 18, conversationEndHour: 9 } } as never), /conversationStartHour/);
+  assert.throws(() => resolveConfig({ policy: { conversationEndHour: 25 } } as never), /conversationEndHour/);
+  for (const tz of ["Mars/Olympus", "", "  ", 42, null]) {
+    assert.throws(() => resolveConfig({ policy: { conversationTimeZone: tz } } as never), /conversationTimeZone/, String(tz));
+  }
+});
+
 test("parseAgentAnswer: NO_REPLY, empty, and the [END] marker", () => {
   assert.deepEqual(parseAgentAnswer("  "), { send: false });
   assert.deepEqual(parseAgentAnswer(" NO_REPLY\n"), { send: false });

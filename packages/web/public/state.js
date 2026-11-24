@@ -102,7 +102,9 @@ export function setState(st) {
   if (typeof st.ownerBusy === "boolean") setOwnerBusy(st.ownerBusy);
   S.p2p = st.p2p ?? null;
   S.policy = st.policy ?? {};
-  S.experimental = st.experimental === true;
+  const experimental = st.experimental === true;
+  const experimentalChanged = S.experimental !== experimental;
+  S.experimental = experimental;
   S.channels = new Map((st.channels ?? []).map((c) => [c.id, c]));
   S.transfers = new Map((st.transfers ?? []).map((t) => [t.tid, t]));
   S.mcp = st.mcp ?? [];
@@ -126,6 +128,7 @@ export function setState(st) {
   emit("owner");
   emit("requests");
   emit("followups");
+  if (experimentalChanged) emit("experimental");
 }
 
 export function setExperimental(enabled) {
