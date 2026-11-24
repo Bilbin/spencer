@@ -8,6 +8,7 @@ import { TransferStore } from "../../src/transfers/store.ts";
 import { generateIdentity, pairKey, randomId } from "@spencer/protocol";
 import type { FileBody } from "@spencer/protocol";
 import { createTransferService, fakeCrocRunner, TransferError } from "../../src/transfers/index.ts";
+import { writeAll } from "../../src/transfers/write-all.ts";
 import type { FakeCrocRunner } from "../../src/transfers/index.ts";
 import { pair, sleep, waitFor } from "./harness.ts";
 import type { TransferP2pAdapter } from "../../src/contracts.ts";
@@ -47,6 +48,47 @@ afterEach(async () => {
 const noApproval = { policy: { requireApprovalForOutgoingFiles: false } };
 
 describe("transfers (fake croc)", () => {
+  it("writes every byte when a writer reports partial progress", async () => {
+    const output: number[] = [];
+    const writer = {
+      async write(buffer: Uint8Array, offset: number, length: number) {
+        const bytesWritten = Math.min(2, length);
+        output.push(...buffer.subarray(offset, offset + bytesWritten));
+        return { bytesWritten };
+      },
+    };
+    await writeAll(writer, Buffer.from("partial writes are complete"));
+    assert.equal(Buffer.from(output).toString(), "partial writes are complete");
+  });
+
+  it("rejects conflicting concurrent uploadId requests with a typed error while matching retries share a transfer", async () => {
+    const { A, ch } = await setup({ a: noApproval });
+    const peerTwo = generateIdentity().id;
+    A.peersOf.set(ch, [...A.peersOf.get(ch)!, peerTwo]);
+    const upload = (bytes: string, uploadId: string, to = A.peersOf.get(ch)![0]) => A.s.requestUpload(ch, {
+      name: "same.txt",
+      uploadId,
+      to,
+      bytes: (async function* () { yield Buffer.from(bytes); })(),
+    });
+
+    const matching = await Promise.all([upload("same bytes", "upload-race-match-0001"), upload("same bytes", "upload-race-match-0001")]);
+    assert.equal(matching[0].tid, matching[1].tid);
+    assert.equal(A.s.list(ch).length, 1);
+
+    const contentRace = await Promise.allSettled([upload("content one", "upload-race-content-01"), upload("content two", "upload-race-content-01")]);
+    const rejectedContent = contentRace.find((result) => result.status === "rejected");
+    assert.ok(rejectedContent && rejectedContent.status === "rejected");
+    assert.ok(rejectedContent.reason instanceof TransferError);
+    assert.equal(rejectedContent.reason.code, "conflict");
+
+    const recipientRace = await Promise.allSettled([upload("recipient race", "upload-race-recipient-1", A.peersOf.get(ch)![0]), upload("recipient race", "upload-race-recipient-1", peerTwo)]);
+    const rejectedRecipient = recipientRace.find((result) => result.status === "rejected");
+    assert.ok(rejectedRecipient && rejectedRecipient.status === "rejected");
+    assert.ok(rejectedRecipient.reason instanceof TransferError);
+    assert.equal(rejectedRecipient.reason.code, "conflict");
+  });
+
   it("happy path: owner send, auto-accept, file lands in quarantine", async () => {
     const { A, B, ch, bus } = await setup({ a: noApproval });
     const { path, data } = makeFile(A, "report final.pdf");
@@ -80,6 +122,48 @@ describe("transfers (fake croc)", () => {
     assert.ok(!dump.includes(code));
     assert.equal(A.s.list(ch).length, 1);
     assert.equal(A.s.list(randomId()).length, 0);
+  });
+
+  it("uploaded bytes enter the owner transfer path and partial staging is cleaned", async () => {
+    const { A, B, ch } = await setup();
+    const data = Buffer.from("small synthetic upload");
+    const uploadId = "upload-key-00000001";
+    const t = await A.s.requestUpload(ch, { name: "../notes <draft>.txt", uploadId, bytes: (async function* () { yield data; })() });
+    assert.equal(t.initiatedBy, "owner");
+    assert.equal(t.peer, B.id.id);
+    assert.equal(t.size, data.length);
+    assert.equal(t.sha256, sha(data));
+    assert.equal(t.name.includes("/"), false);
+    assert.equal(readFileSync(t.path!).toString(), data.toString());
+    assert.equal(existsSync(join(A.dataDir, "upload-staging")), true);
+    assert.deepEqual(readdirSync(join(A.dataDir, "upload-staging")), []);
+    const retry = await A.s.requestUpload(ch, { name: "../notes <draft>.txt", uploadId, bytes: (async function* () { yield data; })() });
+    assert.equal(retry.tid, t.tid, "retry after a lost response returns the committed transfer");
+    await assert.rejects(A.s.requestUpload(ch, { name: "../notes <draft>.txt", uploadId, bytes: (async function* () { yield Buffer.from("different"); })() }), /already used for different content/);
+
+    const secondPeer = generateIdentity().id;
+    A.peersOf.set(ch, [...A.peersOf.get(ch)!, secondPeer]);
+    const groupUpload = await A.s.requestUpload(ch, { name: "group.bin", uploadId: "upload-key-group-0001", to: secondPeer, bytes: (async function* () { yield Buffer.from("group"); })() });
+    assert.equal(groupUpload.peer, secondPeer, "group upload keeps the explicit single recipient");
+    A.peersOf.set(ch, A.peersOf.get(ch)!.filter((peer) => peer !== secondPeer));
+    const retryAfterLeave = await A.s.requestUpload(ch, { name: "group.bin", uploadId: "upload-key-group-0001", to: secondPeer, bytes: (async function* () { yield Buffer.from("group"); })() });
+    assert.equal(retryAfterLeave.tid, groupUpload.tid, "a retry still resolves an accepted transfer after the recipient leaves");
+    await assert.rejects(A.s.requestUpload(ch, { name: "group.bin", uploadId: "upload-key-group-0001", to: A.peersOf.get(ch)![0], bytes: (async function* () { yield Buffer.from("group"); })() }), (error: unknown) => error instanceof TransferError && error.code === "conflict");
+
+    await assert.rejects(A.s.requestUpload(ch, {
+      name: "broken.txt",
+      uploadId: "upload-key-broken-001",
+      bytes: (async function* () { yield Buffer.from("partial"); throw new Error("synthetic stream failure"); })(),
+    }), /cannot stage uploaded file/);
+    assert.equal(existsSync(t.path!), true, "failed staging must not remove an active transfer file");
+    assert.deepEqual(readdirSync(join(A.dataDir, "upload-staging")), []);
+    await assert.rejects(A.s.requestUpload(ch, {
+      name: "too-large.bin",
+      uploadId: "upload-key-too-large-01",
+      bytes: (async function* () { yield Buffer.alloc(25 * 1024 * 1024); yield Buffer.from("x"); })(),
+    }), /25 MiB upload limit/);
+    assert.deepEqual(readdirSync(join(A.dataDir, "upload-staging")), []);
+    assert.equal(A.s.list(ch).length, 2, "failed uploads must not create transfers");
   });
 
   it("outgoing approval: awaiting_approval → approve → completed", async () => {

@@ -13,7 +13,7 @@
   ],
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test --test-concurrency=1 'packages/*/test/**/*.test.ts'",
+    "test": "node --test --test-concurrency=1 'packages/*/test/**/*.test.ts' 'packages/web/test/**/*.test.js'",
     "test:unit": "node --test 'packages/protocol/test/**/*.test.ts' 'packages/relay/test/**/*.test.ts'",
     "test:integration": "node --test --test-concurrency=1 'packages/*/test/integration/**/*.test.ts'",
     "build:relay": "node scripts/build-relay.mjs",
@@ -24,6 +24,7 @@
     "@types/node": "22.20.5",
     "@types/ws": "8.18.2",
     "esbuild": "0.28.2",
+    "happy-dom": "21.0.4",
     "postject": "1.0.0-alpha.6",
     "typescript": "7.0.2"
   }

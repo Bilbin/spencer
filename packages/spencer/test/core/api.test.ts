@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import WebSocket from "ws";
+import { TransferError } from "../../src/transfers/service.ts";
 import { http, relayAt, startNode, tempDir, waitFor } from "./helpers.ts";
 
 function wsOpen(url: string, headers: Record<string, string> = {}): Promise<{ ws?: WebSocket; status?: number }> {
@@ -157,6 +158,35 @@ test("http api: guards, state, owner + channel messages, invites, events ws", as
     const tq = await http(port, "POST", "/api/transfers", { headers: H, body: { ch, path: "/tmp/x" } });
     assert.equal(tq.status, 200);
     assert.equal(A.transfers().requests[0].req.initiatedBy, "owner");
+    const uploadUrl = `/api/transfers/upload?ch=${encodeURIComponent(ch)}&name=${encodeURIComponent("notes <draft>.txt")}&uploadId=upload-key-00000001`;
+    assert.equal((await http(port, "POST", `/api/transfers/upload?ch=${encodeURIComponent(ch)}&name=x`, { body: Buffer.from("x"), headers: { ...H, "Content-Type": "application/octet-stream" } })).status, 400);
+    assert.equal((await http(port, "POST", uploadUrl, { body: Buffer.from("untrusted bytes"), headers: { "Content-Type": "application/octet-stream" } })).status, 401);
+    const uploaded = await http(port, "POST", uploadUrl, { body: Buffer.from("synthetic upload"), headers: { ...H, "Content-Type": "application/octet-stream" } });
+    assert.equal(uploaded.status, 200, uploaded.text);
+    assert.equal(uploaded.json().name, "notes <draft>.txt");
+    assert.equal(A.transfers().requests[1].req.initiatedBy, "owner");
+    assert.equal(A.transfers().requests[1].req.path, "notes <draft>.txt");
+    assert.equal(A.transfers().uploads[0].uploadId, "upload-key-00000001");
+    assert.equal(A.transfers().uploads[0].data.toString(), "synthetic upload");
+    const transferService = A.transfers();
+    const requestUpload = transferService.requestUpload.bind(transferService);
+    transferService.requestUpload = async () => { throw new TransferError("conflict", "upload retry id was already used for different content or recipient"); };
+    const conflict = await http(port, "POST", uploadUrl, { body: Buffer.from("different bytes"), headers: { ...H, "Content-Type": "application/octet-stream" } });
+    assert.equal(conflict.status, 409);
+    assert.match(conflict.json().error, /already used for different content or recipient/);
+    for (const [code, expectedStatus] of [
+      ["bad_request", 400],
+      ["not_found", 404],
+      ["bad_state", 409],
+      ["conflict", 409],
+    ] as const) {
+      transferService.requestUpload = async () => { throw new TransferError(code, `synthetic ${code}`); };
+      const response = await http(port, "POST", uploadUrl, { body: Buffer.from("synthetic"), headers: { ...H, "Content-Type": "application/octet-stream" } });
+      assert.equal(response.status, expectedStatus, `${code} maps to ${expectedStatus}`);
+    }
+    transferService.requestUpload = requestUpload;
+    assert.equal((await http(port, "POST", uploadUrl, { body: Buffer.from("x"), headers: { ...H, "Content-Type": "application/json" } })).status, 415);
+    assert.equal((await http(port, "POST", `/api/transfers/upload?ch=unknown&name=x`, { body: Buffer.from("x"), headers: { ...H, "Content-Type": "application/octet-stream" } })).status, 400);
     assert.equal((await http(port, "POST", "/api/transfers/abc/approve", { headers: H })).status, 404);
     assert.deepEqual((await http(port, "GET", "/api/mcp", { headers: H })).json(), { servers: [] });
     assert.equal((await http(port, "GET", "/api/nope", { headers: H })).status, 404);
