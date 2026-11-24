@@ -699,3 +699,56 @@ The daemon emits `{type: "bio", bio: BioStatus}` after a BIO save or sharing cha
 The database stores `channels.share_bio`, `channels.last_hello_about` as a SHA-256 digest, and `members.about_at`. Startup adds missing columns idempotently. BIO changes recheck hellos across channels. Rechecks stagger channels when there are more than 15.
 
 The owner's BIO narrows channel trust rules, including Full Trust. Conversations channels omit that scope restriction. Owner instructions include the published scope. Peer BIO blocks come last in channel instructions, after trust, scope, and Soul. They contain only that channel's member biographies. Every angle bracket in peer text is escaped. Peer self-descriptions never grant permissions or override rules. Direct channels include the complete bio. Groups truncate each biography to 400 UTF-16 code units without splitting surrogate pairs. Incoming BIO changes are stored immediately. Agent refreshes occur at most once per peer per channel every two minutes, with a trailing refresh.
+
+### Owner rules and structured memoir
+
+Memoir is always available. The authenticated Owner HTTP API is the only application
+writer of `RULES.md`. Peer rules apply only to that peer's direct channels; group
+rules apply only to that group chat. Conversations channels omit rules, history,
+and the `record_memoir_note` tool. Rules narrow the channel policy; they remain
+advisory when Full Trust exposes filesystem or T3 MCP tools.
+
+Rules live at `peers/<peerId>/RULES.md` or `channels/<chId>/RULES.md` under the data
+directory. Writes validate identity and membership, cap trimmed UTF-8 text at
+2048 bytes, and use private atomic replacement. Empty text removes the file.
+Reads of hand-edited files stop at 2048 bytes.
+
+Historical facts live separately in SQLite `memoir_notes`. Each note has `id`,
+`scopeKind`, `scopeId`, `sourceCh`, `author` (`owner` or `agent`), `trustAtWrite`,
+`askerId`, `text` (1–500 characters), `pinned`, `seen`, and `createdAt` (Unix ms).
+Agent notes start unseen and emit a `memoir` event without posting to Owner chat.
+They are deduplicated per scope and limited to five per ten minutes. Each scope
+retains up to twenty unpinned notes with at most 4000 characters of unpinned text;
+oldest unpinned notes are removed first. Pinned notes survive this eviction.
+
+| Method | Path | Body / result |
+| --- | --- | --- |
+| GET | `/api/peers` | `{ peers }`; includes `active`, `hasRules`, `noteCount`, `unseenNotes` and inactive identities with saved data |
+| GET | `/api/peers/:id/memoir` | `{ id, name, fingerprint, active, bio, bioAt, rules, maxRulesBytes, notes, channels }`; `?markSeen=1` marks notes seen |
+| POST | `/api/peers/:id/memoir/seen` | Marks notes seen |
+| PUT | `/api/peers/:id/rules` | `{ text }`; returns updated profile |
+| POST | `/api/peers/:id/notes` | `{ text, pinned? }`; returns owner note |
+| GET | `/api/channels/:ch/memoir` | `{ ch, name, rules, maxRulesBytes, notes }`; group chats only |
+| PUT | `/api/channels/:ch/rules` | `{ text }`; returns updated profile |
+| POST | `/api/channels/:ch/notes` | `{ text, pinned? }`; returns owner note |
+| PATCH | `/api/memoir/notes/:noteId` | `{ text?, pinned?, seen? }`; returns updated note |
+| DELETE | `/api/memoir/notes/:noteId` | Deletes note |
+
+Mutations emit `{ type: "memoir", scopeKind: "peer" | "channel", scopeId }`
+on `/api/events`. Owner mutations refresh the affected channels immediately;
+agent notes refresh with a 120-second leading and trailing throttle. Leaving a
+channel deletes its group rules and notes. Saved peer data remains visible in the
+inactive directory until the owner clears it.
+
+Channel agents can call `record_memoir_note({ text })` to record durable facts.
+The application derives scope and provenance from the channel and current asker.
+This tool cannot write rules. Owner chat can call
+`read_peer_profile({ target })` and `add_memoir_note({ target, text, pinned? })`.
+Targets require an exact identity ID, fingerprint, or unambiguous name. Ambiguous
+names fail with candidate fingerprints/IDs. Owner chat has no rules-writing tool;
+the owner uses Peer Card or Group Memoir to edit rules.
+
+Channel prompts include only their own scope's rules and up to 2000 characters of
+historical notes (pinned first, then newest). Notes are escaped as untrusted data
+at the end of the prompt. A group never receives a member's DM rules or notes.
+Owner prompts never automatically include peer or group history.

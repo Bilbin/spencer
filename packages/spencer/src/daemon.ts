@@ -1,3 +1,4 @@
+import { Memoir } from "./memoir.ts";
 import { readBio, writeBio } from "./bio.ts";
 import { MAX_ABOUT } from "@spencer/protocol";
 import { LinkManager, createTransferP2pAdapter, type LinkManagerTuning } from "./p2p/index.ts";
@@ -274,6 +275,7 @@ export class Daemon {
       events: this.events,
       log,
       channelChanged,
+      memoirLeave: ch => this.s.core?.memoir.removeChannel(ch),
       bioText: () => readBio(dir),
       bioChanged: () => this.events.emit({ type: "bio", bio: this.core.bio() }),
       localFeatures: () => this.need("cfg").p2p.mode === "files" && this.s.links?.status().available ? [P2P_FILES_FEATURE] : [],
@@ -393,6 +395,7 @@ export class Daemon {
     if (s.pool) await step("relays", () => s.pool!.stop());
     if (s.outbox) await step("outbox", () => s.outbox!.stop());
     if (s.inbox) await step("inbox", () => s.inbox!.stop());
+    s.core?.memoir.stop();
     s.channels?.stop();
     if (s.agent) await step("agent", () => s.agent!.stop());
     if (s.transfers) await step("transfers", () => s.transfers!.stop());
@@ -552,7 +555,11 @@ export class Daemon {
     const outbox = this.need("outbox");
     const log = this.log;
     const daemon = this;
+    const memoir = new Memoir({ db: this.need("db"), dataDir: this.dataDir, peers: () => channels.listPeerDirectory(),
+      channels: () => channels.list(), events: this.events,
+      refresh: ch => { void this.s.agent?.channelChanged(ch).catch(e => log(`memoir refresh: ${e.message}`)); } });
     return {
+      memoir,
       db: this.need("db"),
       dataDir: this.dataDir,
       config: () => this.need("cfg"),
@@ -571,7 +578,7 @@ export class Daemon {
         return bio;
       },
       peerBios: ch => channels.peerBios(ch),
-      listPeerDirectory: () => channels.listPeerDirectory(),
+      listPeerDirectory: () => memoir.directory(),
       listChannels: () => channels.list(),
       getChannel: (ch) => channels.get(ch),
       readChannel: (ch, limit) => channels.messages(ch, limit),

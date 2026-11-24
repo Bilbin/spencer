@@ -1,3 +1,4 @@
+import { Memoir } from "../../src/memoir.ts";
 /** Test helpers: an in-memory stub of `CoreServices` and small waiting utilities. */
 import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -18,7 +19,7 @@ import type {
 } from "../../src/contracts.ts";
 
 /** What a channel conversation is offered without MCP tools. */
-export const CHANNEL_TOOLS = ["notify_owner", "ask_owner", "propose_file_send", "schedule_followup", "cancel_followup"];
+export const CHANNEL_TOOLS = ["record_memoir_note", "notify_owner", "ask_owner", "propose_file_send", "schedule_followup", "cancel_followup"];
 
 export const ME = { id: "me-id-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", name: "Alice's Spencer", fingerprint: "aaaa-aaaa-aaaa-aaaa-aaaa" };
 export const BOB = { id: "bob-id-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", name: "Bob's Spencer", fingerprint: "bbbb-bbbb-bbbb-bbbb-bbbb" };
@@ -85,6 +86,7 @@ export function makeCore(opts: { dir?: string; channels?: Channel[]; config?: Pa
   const channels = new Map<string, Channel>((opts.channels ?? [channel("chDirect", "direct", "Bob chat"), channel("chGroup", "group", "Team")]).map((c) => [c.id, c]));
   const byKey = new Map<string, string>();
   const core: StubCore = {
+    memoir: new Memoir({db,dataDir:dir,peers:()=>[],channels:()=>[...channels.values()],events:{emit(){}},refresh() {}}),
     bio: () => ({ text: "", maxChars: 2000, sharedChannels: [] }),
     bioText: () => core.bio().text,
     setBio: async () => ({ text: "", maxChars: 2000, sharedChannels: [] }),
@@ -150,6 +152,7 @@ export function makeCore(opts: { dir?: string; channels?: Channel[]; config?: Pa
     },
     events: { emit: (e) => core.emitted.push(e) },
     cleanup() {
+      core.memoir.stop();
       try {
         db.close();
       } catch {}

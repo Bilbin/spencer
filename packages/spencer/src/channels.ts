@@ -76,6 +76,7 @@ export class UserError extends Error {
 }
 
 export interface ChannelManagerDeps {
+  memoirLeave?: (ch: string) => void;
   bioText?: () => string;
   bioChanged?: () => void;
   localFeatures?: () => string[];
@@ -475,7 +476,7 @@ export class ChannelManager {
     for (const ch of this.list()) for (const row of this.peerBios(ch.id)) {
       let peer = peers.get(row.id);
       if (!peer) {
-        peer = { ...row, fingerprint: fingerprint(row.id), channels: [] };
+        peer = { ...row, active: true, hasRules: false, noteCount: 0, unseenNotes: 0, fingerprint: fingerprint(row.id), channels: [] };
         peers.set(row.id, peer);
       } else {
         if (row.about !== null && (peer.about === null || (row.aboutAt ?? 0) > (peer.aboutAt ?? 0))) {
@@ -713,6 +714,7 @@ export class ChannelManager {
     } else {
       this.d.log(`channel ${ch}: relay not connected; leaving locally only`);
     }
+    this.d.memoirLeave?.(ch);
     this.d.sql.tx(() => {
       this.d.sql.run("DELETE FROM outbox WHERE ch = ? AND state = 'pending'", ch);
       this.d.sql.run("DELETE FROM messages WHERE ch = ?", ch);
