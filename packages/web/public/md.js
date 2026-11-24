@@ -457,12 +457,13 @@ function backtickRunsByLength(text) {
   return runs;
 }
 
-function codeSpanAt(text, start, runs) {
-  let openEnd = start + 1;
-  while (text[openEnd] === "`") openEnd++;
+function codeSpanAt(text, start, runs, unmatchedRunEnd, preview) {
+  let openEnd = unmatchedRunEnd > start ? unmatchedRunEnd : start + 1;
+  if (openEnd === start + 1) while (text[openEnd] === "`") openEnd++;
+  const runEnd = openEnd;
   const length = openEnd - start;
   const positions = runs.get(length);
-  if (!positions) return { openEnd, content: null };
+  if (!positions) return { openEnd: preview ? runEnd : start + 1, runEnd, content: null };
 
   let low = 0;
   let high = positions.length;
@@ -471,10 +472,10 @@ function codeSpanAt(text, start, runs) {
     if (positions[middle] <= openEnd) low = middle + 1;
     else high = middle;
   }
-  if (low === positions.length) return { openEnd, content: null };
+  if (low === positions.length) return { openEnd: preview ? runEnd : start + 1, runEnd, content: null };
 
   const closeStart = positions[low];
-  return { openEnd: closeStart + length, content: text.slice(openEnd, closeStart) };
+  return { openEnd: closeStart + length, runEnd, content: text.slice(openEnd, closeStart) };
 }
 
 /** Inline Markdown → nodes. `leaf` renders runs of plain text. */
@@ -485,6 +486,7 @@ export function inline(text, leaf = plainLeaf, options = {}) {
   }
   const out = [];
   const backtickRuns = backtickRunsByLength(text);
+  let unmatchedBacktickRunEnd = -1;
   let buf = "";
   let i = 0;
   const flush = () => {
@@ -510,12 +512,14 @@ export function inline(text, leaf = plainLeaf, options = {}) {
       continue;
     }
     if (c === "`") {
-      const span = codeSpanAt(text, i, backtickRuns);
+      const span = codeSpanAt(text, i, backtickRuns, unmatchedBacktickRunEnd, options.preview);
       if (span.content !== null) {
+        unmatchedBacktickRunEnd = -1;
         flush();
         const code = span.content.replace(/\n/g, " ");
         out.push(h("code", null, /^ .* $/.test(code) ? code.slice(1, -1) : code));
       } else {
+        unmatchedBacktickRunEnd = span.runEnd;
         buf += text.slice(i, span.openEnd);
       }
       i = span.openEnd;

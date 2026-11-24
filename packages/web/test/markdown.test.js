@@ -39,6 +39,9 @@ test("Markdown rendering handles long blank runs and unmatched code delimiters",
     const mediumEmphasisSource = "*a" + "**a".repeat(15) + " ".repeat(200_000) + "x";
     const mediumEmphasis = markdown(mediumEmphasisSource, undefined, { htmlPreview: false });
     const ordinaryMessages = markdown("**bold** ".repeat(13));
+    const partialMultiTickInput = String.fromCharCode(96).repeat(2) + "x" + String.fromCharCode(96);
+    const partialMultiTickMessage = markdown(partialMultiTickInput);
+    const partialMultiTickPreview = markdown(partialMultiTickInput, undefined, { htmlPreview: false });
     const ordinaryPreview = markdown("**bold** ".repeat(13), undefined, { htmlPreview: false });
     const ordinaryLongPreview = markdown("This is a normal paragraph with **one**, **two**, and **three** emphasized phrases. Additional explanatory text makes the paragraph longer than 128 characters.", undefined, { htmlPreview: false });
     const ordinaryFivePhrasePreview = markdown("A normal report describes **one**, **two**, **three**, **four**, and **five** key findings, followed by a brief explanation of the results and the actions needed next.", undefined, { htmlPreview: false });
@@ -91,6 +94,13 @@ test("Markdown rendering handles long blank runs and unmatched code delimiters",
     }
     if (ordinaryMessages[0].childNodes.filter((node) => node.tagName === "STRONG").length !== 13) {
       throw new Error("ordinary messages should retain inline formatting");
+    }
+    const partialMultiTickChildren = partialMultiTickMessage[0]?.childNodes ?? [];
+    if (partialMultiTickChildren[0]?.value !== String.fromCharCode(96) || partialMultiTickChildren[1]?.tagName !== "CODE" || partialMultiTickChildren[1]?.childNodes[0]?.value !== "x") {
+      throw new Error("unmatched multi-backtick runs should retain legacy single-backtick spans in messages");
+    }
+    if (tableText(partialMultiTickPreview[0]) !== partialMultiTickInput || partialMultiTickPreview[0]?.childNodes.some((node) => node.tagName === "CODE")) {
+      throw new Error("unmatched multi-backtick runs should remain literal in transfer previews");
     }
     if (ordinaryPreview[0].childNodes.filter((node) => node.tagName === "STRONG").length !== 13 || ordinaryPreview.length !== 1) {
       throw new Error("ordinary preview content should retain inline formatting without a fallback notice");
