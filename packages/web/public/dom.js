@@ -312,5 +312,5 @@ export async function copyText(text) {
 /** Grow a textarea with its content, up to its CSS max-height. */
 export function autoGrow(ta) {
   ta.style.height = "auto";
-  ta.style.height = `${Math.min(ta.scrollHeight, 220)}px`;
+  if (ta.scrollHeight > 0) ta.style.height = `${Math.min(ta.scrollHeight, 220)}px`;
 }
