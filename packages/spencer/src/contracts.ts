@@ -145,6 +145,12 @@ export interface Transfer {
   expiresAt: number;
 }
 
+export interface OwnerAttachment {
+  id: string;
+  name: string;
+  size: number;
+}
+
 export interface OwnerItem {
   id: string;
   role: "user" | "assistant" | "tool" | "note";
@@ -156,6 +162,7 @@ export interface OwnerItem {
   untrusted?: boolean;
   /** The note is an owner request (`ask_owner`) the owner can approve or deny: its id. */
   request?: string;
+  attachments?: OwnerAttachment[];
 }
 
 /**
@@ -409,7 +416,7 @@ export interface AgentService {
   onPeerChat(msg: IncomingChat): Promise<{ note?: string }>;
   /** We sent a chat in a channel (owner typed it, or the owner agent sent it): record as channel context. */
   onOutgoingChat(msg: OutgoingChat): Promise<void>;
-  ownerSend(text: string): Promise<{ submissionId: string }>;
+  ownerSend(text: string, opts?: { requestId?: string; attachments?: (OwnerAttachment & { path: string })[] }): Promise<{ submissionId: string }>;
   ownerTranscript(limit: number): Promise<OwnerItem[]>;
   ownerBusy(): boolean;
   /** Informational note appended to the owner conversation (never starts a run). See TransferDeps.ownerNote. */
