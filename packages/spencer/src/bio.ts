@@ -1,12 +1,25 @@
-import { readFileSync, writeFileSync, renameSync, rmSync } from "node:fs";
+import { closeSync, openSync, readSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { MAX_ABOUT } from "@spencer/protocol";
+import { MAX_ABOUT, truncateUtf16 } from "@spencer/protocol";
 import { UserError } from "./channels.ts";
 
+/** At most 4 UTF-8 bytes per UTF-16 code unit, plus slack for surrounding whitespace. */
+const MAX_BIO_READ_BYTES = (MAX_ABOUT + 64) * 4;
+
 export function readBio(dataDir: string): string {
-  try { return readFileSync(join(dataDir, "BIO.md"), "utf8").trim(); }
-  catch (e) { if (e instanceof Error && "code" in e && e.code === "ENOENT") return ""; throw e; }
+  let fd: number | undefined;
+  try {
+    fd = openSync(join(dataDir, "BIO.md"), "r");
+    const buf = Buffer.alloc(MAX_BIO_READ_BYTES);
+    const n = readSync(fd, buf, 0, MAX_BIO_READ_BYTES, 0);
+    const text = new TextDecoder().decode(buf.subarray(0, n)).replace(/\uFFFD+$/, "").trim();
+    return truncateUtf16(text, MAX_ABOUT);
+  } catch {
+    return "";
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 export function writeBio(dataDir: string, value: unknown): void {

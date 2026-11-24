@@ -181,7 +181,7 @@ function renderSidebar() {
       null,
       navItem({ name: "transfers" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("transfer", 16)), h("span.nav-name", null, "Transfers"), badge(pending, "need action", "attn")], { cls: "foot" }),
       navItem({ name: "mcp" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("plug", 16)), h("span.nav-name", null, "MCP servers"), mcpBad ? h("span.pdot.inline.bad", { role: "img", "aria-label": "a server has an error" }) : null], { cls: "foot" }),
-      navItem({ name: "bio" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("heart", 16)), h("span.nav-name", null, "Bio")], { cls: "foot" }),
+      navItem({ name: "bio" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("file", 16)), h("span.nav-name", null, "Bio")], { cls: "foot" }),
       navItem({ name: "peers" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("users", 16)), h("span.nav-name", null, "Peers")], { cls: "foot" }),
       S.experimental ? navItem({ name: "soul" }, [h("span.nav-glyph", { "aria-hidden": "true" }, icon("heart", 16)), h("span.nav-name", null, "Soul")], { cls: "foot" }) : null,
       navItem(

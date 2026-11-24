@@ -390,6 +390,7 @@ export interface OutgoingChat {
 /** What the agent layer needs from the core. */
 export interface CoreServices {
   bio(): BioStatus;
+  bioText(): string;
   setBio(text: unknown): Promise<BioStatus>;
   peerBios(ch: string): PeerBio[];
   listPeerDirectory(): PeerSummary[];

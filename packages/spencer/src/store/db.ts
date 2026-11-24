@@ -78,6 +78,10 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE channels ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat'`,
   // 5: Conversations channels: heated mode (spicy debates with a moderator)
   `ALTER TABLE channels ADD COLUMN heated INTEGER NOT NULL DEFAULT 0`,
+  // 6: Public BIO sharing and peer bio timestamps
+  `ALTER TABLE channels ADD COLUMN share_bio INTEGER NOT NULL DEFAULT 1;
+   ALTER TABLE channels ADD COLUMN last_hello_about TEXT;
+   ALTER TABLE members ADD COLUMN about_at INTEGER;`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -96,15 +100,6 @@ export function openDb(dataDir: string): DatabaseSync {
     db.exec("PRAGMA synchronous = NORMAL");
     db.exec("PRAGMA foreign_keys = ON");
     migrate(db);
-    for (const [table, column, declaration] of [
-      ["channels", "share_bio", "INTEGER NOT NULL DEFAULT 1"],
-      ["channels", "last_hello_about", "TEXT"],
-      ["members", "about_at", "INTEGER"],
-    ]) {
-      if (!db.prepare(`PRAGMA table_info(${table})`).all().some(row => row.name === column)) {
-        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${declaration}`);
-      }
-    }
   } catch (e) {
     db.close();
     throw e;

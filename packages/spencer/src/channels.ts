@@ -414,9 +414,10 @@ export class ChannelManager {
     const next = JSON.stringify([...present].sort());
     const hello = this.buildHello(ch);
     const aboutHash = createHash("sha256").update(hello.about ?? "").digest("hex");
+    const prevAboutHash = r.last_hello_about ?? createHash("sha256").update("").digest("hex");
     const feats = hello.features ?? [];
     const featsJson = JSON.stringify(feats);
-    if (!newcomer && !(present.length > 0 && (featsJson !== r.last_hello_features || aboutHash !== r.last_hello_about))) {
+    if (!newcomer && !(present.length > 0 && (featsJson !== r.last_hello_features || aboutHash !== prevAboutHash))) {
       if (next !== r.last_hello_members && present.length < greeted.size) {
         // Someone left: shrink the set so a rejoin gets a fresh hello.
         this.d.sql.run("UPDATE channels SET last_hello_members = ? WHERE id = ?", next, ch);
@@ -429,13 +430,18 @@ export class ChannelManager {
 
   buildHello(ch: string): HelloBody {
     const feats = [...new Set(this.d.localFeatures?.() ?? [])].sort();
-    const about = this.row(ch)?.share_bio ? this.d.bioText?.() : "";
+    let about = "";
+    if (this.row(ch)?.share_bio) {
+      try { about = this.d.bioText?.() ?? ""; } catch { about = ""; }
+    }
     return { type: "hello", name: this.d.config().name, agent: AGENT_VERSION,
       ...(feats.length ? { features: feats } : {}), ...(about ? { about } : {}) };
   }
 
+  private stopped = false;
   private helloTimers = new Set<ReturnType<typeof setTimeout>>();
   stop(): void {
+    this.stopped = true;
     for (const timer of this.helloTimers) clearTimeout(timer);
     this.helloTimers.clear();
     for (const state of this.bioRefresh.values()) if (state.timer) clearTimeout(state.timer);
@@ -443,11 +449,17 @@ export class ChannelManager {
   }
 
   recheckHellos(): void {
+    if (this.stopped) return;
     const rows = this.rows();
     rows.forEach((r, i) => {
-      if (rows.length <= 15 || i === 0) this.maybeHello(r.id);
-      else {
-        const timer = setTimeout(() => { this.helloTimers.delete(timer); this.maybeHello(r.id); }, i * 150);
+      if (rows.length <= 15 || i === 0) {
+        try { this.maybeHello(r.id); } catch (e) { this.d.log(`recheckHello ${r.id}: ${(e as Error).message}`); }
+      } else {
+        const timer = setTimeout(() => {
+          this.helloTimers.delete(timer);
+          if (this.stopped) return;
+          try { this.maybeHello(r.id); } catch (e) { this.d.log(`recheckHello ${r.id}: ${(e as Error).message}`); }
+        }, i * 150);
         timer.unref(); this.helloTimers.add(timer);
       }
     });
@@ -462,8 +474,21 @@ export class ChannelManager {
     const peers = new Map<string, PeerSummary>();
     for (const ch of this.list()) for (const row of this.peerBios(ch.id)) {
       let peer = peers.get(row.id);
-      if (!peer) { peer = { ...row, fingerprint: fingerprint(row.id), channels: [] }; peers.set(row.id, peer); }
-      else if ((row.aboutAt ?? 0) > (peer.aboutAt ?? 0)) Object.assign(peer, row);
+      if (!peer) {
+        peer = { ...row, fingerprint: fingerprint(row.id), channels: [] };
+        peers.set(row.id, peer);
+      } else {
+        if (row.about !== null && (peer.about === null || (row.aboutAt ?? 0) > (peer.aboutAt ?? 0))) {
+          peer.about = row.about;
+          peer.aboutAt = row.aboutAt;
+          if (row.name) peer.name = row.name;
+        } else if (peer.about === null && (row.aboutAt ?? 0) > (peer.aboutAt ?? 0)) {
+          peer.aboutAt = row.aboutAt;
+          if (row.name) peer.name = row.name;
+        } else if (!peer.name && row.name) {
+          peer.name = row.name;
+        }
+      }
       peer.channels.push({ id: ch.id, name: ch.name, kind: ch.kind, about: row.about, aboutAt: row.aboutAt });
     }
     return [...peers.values()];
@@ -471,6 +496,7 @@ export class ChannelManager {
 
   private bioRefresh = new Map<string, { at: number; timer?: ReturnType<typeof setTimeout> }>();
   private refreshPeerBio(ch: string, id: string): void {
+    if (this.stopped) return;
     const key = `${ch}:${id}`;
     const state = this.bioRefresh.get(key);
     const now = Date.now();
@@ -481,7 +507,7 @@ export class ChannelManager {
     } else if (!state.timer) {
       state.timer = setTimeout(() => {
         this.bioRefresh.delete(key);
-        if (this.row(ch)) this.refreshPeerBio(ch, id);
+        if (!this.stopped && this.row(ch)) this.refreshPeerBio(ch, id);
       }, 120_000 - (now - state.at));
       state.timer.unref();
     }
@@ -492,8 +518,10 @@ export class ChannelManager {
     const previous = this.memberRows(ch).find(m => m.id === from);
     const name = body.name.trim().slice(0, MAX_NAME) || null;
     const about = body.about ?? null;
-    const aboutChanged = previous?.about !== about;
-    const aboutAt = aboutChanged ? Date.now() : previous?.about_at ?? (about !== null ? Date.now() : null);
+    const prevAbout = previous?.about ?? null;
+    const aboutChanged = previous ? prevAbout !== about : about !== null;
+    const aboutAt = aboutChanged ? Date.now() : (previous?.about_at ?? null);
+    const nameChanged = !previous || previous.name !== name;
     const r = this.d.sql.run(
       `INSERT INTO members (ch, id, name, about, agent, present, joined_at, features, about_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
        ON CONFLICT (ch, id) DO UPDATE SET name = excluded.name, about = excluded.about, agent = excluded.agent, features = excluded.features, about_at = excluded.about_at`,
@@ -508,10 +536,17 @@ export class ChannelManager {
     );
     if (r.changes > 0) {
       this.emitChannel(ch);
-      if (aboutChanged) {
-        this.d.events.emit({ type: "peer_bio", ch, id: from, about, aboutAt });
+      if (aboutChanged) this.d.events.emit({ type: "peer_bio", ch, id: from, about, aboutAt });
+      if (nameChanged) {
+        const key = `${ch}:${from}`;
+        const prev = this.bioRefresh.get(key);
+        if (prev?.timer) clearTimeout(prev.timer);
+        if (aboutChanged) this.bioRefresh.set(key, { at: Date.now() });
+        else this.bioRefresh.delete(key);
+        this.d.channelChanged(ch);
+      } else if (aboutChanged) {
         this.refreshPeerBio(ch, from);
-      } else if (!previous || previous.name !== name) this.d.channelChanged(ch);
+      }
     }
     return { featureOnly: !!previous && previous.agent !== null && previous.name === name };
   }
@@ -737,7 +772,7 @@ export class ChannelManager {
       this.d.channelChanged(ch);
     }
     if (patch.shareBio !== undefined && Number(patch.shareBio) !== r.share_bio) {
-      this.recheckHellos();
+      this.maybeHello(ch);
       this.d.bioChanged?.();
     }
     return this.get(ch)!;

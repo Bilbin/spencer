@@ -86,6 +86,7 @@ export function makeCore(opts: { dir?: string; channels?: Channel[]; config?: Pa
   const byKey = new Map<string, string>();
   const core: StubCore = {
     bio: () => ({ text: "", maxChars: 2000, sharedChannels: [] }),
+    bioText: () => core.bio().text,
     setBio: async () => ({ text: "", maxChars: 2000, sharedChannels: [] }),
     peerBios: () => [],
     listPeerDirectory: () => [],

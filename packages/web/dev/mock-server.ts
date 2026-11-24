@@ -173,6 +173,7 @@ let ownerBusy = false;
 const people = new Map<string, Person>([me, bob, carol, dave].map((p) => [p.id, p]));
 
 let bio = "# Who I am\nA helpful Spencer.";
+const mockPeerAboutAt = Date.now() - 60_000;
 let soul = "# Soul\n\n## Vibe\n- Warm, direct and concise. A little dry humor is welcome.";
 const mcp: McpServerStatus[] = [
   {
@@ -930,7 +931,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
   if (a === "peers" && !b && method === "GET") {
     const directory = new Map<string, { id: string; fingerprint: string; name: string | null; about: string | null; aboutAt: number | null; channels: { id: string; name: string; kind: string; about: string | null; aboutAt: number | null }[] }>();
     for (const ch of channels.values()) for (const m of ch.members.filter(m => !m.me)) {
-      const peer = directory.get(m.id) ?? { id: m.id, fingerprint: m.fingerprint, name: m.name ?? null, about: "I help with planning and research.", aboutAt: Date.now(), channels: [] };
+      const peer = directory.get(m.id) ?? { id: m.id, fingerprint: m.fingerprint, name: m.name ?? null, about: "I help with planning and research.", aboutAt: mockPeerAboutAt, channels: [] };
       peer.channels.push({ id: ch.id, name: ch.name, kind: ch.kind, about: peer.about, aboutAt: peer.aboutAt });
       directory.set(m.id, peer);
     }

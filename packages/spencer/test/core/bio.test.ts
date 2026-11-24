@@ -1,13 +1,13 @@
 import WebSocket from "ws";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readBio, writeBio } from "../../src/bio.ts";
 import { RelayPool } from "../../src/net/relay-client.ts";
 import { ChannelManager } from "../../src/channels.ts";
 import { Sql, openDb } from "../../src/store/db.ts";
-import { generateIdentity } from "@spencer/protocol";
+import { generateIdentity, parseBody } from "@spencer/protocol";
 import { defaultConfig } from "../../src/config.ts";
 import type { DaemonEvent } from "../../src/contracts.ts";
 import { http, relayAt, startNode, tempDir, waitFor } from "./helpers.ts";
@@ -24,6 +24,14 @@ test("BIO storage is private, trimmed, atomic, UTF-16 bounded and removable", ()
     assert.throws(() => writeBio(t.dir, 42), /string/);
     writeBio(t.dir, " \n ");
     assert.equal(existsSync(join(t.dir, "BIO.md")), false);
+    assert.equal(readBio(t.dir), "");
+    // B1: hand-edited >2000-char BIO.md is capped safely and parses cleanly; non-ENOENT errors return "".
+    writeFileSync(join(t.dir, "BIO.md"), "a".repeat(2500), "utf8");
+    const capped = readBio(t.dir);
+    assert.equal(capped.length, 2000);
+    assert.ok(parseBody({ type: "hello", name: "Alice", agent: "spencer/0.1", about: capped }));
+    writeBio(t.dir, "");
+    mkdirSync(join(t.dir, "BIO.md"));
     assert.equal(readBio(t.dir), "");
   } finally { t.cleanup(); }
 });
@@ -99,11 +107,25 @@ test("single hello builder preserves BIO; peer updates are channel-local and thr
     assert.deepEqual(manager.peerBios("b"), []);
     t.mock.timers.tick(120_000);
     assert.equal(changes, 2);
-    manager.onHello("b", peer.id, { type: "hello", name: "Bob", agent: "test", about: "Newest" });
-    const directory = manager.listPeerDirectory();
+    // M1: rename + bio change in one hello is NOT throttled.
+    manager.onHello("a", peer.id, { type: "hello", name: "Bob", agent: "test", about: "Rapid 1" });
+    const beforeRename = changes;
+    manager.onHello("a", peer.id, { type: "hello", name: "Robert", agent: "test", about: "Rapid 2" });
+    assert.equal(changes, beforeRename + 1);
+    // M2: clearing bio in channel b does NOT hide a shared bio in channel a.
+    t.mock.timers.tick(1000);
+    manager.onHello("b", peer.id, { type: "hello", name: "Robert", agent: "test", about: "Newest" });
+    let directory = manager.listPeerDirectory();
     assert.equal(directory.length, 1);
     assert.equal(directory[0].about, "Newest");
     assert.equal(directory[0].channels.length, 2);
-    assert.equal(directory[0].aboutAt, 121000);
+    t.mock.timers.tick(1000);
+    manager.onHello("b", peer.id, { type: "hello", name: "Robert", agent: "test" });
+    directory = manager.listPeerDirectory();
+    assert.equal(directory[0].about, "Rapid 2");
+    // M8: initial hello with no bio does not stamp aboutAt.
+    const fresh = generateIdentity();
+    manager.onHello("b", fresh.id, { type: "hello", name: "NoBio", agent: "test" });
+    assert.equal(manager.peerBios("b").find(p => p.id === fresh.id)?.aboutAt, null);
   } finally { manager.stop(); db.close(); tmp.cleanup(); }
 });

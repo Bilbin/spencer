@@ -548,7 +548,7 @@ Turning them on or off reconfigures every conversation right away; no restart is
 | PUT | `/api/experimental` | `{enabled: boolean}` → `{enabled}`: turn experimental features (§7.6) on or off, saved as `experimental` in config.json |
 | GET | `/api/bio` | → `{text, maxChars: 2000, sharedChannels: {id, name, kind, trust}[]}`. Always available, independent of Experimental. |
 | PUT | `/api/bio` | `{text}` → updated BIO status. Trims text, validates UTF-16 `.length`, and writes `<dataDir>/BIO.md` atomically with mode 0600. Empty text deletes the file. Rechecks hellos and refreshes agent instructions. |
-| GET | `/api/peers` | → `{peers: PeerSummary[]}`. Present peers deduplicated by identity, excluding self. Each peer has `id`, `fingerprint`, `name`, `about`, `aboutAt`, and `channels: {id, name, kind, about, aboutAt}[]`. Top-level about comes from the newest channel row by `aboutAt`, including clearing updates. |
+| GET | `/api/peers` | → `{peers: PeerSummary[]}`. Present peers deduplicated by identity, excluding self. Each peer has `id`, `fingerprint`, `name`, `about`, `aboutAt`, and `channels: {id, name, kind, about, aboutAt}[]`. Top-level `about` prefers the newest non-null channel bio by `aboutAt` (null only when cleared everywhere). |
 | GET | `/api/soul` | → `{text, maxBytes}`: the owner's `<dataDir>/SOUL.md` (trimmed; `""` when there is none) |
 | PUT | `/api/soul` | `{text}` → `{text, maxBytes}`: save SOUL.md (mode 0600; empty text deletes it) and reconfigure every conversation with it (§7.1). 400 above `maxBytes` (16 KiB, UTF-8) |
 | GET | `/api/model` | → `ModelStatus` |
@@ -559,7 +559,7 @@ Turning them on or off reconfigures every conversation right away; no restart is
 | POST | `/api/auth/github-copilot/refresh` | → `ModelStatus` (re-fetches the account endpoint and live `/models` catalog from GitHub Copilot) |
 | POST | `/api/auth/github-copilot/logout` | → `ModelStatus` (forgets the saved sign-in) |
 | POST | `/api/auth/github-copilot/cli` | `{login}` → `ModelStatus`: reuse the GitHub Copilot CLI's saved sign-in for that login (`$COPILOT_HOME` / `~/.copilot/config.json`, or Linux Secret Service / macOS Keychain); 400 if there is none, the keyring is locked, or it has no Copilot |
-| WS | `/api/events?token=` | server → client events: `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", ...RelayStatus}` (any change of a relay connection's state), `{type:"presence", ch, id, presence, lastSeen?}` (a member's Spencer came online or went offline in channel `ch`; when *our* connection to a relay goes up or down, each of its channels is re-sent as a `channel` event instead, since every member's presence changes), `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"followup", followup: Followup}` (created or changed), `{type:"conversation", conversation: ConversationStatus}` (my timer or the conversation going on changed, §7.5), `{type:"model", model: ModelStatus}` (model, sign-in or GitHub CLI accounts changed), `{type:"experimental", enabled}` (experimental features turned on or off, §7.6), `{type:"status", ch, from, replyTo, state, activity?, ts}` (progress of a Spencer, possibly mine, on message `replyTo`; `state` as in §3.1, including the task states) |
+| WS | `/api/events?token=` | server → client events: `{type:"bio", bio: BioStatus}`, `{type:"peer_bio", ch, id, about, aboutAt}`, `{type:"channel", channel}`, `{type:"channel_removed", ch}` (left the channel), `{type:"message", ch, message}`, `{type:"transfer", transfer}`, `{type:"owner", item}`, `{type:"relay", ...RelayStatus}` (any change of a relay connection's state), `{type:"presence", ch, id, presence, lastSeen?}` (a member's Spencer came online or went offline in channel `ch`; when *our* connection to a relay goes up or down, each of its channels is re-sent as a `channel` event instead, since every member's presence changes), `{type:"owner_busy", busy}`, `{type:"mcp", servers: McpServer[]}`, `{type:"request", request: OwnerRequest}`, `{type:"followup", followup: Followup}` (created or changed), `{type:"conversation", conversation: ConversationStatus}` (my timer or the conversation going on changed, §7.5), `{type:"model", model: ModelStatus}` (model, sign-in or GitHub CLI accounts changed), `{type:"experimental", enabled}` (experimental features turned on or off, §7.6), `{type:"status", ch, from, replyTo, state, activity?, ts}` (progress of a Spencer, possibly mine, on message `replyTo`; `state` as in §3.1, including the task states) |
 
 Owner attachments are local-only files, not channel transfers. Each file can be at most 25 MiB. One owner message can attach at most 10 files and 50 MiB total. The private store holds at most 500 MiB. It removes files older than 30 days at startup and before uploads. The UI stages files on drop and uploads only after Send.
 
@@ -641,6 +641,10 @@ interface Followup { id: string;
   wakeOnReplyIn?: string;                         // owner: fires early when a peer writes in this channel
   createdAt: number; firedAt?: number; firedBy?: "time"|"reply";
   error?: string }                                // why it failed or was cancelled
+interface BioStatus { text: string; maxChars: number;
+  sharedChannels: { id: string; name: string; kind: "direct"|"group"; trust: "standard"|"full" }[] }
+interface PeerSummary { id: string; fingerprint: string; name: string | null; about: string | null; aboutAt: number | null;
+  channels: { id: string; name: string; kind: "direct"|"group"; about: string | null; aboutAt: number | null }[] }
 interface McpServer { name: string; transport: "stdio"|"http"; status: "connecting"|"connected"|"error"|"disabled"; error?: string;
   tools: { name: string; remote: string; description?: string; enabled: boolean }[] }   // name as exposed (mcp__<server>__<tool>); remote: the server's own; enabled: not in disabledTools
 ```
@@ -682,7 +686,7 @@ Environment variable overrides: `SPENCER_DATA_DIR`, `SPENCER_PORT`, `SPENCER_REL
 WS(S) and are normalized to the WebSocket endpoint.
 
 The data dir is mode 0700. Secrets and databases in it (`identity.json`, `api-token`, `config.json`,
-`spencer.sqlite`, `pi.sqlite` and their `-wal`/`-shm` files) are mode 0600, as is `SOUL.md` when Spencer writes it.
+`spencer.sqlite`, `pi.sqlite` and their `-wal`/`-shm` files) are mode 0600, as are `SOUL.md` and `BIO.md` when Spencer writes them.
 
 ### Public BIO and peer discovery
 

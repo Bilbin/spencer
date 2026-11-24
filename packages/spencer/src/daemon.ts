@@ -393,11 +393,11 @@ export class Daemon {
     if (s.pool) await step("relays", () => s.pool!.stop());
     if (s.outbox) await step("outbox", () => s.outbox!.stop());
     if (s.inbox) await step("inbox", () => s.inbox!.stop());
+    s.channels?.stop();
     if (s.agent) await step("agent", () => s.agent!.stop());
     if (s.transfers) await step("transfers", () => s.transfers!.stop());
     if (s.p2pAdapter) await step("p2p adapter", () => s.p2pAdapter!.stop());
     if (s.links) await step("links", () => s.links!.stop());
-    s.channels?.stop();
     if (s.db) await step("db", () => s.db!.close());
     if (s.lock) await step("lock", () => s.lock!.release());
     this.s = {};
@@ -561,6 +561,7 @@ export class Daemon {
       me: () => this.identity,
       bio: () => ({ text: readBio(this.dataDir), maxChars: MAX_ABOUT,
         sharedChannels: channels.list().filter(c => c.shareBio).map(({ id, name, kind, trust }) => ({ id, name, kind, trust })) }),
+      bioText: () => readBio(this.dataDir),
       setBio: async (text) => {
         writeBio(this.dataDir, text);
         channels.recheckHellos();
