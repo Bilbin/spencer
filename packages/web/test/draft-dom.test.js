@@ -12,7 +12,8 @@ Object.assign(globalThis, {
   KeyboardEvent: browser.KeyboardEvent,
   localStorage: browser.localStorage,
 });
-const { createDraftRecipientSelect, refreshDraftRecipientOptions, scrollAfterAcceptedFile } = await import("../public/draft-dom.js");
+const { createDraftRecipientSelect, createDraftRemoveButton, refreshDraftRecipientOptions, scrollAfterAcceptedFile } = await import("../public/draft-dom.js");
+const { getChannelDraftState, releaseRecipientAfterDefiniteFailure, removeDraft } = await import("../public/draft-state.js");
 const { scrollKeeper } = await import("../public/scroll.js");
 const originalSetInterval = globalThis.setInterval;
 globalThis.setInterval = () => 0;
@@ -40,6 +41,64 @@ test("recipient updates keep the attached picker and current choice in the DOM",
   assert.equal(picker.value, "");
   assert.equal(state.recipient, null);
   draftBox.remove();
+});
+
+test("dismissing an ambiguous draft unlocks the composer and recovers its pending text", async () => {
+  const state = getChannelDraftState(new Map(), "channel-a");
+  const uncertain = { file: { name: "possibly-sent.txt" }, status: "failed", uploadId: "stable-id", outcomeUnknown: true };
+  state.drafts.push(uncertain);
+  state.recipient = "member-a";
+  state.recipientLocked = true;
+  const recipientSelect = createDraftRecipientSelect([member("member-a", "Alice")], label);
+  recipientSelect.value = "member-a";
+  recipientSelect.disabled = true;
+  const remove = createDraftRemoveButton(uncertain, () => {
+    if (!removeDraft(state, uncertain)) return;
+    recipientSelect.disabled = state.recipientLocked;
+    view.sync();
+  });
+  assert.equal(remove.disabled, false);
+  assert.equal(createDraftRemoveButton({ ...uncertain, status: "uploading" }, () => {}).disabled, true);
+  const drafts = document.createElement("div");
+  drafts.append(remove, recipientSelect);
+  const textSent = [];
+  const view = composer({
+    label: "Message",
+    drafts,
+    canSend: () => state.drafts.some((draft) => draft.status !== "sent"),
+    isBusy: () => state.sending,
+    onSend: async (text) => {
+      state.sending = true;
+      try {
+        if (state.drafts.some((draft) => draft.status !== "sent")) return false;
+        textSent.push(text);
+        return true;
+      } finally {
+        state.sending = false;
+        releaseRecipientAfterDefiniteFailure(state);
+      }
+    },
+  });
+  document.body.append(view.form);
+  view.input.value = "send this message";
+  view.input.dispatchEvent(new Event("input", { bubbles: true }));
+  view.form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(textSent, []);
+  assert.equal(view.input.value, "send this message");
+  assert.equal(remove.disabled, false);
+
+  remove.click();
+  assert.deepEqual(state.drafts, []);
+  assert.equal(state.recipientLocked, false);
+  assert.equal(recipientSelect.disabled, false);
+  view.form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(textSent, ["send this message"]);
+  assert.equal(view.input.value, "");
+  view.form.remove();
 });
 
 test("typing leaves the draft DOM and live status untouched, and empty Send stays disabled", async () => {

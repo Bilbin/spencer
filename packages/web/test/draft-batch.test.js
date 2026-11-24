@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { draftFileError, hasDraftFile, uploadDraftBatch } from "../public/draft-batch.js";
-import { clearSentDraftsWhenNoWork, discardEmptyChannelDraftState, getChannelDraftState, isUploadOutcomeUnknown, markUploadFailure, releaseRecipientAfterDefiniteFailure, resolveUploadSuccess, selectDraftRecipient } from "../public/draft-state.js";
+import { clearSentDraftsWhenNoWork, discardEmptyChannelDraftState, getChannelDraftState, isUploadOutcomeUnknown, markUploadFailure, releaseRecipientAfterDefiniteFailure, removeDraft, resolveUploadSuccess, selectDraftRecipient } from "../public/draft-state.js";
 
 const draft = (name, file = { name }) => ({ file, status: "draft" });
 
@@ -57,6 +57,42 @@ test("a definite first-upload failure allows a recipient change with a fresh ret
   assert.equal(selectDraftRecipient(state, "member-b", () => "new-id"), true);
   assert.equal(item.uploadId, "new-id");
   assert.equal(state.recipient, "member-b");
+});
+
+test("dismissing an ambiguous draft keeps the lock until its send attempt has settled", () => {
+  const state = getChannelDraftState(new Map(), "channel-a");
+  const uncertain = { ...draft("possibly-sent.txt"), status: "failed", uploadId: "stable-id", outcomeUnknown: true };
+  state.drafts.push(uncertain);
+  state.recipient = "member-a";
+  state.recipientLocked = true;
+  state.sending = true;
+
+  assert.equal(removeDraft(state, uncertain), true);
+  assert.deepEqual(state.drafts, []);
+  assert.equal(state.recipientLocked, true);
+  assert.equal(releaseRecipientAfterDefiniteFailure(state), false);
+
+  state.sending = false;
+  clearSentDraftsWhenNoWork(state);
+  assert.equal(releaseRecipientAfterDefiniteFailure(state), true);
+  assert.equal(state.recipient, null);
+  assert.equal(state.recipientLocked, false);
+});
+
+test("dismissing one uncertain draft cannot unlock another uncertain, accepted, or in-flight draft", () => {
+  const state = getChannelDraftState(new Map(), "channel-a");
+  const removed = { ...draft("dismissed.txt"), status: "failed", outcomeUnknown: true };
+  const remaining = { ...draft("still-uncertain.txt"), status: "failed", outcomeUnknown: true };
+  state.drafts.push(removed, remaining);
+  state.recipientLocked = true;
+
+  assert.equal(removeDraft(state, removed), true);
+  assert.equal(releaseRecipientAfterDefiniteFailure(state), false);
+  remaining.outcomeUnknown = false;
+  remaining.status = "uploading";
+  assert.equal(releaseRecipientAfterDefiniteFailure(state), false);
+  remaining.status = "sent";
+  assert.equal(releaseRecipientAfterDefiniteFailure(state), false);
 });
 
 test("a later rejected retry cannot erase an earlier ambiguous outcome", () => {

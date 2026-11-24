@@ -174,6 +174,16 @@ test("http api: guards, state, owner + channel messages, invites, events ws", as
     const conflict = await http(port, "POST", uploadUrl, { body: Buffer.from("different bytes"), headers: { ...H, "Content-Type": "application/octet-stream" } });
     assert.equal(conflict.status, 409);
     assert.match(conflict.json().error, /already used for different content or recipient/);
+    for (const [code, expectedStatus] of [
+      ["bad_request", 400],
+      ["not_found", 404],
+      ["bad_state", 409],
+      ["conflict", 409],
+    ] as const) {
+      transferService.requestUpload = async () => { throw new TransferError(code, `synthetic ${code}`); };
+      const response = await http(port, "POST", uploadUrl, { body: Buffer.from("synthetic"), headers: { ...H, "Content-Type": "application/octet-stream" } });
+      assert.equal(response.status, expectedStatus, `${code} maps to ${expectedStatus}`);
+    }
     transferService.requestUpload = requestUpload;
     assert.equal((await http(port, "POST", uploadUrl, { body: Buffer.from("x"), headers: { ...H, "Content-Type": "application/json" } })).status, 415);
     assert.equal((await http(port, "POST", `/api/transfers/upload?ch=unknown&name=x`, { body: Buffer.from("x"), headers: { ...H, "Content-Type": "application/octet-stream" } })).status, 400);

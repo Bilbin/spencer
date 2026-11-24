@@ -69,7 +69,12 @@ class HttpError extends Error {
 function errorStatus(e: unknown): number {
   if (e instanceof HttpError || e instanceof UserError) return e.status;
   const err = e as { status?: unknown; statusCode?: unknown; code?: unknown; message?: unknown };
-  if (err?.code === "conflict") return 409;
+  switch (err?.code) {
+    case "bad_request": return 400;
+    case "not_found": return 404;
+    case "bad_state":
+    case "conflict": return 409;
+  }
   for (const s of [err?.status, err?.statusCode]) {
     if (typeof s === "number" && s >= 400 && s < 600) return s;
   }

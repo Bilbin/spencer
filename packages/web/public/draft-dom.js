@@ -9,6 +9,15 @@ export function createDraftRecipientSelect(members, formatMember) {
   );
 }
 
+export function createDraftRemoveButton(draft, onRemove) {
+  return h("button.draft-remove", {
+    type: "button",
+    "aria-label": `Remove ${draft.file.name}`,
+    disabled: draft.status === "uploading",
+    on: { click: onRemove },
+  }, "×");
+}
+
 export function refreshDraftRecipientOptions(select, state, members, formatMember) {
   if (!select) return;
   const selected = state.recipient ?? select.value;

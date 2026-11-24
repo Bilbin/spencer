@@ -23,14 +23,26 @@ export function resolveUploadSuccess(draft) {
 export function clearSentDraftsWhenNoWork(state) {
   if (state.drafts.some((draft) => draft.status !== "sent")) return false;
   state.drafts.splice(0, state.drafts.length);
-  state.recipient = null;
-  state.recipientLocked = false;
+  if (!state.sending) {
+    state.recipient = null;
+    state.recipientLocked = false;
+  }
   return true;
 }
 
 export function releaseRecipientAfterDefiniteFailure(state) {
-  if (state.drafts.some((draft) => draft.status === "sent" || draft.outcomeUnknown)) return false;
+  if (state.sending || state.drafts.some((draft) => draft.status === "sent" || draft.status === "uploading" || draft.status === "queued" || draft.outcomeUnknown)) return false;
   state.recipientLocked = false;
+  return true;
+}
+
+export function removeDraft(state, draft) {
+  if (draft.status === "uploading") return false;
+  const index = state.drafts.indexOf(draft);
+  if (index < 0) return false;
+  state.drafts.splice(index, 1);
+  clearSentDraftsWhenNoWork(state);
+  releaseRecipientAfterDefiniteFailure(state);
   return true;
 }
 

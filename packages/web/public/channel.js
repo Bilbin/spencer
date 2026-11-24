@@ -9,8 +9,8 @@ import { openModal, field } from "./modal.js";
 import { scrollKeeper } from "./scroll.js";
 import { navigate } from "./router.js";
 import { draftFileError, hasDraftFile, uploadDraftBatch } from "./draft-batch.js";
-import { createDraftRecipientSelect, refreshDraftRecipientOptions, scrollAfterAcceptedFile } from "./draft-dom.js";
-import { clearSentDraftsWhenNoWork, discardEmptyChannelDraftState, getChannelDraftState, markUploadFailure, releaseRecipientAfterDefiniteFailure, resolveUploadSuccess, selectDraftRecipient } from "./draft-state.js";
+import { createDraftRecipientSelect, createDraftRemoveButton, refreshDraftRecipientOptions, scrollAfterAcceptedFile } from "./draft-dom.js";
+import { clearSentDraftsWhenNoWork, discardEmptyChannelDraftState, getChannelDraftState, markUploadFailure, releaseRecipientAfterDefiniteFailure, removeDraft, resolveUploadSuccess, selectDraftRecipient } from "./draft-state.js";
 
 const NOTE_LABEL = {
   "not addressed": "Your Spencer stayed quiet: it was not addressed.",
@@ -700,6 +700,8 @@ export function channelView(main, chId) {
       return !!res;
     } finally {
       draftState.sending = false;
+      clearSentDraftsWhenNoWork(draftState);
+      releaseRecipientAfterDefiniteFailure(draftState);
       renderDrafts();
       discardEmptyChannelDraftState(attachmentDraftsByChannel, chId, draftState);
     }
@@ -740,7 +742,7 @@ export function channelView(main, chId) {
       icon("file", 16),
       h("span.draft-name", { title: d.file.name }, d.file.name),
       h("span.draft-state", { role: "status", "aria-live": "polite", title: d.error || "" }, d.status === "uploading" ? `Uploading ${d.progress ?? 0}%` : d.status === "queued" ? "Waiting to upload" : d.status === "failed" ? (d.outcomeUnknown ? "Outcome unknown · Retry same recipient" : "Failed · Send to retry") : d.status === "sent" ? (d.transfer?.state === "awaiting_approval" ? "Waiting for approval" : "Offered") : "Ready to send"),
-      h("button.draft-remove", { type: "button", "aria-label": `Remove ${d.file.name}`, disabled: d.status === "uploading" || d.outcomeUnknown, on: { click: () => { const i = drafts.indexOf(d); if (i >= 0) drafts.splice(i, 1); clearSentDraftsWhenNoWork(draftState); renderDrafts(); comp.sync(); } } }, "×"),
+      createDraftRemoveButton(d, () => { if (!removeDraft(draftState, d)) return; renderDrafts(); comp.sync(); }),
     ));
     draftList.replaceChildren(...nodes);
     if (recipientSelect) recipientSelect.hidden = drafts.length === 0;
