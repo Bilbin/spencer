@@ -1,4 +1,4 @@
-import { h } from "./dom.js";
+import { h, icon } from "./dom.js";
 
 export function createDraftRecipientSelect(members, formatMember) {
   return h(
@@ -33,4 +33,11 @@ export function refreshDraftRecipientOptions(select, state, members, formatMembe
 
 export function scrollAfterAcceptedFile(scrollers, messageText) {
   if (!messageText) [...scrollers].at(-1)?.();
+}
+
+export function createFilePicker(onFiles) {
+  const input = h("input", { type: "file", multiple: true, hidden: true });
+  const button = h("button.icon-btn.attach", { type: "button", "aria-label": "Attach files", title: "Attach files", on: { click: () => input.click() } }, icon("paperclip", 18));
+  input.addEventListener("change", () => { onFiles(Array.from(input.files ?? [])); input.value = ""; });
+  return { input, button };
 }

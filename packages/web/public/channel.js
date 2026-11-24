@@ -9,7 +9,7 @@ import { openModal, field } from "./modal.js";
 import { scrollKeeper } from "./scroll.js";
 import { navigate } from "./router.js";
 import { draftFileError, hasDraftFile, uploadDraftBatch } from "./draft-batch.js";
-import { createDraftRecipientSelect, createDraftRemoveButton, refreshDraftRecipientOptions, scrollAfterAcceptedFile } from "./draft-dom.js";
+import { createFilePicker, createDraftRecipientSelect, createDraftRemoveButton, refreshDraftRecipientOptions, scrollAfterAcceptedFile } from "./draft-dom.js";
 import { clearSentDraftsWhenNoWork, discardEmptyChannelDraftState, getChannelDraftState, markUploadFailure, releaseRecipientAfterDefiniteFailure, removeDraft, resolveUploadSuccess, selectDraftRecipient } from "./draft-state.js";
 
 const NOTE_LABEL = {
@@ -707,7 +707,7 @@ export function channelView(main, chId) {
     }
   };
   const completerHolder = { onKey: () => false };
-  const fileBtn = h("button.icon-btn.attach", { type: "button", "aria-label": "Send file", title: "Send file", on: { click: () => getC() && sendFileModal(getC()) } }, icon("paperclip", 18));
+  const { input: fileInput, button: fileBtn } = createFilePicker((files) => addFiles(files));
   const draftBox = h("div.draft-attachments", { hidden: true });
   const draftList = h("div.draft-list");
   const draftState = getChannelDraftState(attachmentDraftsByChannel, chId);
@@ -790,6 +790,9 @@ export function channelView(main, chId) {
       }
     } else files.push(...Array.from(e.dataTransfer.files ?? []));
     if (folderDropped) toast("Folders can’t be attached; drop regular files instead");
+    addFiles(files);
+  };
+  const addFiles = (files) => {
     let total = drafts.reduce((n, d) => n + d.file.size, 0);
     for (const file of files) {
       const error = draftFileError(file, MAX_FILE_BYTES);
@@ -802,6 +805,7 @@ export function channelView(main, chId) {
     renderDrafts();
     comp.sync();
   };
+  comp.form.append(fileInput);
   comp.form.addEventListener("dragover", (e) => {
     if (!hasDraggedFiles(e)) return;
     e.preventDefault();
