@@ -3,6 +3,9 @@ import { h, icon, humanSize, relTime, timeShort, timeFull, copyText, iconButton 
 import { api, attempt, toast } from "./api.js";
 import { S, TERMINAL, on, needsAction, upsertTransfer, channelTitle, setTransfers } from "./state.js";
 import { viewHeader, emptyState } from "./common.js";
+import { markdown } from "./md.js";
+import { openModal } from "./modal.js";
+import { htmlPreviewFrame } from "./html-preview.js";
 
 const STATE_LABEL = {
   awaiting_approval: "needs approval",
@@ -53,6 +56,28 @@ function progressFraction(p) {
 async function act(t, action) {
   const res = await attempt(() => api.transferAction(t.tid, action));
   if (res && res.tid) upsertTransfer(res);
+}
+
+const PREVIEW_EXT = /\.(?:md|markdown|html|htm)$/i;
+
+async function previewTransfer(t) {
+  const status = h("p.document-preview-status", { role: "status" }, "Loading preview…");
+  const modal = openModal({ title: `Preview · ${t.name}`, wide: true, cls: "document-preview", body: status });
+  try {
+    const result = await api.transferPreview(t.tid);
+    if (!modal.el.isConnected) return;
+    if (result.kind === "markdown") {
+      const rendered = h("div.document-preview-content.md", null, markdown(result.content, undefined, { htmlPreview: false }));
+      rendered.querySelectorAll("a").forEach((a) => a.replaceWith(...a.childNodes));
+      status.replaceWith(rendered);
+    } else if (result.kind === "html") {
+      status.replaceWith(htmlPreviewFrame(result.content, result.name));
+    } else {
+      status.textContent = "This file type is not supported for preview.";
+    }
+  } catch (err) {
+    if (modal.el.isConnected) status.textContent = `Preview unavailable: ${err instanceof Error ? err.message : String(err)}`;
+  }
 }
 
 /** A compact transfer card. opts.showChannel adds the channel name. */
@@ -123,7 +148,7 @@ export function transferCard(t, opts = {}) {
     quarantine = h(
       "div.quarantine",
       null,
-      h("div.quarantine-row", null, h("code.path", { title: t.path }, t.path), iconButton("copy", "Copy path", async () => toast((await copyText(t.path)) ? "Path copied" : "Copy failed", "info"), "sm")),
+      h("div.quarantine-row", null, h("code.path", { title: t.path }, t.path), PREVIEW_EXT.test(t.name) ? h("button.btn.sm", { type: "button", on: { click: () => previewTransfer(t) } }, "Preview") : null, iconButton("copy", "Copy path", async () => toast((await copyText(t.path)) ? "Path copied" : "Copy failed", "info"), "sm")),
       h("p.quarantine-note", null, icon("warn", 14), " In quarantine. Inspect it before you open it."),
     );
   }

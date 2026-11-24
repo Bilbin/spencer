@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import WebSocket from "ws";
+import { RelayError } from "../../src/net/relay-client.ts";
 import { TransferError } from "../../src/transfers/service.ts";
 import { http, relayAt, startNode, tempDir, waitFor } from "./helpers.ts";
 
@@ -185,9 +186,25 @@ test("http api: guards, state, owner + channel messages, invites, events ws", as
       assert.equal(response.status, expectedStatus, `${code} maps to ${expectedStatus}`);
     }
     transferService.requestUpload = requestUpload;
+    const preview = transferService.preview.bind(transferService);
+    transferService.preview = async () => { throw new TransferError("too_large", "preview is too large"); };
+    const previewTooLarge = await http(port, "GET", "/api/transfers/preview-test/preview", { headers: H });
+    assert.equal(previewTooLarge.status, 413);
+    transferService.preview = async () => { throw new TransferError("invalid_text", "preview is not valid UTF-8"); };
+    const previewInvalidText = await http(port, "GET", "/api/transfers/preview-test/preview", { headers: H });
+    assert.equal(previewInvalidText.status, 400);
+    transferService.preview = preview;
+
+    const createInvite = A.daemon.core.createInvite.bind(A.daemon.core);
+    A.daemon.core.createInvite = async () => { throw new RelayError("too_large", "relay envelope too large"); };
+    const relayTooLarge = await http(port, "POST", "/api/invites", { headers: H, body: { kind: "direct", name: "synthetic" } });
+    assert.equal(relayTooLarge.status, 400, "existing relay too_large failures retain their 400 status");
+    A.daemon.core.createInvite = createInvite;
     assert.equal((await http(port, "POST", uploadUrl, { body: Buffer.from("x"), headers: { ...H, "Content-Type": "application/json" } })).status, 415);
     assert.equal((await http(port, "POST", `/api/transfers/upload?ch=unknown&name=x`, { body: Buffer.from("x"), headers: { ...H, "Content-Type": "application/octet-stream" } })).status, 400);
     assert.equal((await http(port, "POST", "/api/transfers/abc/approve", { headers: H })).status, 404);
+    assert.equal((await http(port, "GET", "/api/transfers/tttttttttttttttttttttt/preview")).status, 401);
+    assert.equal((await http(port, "GET", "/api/transfers/tttttttttttttttttttttt/preview", { headers: H })).status, 404);
     assert.deepEqual((await http(port, "GET", "/api/mcp", { headers: H })).json(), { servers: [] });
     assert.equal((await http(port, "GET", "/api/nope", { headers: H })).status, 404);
 

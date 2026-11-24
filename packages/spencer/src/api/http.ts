@@ -7,6 +7,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { AgentService, Channel, ChannelMessage, CoreServices, TransferService } from "../contracts.ts";
 import type { EventBus } from "../events.ts";
 import { UserError } from "../channels.ts";
+import { TransferError } from "../transfers/service.ts";
 import { RelayError } from "../net/relay-client.ts";
 
 /** What the HTTP layer needs from the daemon. */
@@ -77,6 +78,10 @@ function errorStatus(e: unknown): number {
   }
   for (const s of [err?.status, err?.statusCode]) {
     if (typeof s === "number" && s >= 400 && s < 600) return s;
+  }
+  if (e instanceof TransferError) {
+    if (e.code === "invalid_text") return 400;
+    if (e.code === "too_large") return 413;
   }
   if (e instanceof RelayError) {
     switch (e.code) {
@@ -478,6 +483,9 @@ export class ApiServer {
           ...(body.to !== undefined ? { to: body.to as string } : {}),
         });
       }
+    }
+    if ((m = /^\/api\/transfers\/([A-Za-z0-9_-]{1,64})\/preview$/.exec(p)) && method === "GET") {
+      return await b.transfers().preview(m[1]);
     }
     if ((m = /^\/api\/transfers\/([A-Za-z0-9_-]{1,64})$/.exec(p)) && method === "GET") {
       const t = b.transfers().get(m[1]);

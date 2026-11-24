@@ -13,6 +13,7 @@ import type {
   OwnerItem,
   Transfer,
   TransferDeps,
+  TransferPreview,
   TransferRequest,
   TransferService,
   TransferUpload,
@@ -159,7 +160,7 @@ export class StubTransfers implements TransferService {
       expiresAt: now + 1000,
     };
   }
-  private nope(): Transfer {
+  private nope(): never {
     throw Object.assign(new Error("unknown transfer"), { status: 404 });
   }
   approve() {
@@ -185,6 +186,9 @@ export class StubTransfers implements TransferService {
   }
   get() {
     return undefined;
+  }
+  async preview(): Promise<TransferPreview> {
+    return this.nope();
   }
 }
 
