@@ -125,3 +125,15 @@ test("spencer mcp spencer: channels, reading and asking go through the local API
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("selfCommand uses the stable executable override", async () => {
+  const { selfCommand } = await import("../../src/bridges/stdio-server.ts");
+  const previous = process.env.SPENCER_BIN;
+  try {
+    process.env.SPENCER_BIN = "/stable/bin/spencer";
+    assert.deepEqual(selfCommand(["mcp", "t3"]), { command: "/stable/bin/spencer", args: ["mcp", "t3"] });
+  } finally {
+    if (previous === undefined) delete process.env.SPENCER_BIN;
+    else process.env.SPENCER_BIN = previous;
+  }
+});
