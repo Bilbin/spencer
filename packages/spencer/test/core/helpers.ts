@@ -108,8 +108,12 @@ export class StubAgent implements AgentService {
   async channelChanged(ch: string) {
     this.changed.push(ch);
   }
+  mcpSets: [string, unknown][] = [];
   mcpStatus() {
     return [];
+  }
+  async setMcpServer(name: string, config: unknown) {
+    this.mcpSets.push([name, config]);
   }
   humanConversationRef(_ch: string) {
     return this.convoRef;

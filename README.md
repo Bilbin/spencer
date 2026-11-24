@@ -114,6 +114,25 @@ The config file is `<dataDir>/config.json`. The data dir defaults to `~/.local/s
 }
 ```
 
+You can also add, edit, turn off and remove MCP servers on the **MCP servers** page; changes are saved to
+`config.json` and apply right away. Uncheck single tools there to turn just those off (saved as `disabledTools`, the
+server's own tool names); for example, keep T3 Code's `thread_list` and `thread_show` but not `thread_start`.
+
+### T3 Code
+
+Spencer ships two small stdio MCP servers for working with [T3 Code](https://t3.codes) on the same machine:
+
+- `spencer mcp t3` gives Spencer T3 Code's threads: `thread_list`, `thread_start`, `thread_send` and `thread_show`.
+  Added from the preset, these tools start turned off; check the ones Spencer may use.
+  It runs the `t3` CLI (found through `T3_BIN`, `PATH` or `~/.t3/runtime/versions`); `T3_PROJECT` is the default
+  project. Add it with one click on the MCP servers page (**T3 Code**).
+- `spencer mcp spencer` lets T3 Code threads (or Claude Code, Codex, Copilot) talk to your Spencer: `spencer_ask`
+  (a message in your owner chat, marked as coming from a T3 Code thread, and Spencer's answer),
+  `spencer_owner_messages`, `spencer_channels`, `spencer_read_channel` and `spencer_post_channel` (posts as you).
+  It reads the port and API token from the data dir. The MCP servers page shows the exact command to register.
+
+From a checkout, use `node packages/spencer/src/main.ts mcp t3` and so on.
+
 Set the default hub with `--relay URL` or `SPENCER_RELAY`. You can also choose a hub URL when creating an invite. The `--relay` value is saved on first run.
 
 Direct file transfer settings and their defaults:

@@ -54,6 +54,62 @@ test("McpManager: connects a stdio server, lists and calls tools, stops its chil
   assert.deepEqual(await mgr.call("echo", "echo", { text: "x" }), { text: "MCP server echo is not connected.", isError: true });
 });
 
+test("McpManager: servers are added, replaced and removed while running", async () => {
+  const mgr = new McpManager({});
+  let changes = 0;
+  mgr.onChange(() => changes++);
+  mgr.start();
+  await mgr.set("echo", ECHO);
+  await mgr.settled();
+  assert.equal(mgr.status()[0]!.status, "connected");
+  const pid = Number((await mgr.call("echo", "pid", {})).text);
+
+  await mgr.set("echo", { ...ECHO, disabled: true });
+  assert.deepEqual(mgr.status().map((s) => [s.name, s.status]), [["echo", "disabled"]]);
+  assert.equal(alive(pid), false, "the old child is stopped");
+  assert.equal(mgr.tools().length, 0);
+
+  await mgr.set("echo2", ECHO);
+  await mgr.settled();
+  assert.ok(mgr.tools().some((t) => t.name === "mcp__echo2__echo"));
+  const pid2 = Number((await mgr.call("echo2", "pid", {})).text);
+  await mgr.set("echo2", undefined);
+  assert.deepEqual(mgr.status().map((s) => s.name), ["echo"]);
+  assert.equal(alive(pid2), false);
+  assert.ok(changes >= 4);
+  await mgr.stop();
+});
+
+test("McpManager: overlapping edits of one server apply in order and leave no stray child", async () => {
+  const mgr = new McpManager({});
+  mgr.start();
+  await mgr.set("echo", ECHO);
+  await mgr.settled();
+  const pid = Number((await mgr.call("echo", "pid", {})).text);
+  await Promise.all([mgr.set("echo", ECHO), mgr.set("echo", { ...ECHO, disabled: true })]);
+  await mgr.settled();
+  assert.deepEqual(mgr.status().map((s) => [s.name, s.status]), [["echo", "disabled"]], "the last edit wins");
+  assert.equal(alive(pid), false);
+  await mgr.stop();
+});
+
+test("McpManager: single tools turn off and on without restarting the server", async () => {
+  const mgr = new McpManager({});
+  mgr.start();
+  await mgr.set("echo", ECHO);
+  await mgr.settled();
+  const pid = Number((await mgr.call("echo", "pid", {})).text);
+  await mgr.set("echo", { ...ECHO, disabledTools: ["echo"] });
+  assert.ok(!mgr.tools().some((t) => t.name === "mcp__echo__echo"), "hidden from the model");
+  assert.ok(mgr.tools().some((t) => t.name === "mcp__echo__pid"));
+  assert.equal(mgr.status()[0]!.tools.find((t) => t.remote === "echo")?.enabled, false, "still listed for the UI");
+  assert.deepEqual(await mgr.call("echo", "echo", { text: "x" }), { text: "The echo tool of MCP server echo is turned off.", isError: true });
+  assert.equal(Number((await mgr.call("echo", "pid", {})).text), pid, "same connection");
+  await mgr.set("echo", ECHO);
+  assert.ok(mgr.tools().some((t) => t.name === "mcp__echo__echo"));
+  await mgr.stop();
+});
+
 test("McpManager: a failing server reports an error and does not block", async () => {
   const mgr = new McpManager({ broken: { command: process.execPath, args: ["-e", "process.exit(3)"] } });
   mgr.start();

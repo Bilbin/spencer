@@ -21,7 +21,7 @@ import {
   type ServerFrame,
   convoRef,
 } from "@spencer/protocol";
-import { loadConfig, resolveConfig, type ModelConfig, type SpencerConfig } from "./config.ts";
+import { loadConfig, resolveConfig, type McpServerConfig, type ModelConfig, type SpencerConfig } from "./config.ts";
 import { spencerVersion } from "./version.ts";
 import type {
   AgentService,
@@ -42,6 +42,8 @@ import { Inbox, type StoredMessage } from "./net/inbox.ts";
 import { ChannelManager, UserError } from "./channels.ts";
 import { ApiServer } from "./api/http.ts";
 import { embedded } from "./sea.ts";
+import { t3Preset } from "./bridges/t3.ts";
+import { selfCommand } from "./bridges/stdio-server.ts";
 
 /** Incoming working-status updates older than this are a catch-up after being offline: dropped. */
 const STATUS_MAX_AGE_MS = 120_000;
@@ -354,6 +356,10 @@ export class Daemon {
       leaveChannel: (ch) => this.leave(ch),
       acceptInvite: (link) => channels.acceptInvite(link),
       setExperimental: (enabled) => this.saveExperimental(enabled),
+      mcpConfig: () => this.need("cfg").mcpServers,
+      mcpPresets: () => [t3Preset()],
+      spencerBridge: () => selfCommand(["mcp", "spencer", "--data-dir", this.dataDir]),
+      saveMcpServer: (name, config) => this.saveMcpServer(name, config),
       ...(webRoot ? { webRoot } : {}),
     });
     await s.api.listen(cfg.http.port);
@@ -675,6 +681,20 @@ export class Daemon {
       this.events.emit({ type: "experimental", enabled });
     }
     return { enabled };
+  }
+
+  /** Add, replace or (`undefined`) remove one MCP server: saved in config.json and (re)connected right away. */
+  async saveMcpServer(name: string, config: McpServerConfig | undefined): Promise<void> {
+    const servers: Record<string, McpServerConfig> = { ...this.need("cfg").mcpServers };
+    const key = (n: string) => n.replace(/-/g, "_");
+    const clash = Object.keys(servers).find((n) => n !== name && key(n) === key(name));
+    if (config && clash) throw new UserError(400, `name: too close to ${clash} (their tool names would collide)`);
+    if (config) servers[name] = config;
+    else if (!Object.hasOwn(servers, name)) throw new UserError(404, `no MCP server ${name}`);
+    else delete servers[name];
+    this.writeConfigKey("mcpServers", servers);
+    this.s.cfg = { ...this.need("cfg"), mcpServers: servers };
+    await this.s.agent?.setMcpServer?.(name, config);
   }
 
   /** Set (or with `undefined`, remove) one top-level key of config.json, atomically. */

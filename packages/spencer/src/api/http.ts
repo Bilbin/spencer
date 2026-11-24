@@ -9,6 +9,8 @@ import type { EventBus } from "../events.ts";
 import { UserError } from "../channels.ts";
 import { TransferError } from "../transfers/service.ts";
 import { RelayError } from "../net/relay-client.ts";
+import { type McpServerConfig, validateMcpServer } from "../config.ts";
+import type { McpPreset } from "../bridges/t3.ts";
 
 /** What the HTTP layer needs from the daemon. */
 export interface ApiBackend {
@@ -25,6 +27,13 @@ export interface ApiBackend {
   acceptInvite(link: string): Promise<Channel>;
   /** Turn experimental features (SOUL.md, Conversations channels) on or off. */
   setExperimental(enabled: boolean): Promise<{ enabled: boolean }>;
+  /** MCP servers as saved in config.json, and ready-made entries for the MCP servers page. */
+  mcpConfig?(): Record<string, McpServerConfig>;
+  mcpPresets?(): McpPreset[];
+  /** How other agents run `spencer mcp spencer` to talk to this Spencer. */
+  spencerBridge?(): McpServerConfig;
+  /** Add, replace or (`undefined`) remove an MCP server: saved to config.json and applied right away. */
+  saveMcpServer?(name: string, config: McpServerConfig | undefined): Promise<void>;
   /** Absolute path of the static UI, or undefined for the placeholder page. */
   webRoot?: string;
 }
@@ -510,7 +519,28 @@ export class ApiServer {
       }
     }
 
-    if (p === "/api/mcp" && method === "GET") return { servers: b.agent().mcpStatus() };
+    const mcpView = () => ({
+      servers: b.agent().mcpStatus(),
+      ...(b.mcpConfig ? { config: b.mcpConfig() } : {}),
+      ...(b.mcpPresets ? { presets: b.mcpPresets() } : {}),
+      ...(b.spencerBridge ? { spencerBridge: b.spencerBridge() } : {}),
+    });
+    if (p === "/api/mcp" && method === "GET") return mcpView();
+    if ((m = /^\/api\/mcp\/servers\/([^/]{1,64})$/.exec(p)) && (method === "PUT" || method === "DELETE")) {
+      if (!b.saveMcpServer) throw new HttpError(404, "editing MCP servers is not supported");
+      const name = decodeURIComponent(m[1]!);
+      let config: McpServerConfig | undefined;
+      if (method === "PUT") {
+        try {
+          config = validateMcpServer(name, await readJson(req));
+        } catch (e) {
+          if (e instanceof HttpError) throw e;
+          throw new HttpError(400, (e as Error).message);
+        }
+      }
+      await b.saveMcpServer(name, config);
+      return mcpView();
+    }
 
     if (p === "/api/soul") {
       experimental();

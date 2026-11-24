@@ -11,7 +11,7 @@
  */
 import type { DatabaseSync } from "node:sqlite";
 import type { ChatBody, ConvoRef, CrocInfo, FileBody, Identity, StatusState } from "@spencer/protocol";
-import type { ModelConfig, SpencerConfig, Policy } from "./config.ts";
+import type { McpServerConfig, ModelConfig, SpencerConfig, Policy } from "./config.ts";
 
 // ---------------------------------------------------------------- API shapes
 
@@ -208,7 +208,8 @@ export interface McpServerStatus {
   transport: "stdio" | "http";
   status: "connected" | "error" | "disabled" | "connecting";
   error?: string;
-  tools: { name: string; description?: string }[];
+  /** Every tool the server offers; `name` is the exposed name, `remote` the server's own (used by `disabledTools`). */
+  tools: { name: string; remote: string; description?: string; enabled: boolean }[];
 }
 
 // ---------------------------------------------------------------- events
@@ -424,6 +425,8 @@ export interface AgentService {
   /** A channel was created/joined/updated (settings, members): reconfigure its conversation. */
   channelChanged(ch: string): Promise<void>;
   mcpStatus(): McpServerStatus[];
+  /** Add, replace or (`undefined`) remove an MCP server while running. */
+  setMcpServer?(name: string, config: McpServerConfig | undefined): Promise<void>;
   /** Owner requests (`ask_owner`), newest first. */
   listRequests?(): OwnerRequest[];
   /** Approve (the owner conversation carries it out) or deny a pending request. */

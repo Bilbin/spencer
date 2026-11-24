@@ -205,7 +205,7 @@ test("http api: guards, state, owner + channel messages, invites, events ws", as
     assert.equal((await http(port, "POST", "/api/transfers/abc/approve", { headers: H })).status, 404);
     assert.equal((await http(port, "GET", "/api/transfers/tttttttttttttttttttttt/preview")).status, 401);
     assert.equal((await http(port, "GET", "/api/transfers/tttttttttttttttttttttt/preview", { headers: H })).status, 404);
-    assert.deepEqual((await http(port, "GET", "/api/mcp", { headers: H })).json(), { servers: [] });
+    assert.deepEqual((await http(port, "GET", "/api/mcp", { headers: H })).json().servers, []);
     assert.equal((await http(port, "GET", "/api/nope", { headers: H })).status, 404);
 
     // --- body limit
@@ -219,6 +219,62 @@ test("http api: guards, state, owner + channel messages, invites, events ws", as
     for (const s of sockets) s.terminate();
     await A.daemon.stop();
     await B.daemon.stop();
+    await relay.close();
+    t.cleanup();
+  }
+});
+
+test("http api: MCP servers are added, edited and removed from the UI, saved in config.json", async () => {
+  const t = tempDir();
+  const relay = await relayAt(t.dir);
+  const dir = join(t.dir, "a");
+  mkdirSync(dir);
+  const A = await startNode(dir, relay.url, "Alice");
+  try {
+    const port = A.daemon.port;
+    const H = { "X-Spencer-Token": A.daemon.token };
+    const saved = () => JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).mcpServers;
+    const view = (await http(port, "GET", "/api/mcp", { headers: H })).json();
+    assert.deepEqual(view.config, {});
+    assert.equal(view.presets[0].name, "t3code");
+    assert.deepEqual(view.presets[0].config.args.slice(-2), ["mcp", "t3"]);
+    assert.deepEqual(view.presets[0].config.disabledTools, ["thread_list", "thread_start", "thread_send", "thread_show"], "T3 tools start off");
+    assert.deepEqual(view.spencerBridge.args.slice(-4), ["mcp", "spencer", "--data-dir", dir]);
+
+    const put = (name: string, body: unknown) => http(port, "PUT", `/api/mcp/servers/${name}`, { headers: H, body });
+    assert.equal((await put("bad%20name", { command: "x" })).status, 400);
+    assert.equal((await put("x", { command: " " })).status, 400);
+    assert.equal((await put("x", { url: "ftp://host" })).status, 400);
+    assert.equal((await put("x", { command: "x", url: "http://h" })).status, 400);
+    assert.equal((await put("x", { command: "x", env: { A: 1 } })).status, 400);
+    assert.equal((await put("__proto__", { command: "x" })).status, 400);
+    assert.equal((await put("a--b", { command: "x" })).status, 400);
+    assert.equal((await http(port, "DELETE", "/api/mcp/servers/toString", { headers: H })).status, 404);
+    assert.deepEqual(saved(), {}, "nothing saved on errors");
+
+    const r = await put("tools", { command: " npx ", args: ["-y", "pkg"], env: {}, junk: true });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json().config, { tools: { command: "npx", args: ["-y", "pkg"] } });
+    assert.deepEqual(saved(), { tools: { command: "npx", args: ["-y", "pkg"] } });
+    assert.equal((await put("tools", { command: "npx", disabledTools: "x" })).status, 400);
+    assert.deepEqual((await put("tools", { command: "npx", disabledTools: ["a", "a"] })).json().config.tools, { command: "npx", disabledTools: ["a"] });
+    await put("tools", { command: "npx", disabled: true });
+    assert.deepEqual(saved(), { tools: { command: "npx", disabled: true } });
+    await put("web", { url: "https://example.com/mcp", headers: { Authorization: "Bearer t" } });
+    assert.equal((await put("we_b", { command: "x" })).status, 200);
+    assert.match((await put("we-b", { command: "x" })).text, /collide/, "tool names would clash with we_b");
+    assert.equal((await http(port, "DELETE", "/api/mcp/servers/we_b", { headers: H })).status, 200);
+    assert.equal((await http(port, "DELETE", "/api/mcp/servers/tools", { headers: H })).status, 200);
+    assert.equal((await http(port, "DELETE", "/api/mcp/servers/tools", { headers: H })).status, 404);
+    assert.deepEqual(saved(), { web: { url: "https://example.com/mcp", headers: { Authorization: "Bearer t" } } });
+    assert.deepEqual(A.daemon.config.mcpServers, saved(), "running config follows");
+    assert.deepEqual(
+      A.agent().mcpSets.map(([n, c]) => [n, c === undefined ? "removed" : "url" in (c as object) ? "url" : "command"]),
+      [["tools", "command"], ["tools", "command"], ["tools", "command"], ["web", "url"], ["we_b", "command"], ["we_b", "removed"], ["tools", "removed"]],
+      "each change applied right away",
+    );
+  } finally {
+    await A.daemon.stop();
     await relay.close();
     t.cleanup();
   }

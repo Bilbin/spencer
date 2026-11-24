@@ -34,6 +34,7 @@ import { END_MARKER, REPEAT_WINDOW, decideConversationReply, decideReply, isRepe
 import { TurnBudget } from "./budget.ts";
 import { ConversationStore, IDLE_MS, type ConvoRow } from "./conversations.ts";
 import type { FakeBrainHooks } from "./fake-brain.ts";
+import type { McpServerConfig } from "../config.ts";
 import { McpManager } from "./mcp.ts";
 import { ModelManager } from "./model-manager.ts";
 import { OWNER_KEY, PiRuntime, channelKey, type AgentRuntime, type ToolSpec } from "./runtime.ts";
@@ -1874,6 +1875,10 @@ export class SpencerAgent implements AgentService {
       return;
     }
     await this.configureChannel(c);
+  }
+
+  async setMcpServer(name: string, config: McpServerConfig | undefined): Promise<void> {
+    await this.mcp?.set(name, config);
   }
 
   mcpStatus(): McpServerStatus[] {
