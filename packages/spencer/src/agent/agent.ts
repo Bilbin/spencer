@@ -26,6 +26,7 @@ import type {
   IncomingChat,
   McpServerStatus,
   OutgoingChat,
+  OwnerAnswer,
   OwnerItem,
   OwnerRequest,
   SoulStatus,
@@ -1658,6 +1659,16 @@ export class SpencerAgent implements AgentService {
       .finally(() => this.ownerWaits.delete(p));
     this.ownerWaits.add(p);
     return { submissionId };
+  }
+
+  async ownerAnswer(submissionId: string, waitMs: number): Promise<OwnerAnswer> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const pending = new Promise<OwnerAnswer>((r) => (timer = setTimeout(() => r({ status: "pending" }), waitMs)));
+    try {
+      return await Promise.race([this.rt().waitAnswer(submissionId), pending]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async ownerTranscript(limit: number): Promise<OwnerItem[]> {

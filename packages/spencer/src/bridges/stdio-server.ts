@@ -21,7 +21,10 @@ export interface BridgeTool {
 }
 
 /** Thrown by a tool for an error the model should see (and maybe fix). */
-export class ToolError extends Error {}
+export class ToolError extends Error {
+  /** Whatever the failed command printed on stdout (it may still hold a result, e.g. a created thread's id). */
+  stdout?: string;
+}
 
 export async function serveStdio(name: string, instructions: string, tools: () => BridgeTool[]): Promise<void> {
   const server = new Server({ name, version: spencerVersion() }, { capabilities: { tools: {} }, instructions });

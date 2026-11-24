@@ -5,7 +5,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { type BridgeTool, ToolError, int, serveStdio, sleep, str } from "./stdio-server.ts";
+import { type BridgeTool, ToolError, int, serveStdio, str } from "./stdio-server.ts";
 
 const MAX_WAIT_S = 300;
 /** Marks messages in the owner chat that came from another agent, for the owner and for Spencer. */
@@ -68,6 +68,9 @@ interface OwnerItem {
   toolName?: string;
 }
 
+const MAX_ANSWER = 8_000;
+const capText = (t: string) => (t.length > MAX_ANSWER ? `${t.slice(0, MAX_ANSWER)}\n[…cut; the full answer is in the owner chat]` : t);
+
 export function spencerTools(dataDir: string, fetchImpl: typeof fetch = fetch): BridgeTool[] {
   async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
     const c = connection(dataDir);
@@ -93,8 +96,6 @@ export function spencerTools(dataDir: string, fetchImpl: typeof fetch = fetch): 
     }
     return (text ? JSON.parse(text) : {}) as T;
   }
-
-  // Snapshot and polls read the same window, so every older item in a poll is in the snapshot; tool steps count as items.
   const WINDOW = 500;
   const owner = async (limit: number) => (await api<{ items: OwnerItem[] }>("GET", `/api/owner/messages?limit=${limit}`)).items;
   const state = () => api<{ me: { name: string }; channels: Channel[]; ownerBusy: boolean }>("GET", "/api/state");
@@ -129,30 +130,19 @@ export function spencerTools(dataDir: string, fetchImpl: typeof fetch = fetch): 
       run: async (a) => {
         const text = `${VIA} ${str(a, "message", true)}`;
         const wait = int(a, "wait_seconds", 120, 0, MAX_WAIT_S);
-        const before = new Set((await owner(WINDOW)).map((i) => i.id));
-        await api("POST", "/api/owner/messages", { text });
-        const start = Date.now();
-        let idleSince = 0;
-        while (Date.now() - start < wait * 1000) {
-          await sleep(1_000);
-          const [items, s] = await Promise.all([owner(WINDOW), state()]);
-          const fresh = items.filter((i) => !before.has(i.id));
-          const mine = fresh.findIndex((i) => i.role === "user" && i.text === text);
-          const after = mine < 0 ? [] : fresh.slice(mine + 1);
-          if (s.ownerBusy || mine < 0) {
-            idleSince = 0;
-            continue;
-          }
-          if (after.some((i) => i.role === "assistant")) return fmtOwner(after);
-          // Not busy and nothing said: give a queued run a moment to start, then report what there is.
-          idleSince ||= Date.now();
-          if (Date.now() - idleSince > 5_000) return fmtOwner(after) || "Spencer finished without a reply.";
-        }
-        const items = await owner(WINDOW);
-        const fresh = items.filter((i) => !before.has(i.id));
-        const mine = fresh.findIndex((i) => i.role === "user" && i.text === text);
-        const sofar = mine < 0 ? "" : fmtOwner(fresh.slice(mine + 1));
-        return `Spencer is still working after ${wait}s; read its answer later with spencer_owner_messages.${sofar ? `\n\nSo far:\n${sofar}` : ""}`;
+        const { submissionId } = await api<{ submissionId: string }>("POST", "/api/owner/messages", { text });
+        // The answer to this very submission, so concurrent callers never get each other's replies.
+        const end = Date.now() + wait * 1000;
+        do {
+          const left = Math.ceil((end - Date.now()) / 1000);
+          const a = await api<{ status: string; text?: string; reason?: string }>(
+            "GET",
+            `/api/owner/answers/${encodeURIComponent(submissionId)}${left > 0 ? `?wait=${Math.min(left, 25)}` : ""}`,
+          );
+          if (a.status === "done") return capText(a.text?.trim() || "Spencer finished without a reply.");
+          if (a.status === "unanswered") throw new ToolError(`Spencer could not answer: ${a.reason ?? "unknown reason"}`);
+        } while (Date.now() < end);
+        return `Spencer is still working after ${wait}s; read its answer later with spencer_owner_messages.`;
       },
     },
     {

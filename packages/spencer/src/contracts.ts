@@ -145,6 +145,8 @@ export interface Transfer {
   expiresAt: number;
 }
 
+export type OwnerAnswer = { status: "pending" } | { status: "done"; text: string } | { status: "unanswered"; reason: string };
+
 export interface OwnerItem {
   id: string;
   role: "user" | "assistant" | "tool" | "note";
@@ -418,6 +420,8 @@ export interface AgentService {
   /** We sent a chat in a channel (owner typed it, or the owner agent sent it): record as channel context. */
   onOutgoingChat(msg: OutgoingChat): Promise<void>;
   ownerSend(text: string): Promise<{ submissionId: string }>;
+  /** The answer to one owner submission, waiting at most `waitMs`; "pending" when it is not ready yet. */
+  ownerAnswer?(submissionId: string, waitMs: number): Promise<OwnerAnswer>;
   ownerTranscript(limit: number): Promise<OwnerItem[]>;
   ownerBusy(): boolean;
   /** Informational note appended to the owner conversation (never starts a run). See TransferDeps.ownerNote. */

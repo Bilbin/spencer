@@ -90,6 +90,10 @@ test("http api: guards, state, owner + channel messages, invites, events ws", as
     assert.equal(om.status, 200);
     assert.equal(om.json().submissionId, "sub-1");
     assert.deepEqual(A.agent().ownerSends, ["hello spencer"]);
+    A.agent().ownerAnswers.set("7", "x".repeat(30_000));
+    assert.equal((await http(port, "GET", "/api/owner/answers/7?wait=1", { headers: H })).json().text.length, 20_000, "capped");
+    assert.deepEqual((await http(port, "GET", "/api/owner/answers/8", { headers: H })).json(), { status: "pending" });
+    assert.equal((await http(port, "GET", "/api/owner/answers/abc", { headers: H })).status, 404);
     assert.equal((await http(port, "POST", "/api/owner/messages", { headers: H, body: { text: "" } })).status, 400);
     assert.equal((await http(port, "POST", "/api/owner/messages", { headers: H, body: "{not json" })).status, 400);
     const tr = (await http(port, "GET", "/api/owner/messages?limit=10", { headers: H })).json();

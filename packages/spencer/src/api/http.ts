@@ -379,6 +379,13 @@ export class ApiServer {
       }
     }
 
+    if ((m = /^\/api\/owner\/answers\/(\d{1,20})$/.exec(p)) && method === "GET") {
+      const agent = b.agent();
+      if (!agent.ownerAnswer) throw new HttpError(404, "not supported");
+      const a = await agent.ownerAnswer(m[1]!, intParam(q.get("wait"), 0, 30) * 1000);
+      return a.status === "done" ? { ...a, text: a.text.slice(0, 20_000) } : a;
+    }
+
     if (p === "/api/requests" && method === "GET") return { items: b.agent().listRequests?.() ?? [] };
     if (p === "/api/followups" && method === "GET") return { items: b.agent().listFollowups?.() ?? [] };
     if ((m = /^\/api\/followups\/([A-Za-z0-9_-]{1,64})\/cancel$/.exec(p)) && method === "POST") {

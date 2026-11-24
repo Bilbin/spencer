@@ -62,12 +62,26 @@ async function t3(args: string[], stdin?: string, timeoutMs = CLI_TIMEOUT_MS): P
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (code === 0) resolve(out.trim());
-      else reject(new ToolError((err || out).trim() || `t3 ${args[0]} ${args[1]} failed (exit ${code})`));
+      if (code === 0) return resolve(out.trim());
+      const e = new ToolError((err || out).trim() || `t3 ${args[0]} ${args[1]} failed (exit ${code})`);
+      e.stdout = out.trim();
+      reject(e);
     });
     child.stdin.on("error", () => {}); // EPIPE when t3 exits without reading; its exit code tells the story
     child.stdin.end(stdin ?? "");
   });
+}
+
+/** The thread id (and link) from `t3 thread start --json` output, if it has one. */
+function parseStarted(out: string): { id: string; link: string } | undefined {
+  try {
+    const j = JSON.parse(out) as { threadId?: string; link?: string; thread?: { threadId?: string; link?: string } };
+    const id = j.threadId ?? j.thread?.threadId;
+    return id ? { id, link: j.link ?? j.thread?.link ?? "" } : undefined;
+  } catch {
+    const id = out.trim();
+    return /^[\w-]{8,}$/.test(id) ? { id, link: "" } : undefined;
+  }
 }
 
 interface ThreadJson {
@@ -148,17 +162,18 @@ export function t3Tools(defaultProject: string): BridgeTool[] {
         // Check every argument before the thread exists, so a bad one can't lose its id.
         const message = str(a, "message", true);
         const wait = int(a, "wait_seconds", 0, 0, MAX_WAIT_S);
-        const out = await t3(args, message);
-        let id = out;
-        let link = "";
+        let out: string;
+        let warning = "";
         try {
-          const j = JSON.parse(out) as { threadId?: string; link?: string; thread?: { threadId?: string; link?: string } };
-          id = j.threadId ?? j.thread?.threadId ?? out;
-          link = j.link ?? j.thread?.link ?? "";
-        } catch {
-          /* plain id */
+          out = await t3(args, message);
+        } catch (e) {
+          // t3 may print the new thread before it fails or times out; then the thread exists and must not be started again.
+          if (!(e instanceof ToolError) || !e.stdout || !parseStarted(e.stdout)) throw e;
+          out = e.stdout;
+          warning = `\nt3 reported a problem after creating it (${e.message}); do not start it again.`;
         }
-        return await afterWait(id, wait, `Started thread ${id}${link ? ` (${link})` : ""}.`, deadline);
+        const { id, link } = parseStarted(out) ?? { id: out, link: "" };
+        return await afterWait(id, wait, `Started thread ${id}${link ? ` (${link})` : ""}.${warning}`, deadline);
       },
     },
     {
